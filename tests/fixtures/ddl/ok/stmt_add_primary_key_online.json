@@ -1,0 +1,17 @@
+{
+  "class": "AddConstraint",
+  "schema": "dbo",
+  "table": "Ticket",
+  "constraint": {
+    "class": "PrimaryKey",
+    "name": "PK_Ticket",
+    "clustered": true,
+    "columns": [
+      {"class": "KeyColumn", "name": "TicketId", "descending": false}
+    ],
+    "options": [["DATA_COMPRESSION", "PAGE"]]
+  },
+  "for_column": null,
+  "with_check": null,
+  "exec_options": [["MAXDOP", "2"], ["ONLINE", "ON"]]
+}

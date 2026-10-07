@@ -1,0 +1,179 @@
+# Reusable: human recovery (A16). One action on one target, behind the approval of the deploy
+# environment. The caller (resolve.yml of the database repository) owns the dispatch form and runs
+# release.yml first, so `release` and `digest` name a release that was built again from its tag.
+name: resolve
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev, sandbox, test, preprod or prod
+        type: string
+        required: true
+      target:
+        description: Target id from azsqlcd.toml
+        type: string
+        required: true
+      release:
+        description: Release name from release.yml
+        type: string
+        required: true
+      digest:
+        description: Manifest digest from release.yml
+        type: string
+        required: true
+      action:
+        description: mark-applied, mark-not-applied, accept-drift, adopt-module, clear-run or rebind-environment
+        type: string
+        required: true
+      subject:
+        description: Migration file, object key, run id or environment name. The action decides which.
+        type: string
+        required: true
+      confirm_database:
+        description: Name of the database. The tool compares it with the target.
+        type: string
+        required: true
+      reason:
+        description: Why. Stored in azsqlcd.run.
+        type: string
+        required: true
+      force_no_readback:
+        description: mark-applied only. Record the migration with no catalog read-back.
+        type: boolean
+        default: false
+      runs-on:
+        description: 'JSON. Runner of the database job, for example {"group":"azsql-prod"}. Ephemeral runners only.'
+        type: string
+        required: true
+      runs-on-light:
+        description: JSON. Runner of the job that holds no database identity. Needs bash, gh and jq.
+        type: string
+        default: '"ubuntu-latest"'
+
+permissions: {}
+
+jobs:
+  targets:
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions:
+      contents: read
+    outputs:
+      target: ${{ steps.select.outputs.target }}
+    steps:
+      - id: inputs
+        name: Check the inputs
+        shell: bash
+        env:
+          ACTION: ${{ inputs.action }}
+          RELEASE: ${{ inputs.release }}
+          TARGET: ${{ inputs.target }}
+          SUBJECT: ${{ inputs.subject }}
+          CONFIRM_DATABASE: ${{ inputs.confirm_database }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in
+            mark-applied|mark-not-applied|accept-drift|adopt-module|clear-run|rebind-environment) ;;
+            *) echo "::error::input action is not a resolve action"; exit 1 ;;
+          esac
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          # One argument per line: a line break in a value would add an argument.
+          for value in "$TARGET" "$SUBJECT" "$CONFIRM_DATABASE" "$REASON"; do
+            case "$value" in
+              ''|*$'\n'*|*$'\r'*) echo "::error::an input is empty or holds a line break"; exit 1 ;;
+            esac
+          done
+      - id: fetch
+        name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - id: targets
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            targets
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --ci
+            github
+      - id: select
+        name: Select the target
+        shell: bash
+        env:
+          MATRIX: ${{ steps.targets.outputs.matrix }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          target=$(jq -c --arg id "$TARGET" '[.[] | select(.id == $id)] | if length == 1 then .[0] else empty end' <<< "$MATRIX")
+          if [ -z "$target" ]; then echo "::error::the environment has no target with this id"; exit 1; fi
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+  resolve:
+    needs: targets
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    # Every database command of the job writes its triage log here (docs/triage.md).
+    env:
+      AZSQLCD_LOG_DIR: azsqlcd-logs
+    steps:
+      - name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ fromJSON(needs.targets.outputs.target).deploy_client_id }}
+          tenant-id: ${{ fromJSON(needs.targets.outputs.target).tenant_id }}
+          allow-no-subscriptions: true
+      - uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          # The action name was checked against the closed list in the targets job.
+          args: |
+            resolve
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ inputs.target }}
+            --confirm-database
+            ${{ inputs.confirm_database }}
+            --reason
+            ${{ inputs.reason }}
+            --${{ inputs.action }}
+            ${{ inputs.subject }}
+            ${{ inputs.force_no_readback && '--force-no-readback' || '' }}
+            --ci
+            github
+      # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
+      - name: Upload the triage log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: azsqlcd-logs-${{ inputs.environment }}-${{ inputs.target }}-resolve
+          path: azsqlcd-logs
+          if-no-files-found: ignore
+          overwrite: true

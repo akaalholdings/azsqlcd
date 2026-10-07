@@ -1,0 +1,24 @@
+ALTER TABLE [sales].[Person] ADD [Added] varchar(100) MASKED WITH (FUNCTION = 'default()') NULL;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [OldGuid] DROP ROWGUIDCOL;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Notes] DROP SPARSE;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Wide] DROP SPARSE;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Email] ADD MASKED WITH (FUNCTION = 'email()');
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Phone] ADD MASKED WITH (FUNCTION = 'partial(0, "XXX-XXX-", 4)');
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Card] DROP MASKED;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Wide] varchar(50) NULL;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [PersonId] ADD NOT FOR REPLICATION;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [NewGuid] ADD ROWGUIDCOL;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Extra] ADD SPARSE;
+GO
+ALTER TABLE [sales].[Person] ALTER COLUMN [Wide] ADD SPARSE;
+GO

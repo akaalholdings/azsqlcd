@@ -1,0 +1,12 @@
+-- azsqlcd:migration 0001__change
+-- azsqlcd:mode tx
+CREATE TABLE [sales].[Price] (
+    [PriceId] int NOT NULL,
+    [ValidFrom] datetime2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL,
+    [ValidTo] datetime2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
+    CONSTRAINT [PK_Price] PRIMARY KEY CLUSTERED ([PriceId]),
+    PERIOD FOR SYSTEM_TIME ([ValidFrom], [ValidTo])
+)
+WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [sales].[Price_History], HISTORY_RETENTION_PERIOD = 6 MONTHS));
+GO
+ALTER TABLE [sales].[Rate] SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [sales].[Rate_History], DATA_CONSISTENCY_CHECK = OFF, HISTORY_RETENTION_PERIOD = 1 YEAR));

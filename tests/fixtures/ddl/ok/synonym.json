@@ -1,0 +1,3 @@
+[
+  {"class": "Synonym", "schema": "dbo", "name": "LegacyOrder", "target_schema": "sales", "target_name": "Order"}
+]

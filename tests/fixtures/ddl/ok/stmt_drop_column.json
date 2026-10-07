@@ -1,0 +1,1 @@
+{"class": "DropColumn", "schema": "dbo", "table": "Customer", "column": "LegacyCode"}

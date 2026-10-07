@@ -1,0 +1,4 @@
+ALTER TABLE [sales].[Buyer] ALTER COLUMN [Phone] DROP MASKED;
+GO
+ALTER TABLE [sales].[Buyer] ALTER COLUMN [Month] DROP MASKED;
+GO

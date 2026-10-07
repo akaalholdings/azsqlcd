@@ -1,0 +1,1 @@
+CHAIN_INVALID migrations/migrations.sum:1

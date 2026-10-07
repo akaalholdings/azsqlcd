@@ -1,0 +1,7 @@
+# The DBA team reviews every path that can reach a database (A29).
+# Replace the team. The branch ruleset requires a code-owner review.
+/schema/**        @akaalholdings/dba
+/migrations/**    @akaalholdings/dba
+/onboarding/**    @akaalholdings/dba
+/azsqlcd.toml     @akaalholdings/dba
+/.github/**       @akaalholdings/dba

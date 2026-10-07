@@ -1,0 +1,1 @@
+CHN002 migrations/0002__add_flag.sql:1

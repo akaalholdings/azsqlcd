@@ -1,0 +1,5 @@
+-- expect: SYNTAX
+-- says: end of text
+-- line: 5
+-- path: schema/tables/dbo.T.sql
+-- nothing here yet

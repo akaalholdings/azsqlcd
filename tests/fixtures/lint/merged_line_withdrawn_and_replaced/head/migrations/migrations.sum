@@ -1,0 +1,3 @@
+azsqlcd-sum 1
+0001__add_note.sql sha256:f1d7d80f0f02b1ac09068092d3bf472c321e41c67a9a258a0a4de5630df0f360 tx withdrawn
+0002__add_note_v2.sql sha256:2d5ab21b4814d4b9fcfc32efcc6d69fde754a2a28a6f9c3580c87a3e6f9a1395 tx replaces=0001__add_note.sql

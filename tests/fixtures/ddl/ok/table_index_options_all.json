@@ -1,0 +1,63 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Tuned",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "Id",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Code",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 10, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_Tuned_Code",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Code", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": [["ALLOW_PAGE_LOCKS", "OFF"], ["ALLOW_ROW_LOCKS", "OFF"], ["DATA_COMPRESSION", "NONE"], ["FILLFACTOR", "70"], ["IGNORE_DUP_KEY", "OFF"], ["OPTIMIZE_FOR_SEQUENTIAL_KEY", "OFF"], ["PAD_INDEX", "ON"], ["STATISTICS_NORECOMPUTE", "ON"]]
+      },
+      {
+        "class": "Index",
+        "name": "UX_Tuned_Id",
+        "unique": true,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Id", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": [["DATA_COMPRESSION", "ROW"], ["IGNORE_DUP_KEY", "ON"]]
+      }
+    ],
+    "temporal": null
+  }
+]

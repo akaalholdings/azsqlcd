@@ -1,0 +1,15 @@
+[
+  {
+    "class": "Sequence",
+    "schema": "dbo",
+    "name": "AuditSeq",
+    "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+    "start": 1000,
+    "increment": 5,
+    "minvalue": 1,
+    "maxvalue": 9223372036854775807,
+    "cycle": true,
+    "cached": true,
+    "cache_size": 50
+  }
+]

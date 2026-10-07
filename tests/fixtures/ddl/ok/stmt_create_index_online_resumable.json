@@ -1,0 +1,19 @@
+{
+  "class": "CreateIndex",
+  "schema": "sales",
+  "table": "OrderHeader",
+  "index": {
+    "class": "Index",
+    "name": "IX_OrderHeader_Customer_Open",
+    "unique": false,
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "CustomerId", "descending": false},
+      {"class": "KeyColumn", "name": "OrderDate", "descending": true}
+    ],
+    "included": ["TotalDue", "CurrencyCode"],
+    "filter": {"class": "Expression", "tokens": ["[Status]", "=", "'O'", "AND", "[ShippedUtc]", "IS", "NULL"]},
+    "options": [["DATA_COMPRESSION", "PAGE"], ["FILLFACTOR", "90"], ["OPTIMIZE_FOR_SEQUENTIAL_KEY", "OFF"]]
+  },
+  "exec_options": [["MAXDOP", "4"], ["MAX_DURATION", "60"], ["ONLINE", "ON"], ["RESUMABLE", "ON"], ["WAIT_AT_LOW_PRIORITY", "MAX_DURATION = 5 MINUTES, ABORT_AFTER_WAIT = SELF"]]
+}

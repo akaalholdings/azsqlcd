@@ -1,0 +1,68 @@
+[
+  {
+    "case": "comment between CREATE and OR",
+    "sent": "CREATE /* c1 */ OR ALTER PROCEDURE [azsqlcd_spike].[pd_1] AS SELECT 1 AS [x];",
+    "error": null,
+    "definition": "CREATE /* c1 */   PROCEDURE [azsqlcd_spike].[pd_1] AS SELECT 1 AS [x];"
+  },
+  {
+    "case": "newline and tab separators",
+    "sent": "CREATE\nOR\tALTER\r\nPROCEDURE [azsqlcd_spike].[pd_2] AS SELECT 1 AS [x];",
+    "error": null,
+    "definition": "CREATE\n\t\r\nPROCEDURE [azsqlcd_spike].[pd_2] AS SELECT 1 AS [x];"
+  },
+  {
+    "case": "comment between OR and ALTER and kind",
+    "sent": "CREATE OR /* c */ ALTER -- x\n VIEW [azsqlcd_spike].[pd_3] AS SELECT 1 AS [x];",
+    "error": null,
+    "definition": "CREATE  /* c */  -- x\n VIEW [azsqlcd_spike].[pd_3] AS SELECT 1 AS [x];"
+  },
+  {
+    "case": "trailing spaces and newlines after the text",
+    "sent": "CREATE OR ALTER PROCEDURE [azsqlcd_spike].[pd_4] AS SELECT 1 AS [x];  \n\n\n",
+    "error": null,
+    "definition": "CREATE   PROCEDURE [azsqlcd_spike].[pd_4] AS SELECT 1 AS [x];  \n\n\n"
+  },
+  {
+    "case": "trailing spaces and newlines after the text / ALTER",
+    "sent": "ALTER PROCEDURE [azsqlcd_spike].[pd_4] AS SELECT 1 AS [x];  \n\n\n",
+    "error": null,
+    "definition": "CREATE PROCEDURE [azsqlcd_spike].[pd_4] AS SELECT 1 AS [x];  \n\n\n"
+  },
+  {
+    "case": "leading blank lines and BOM-less text",
+    "sent": "\n\n  CREATE OR ALTER PROCEDURE [azsqlcd_spike].[pd_5] AS SELECT 1 AS [x];",
+    "error": null,
+    "definition": "\n\n  CREATE   PROCEDURE [azsqlcd_spike].[pd_5] AS SELECT 1 AS [x];"
+  },
+  {
+    "case": "leading blank lines and BOM-less text / ALTER",
+    "sent": "\n\n  ALTER PROCEDURE [azsqlcd_spike].[pd_5] AS SELECT 1 AS [x];",
+    "error": null,
+    "definition": "\n\n  CREATE PROCEDURE [azsqlcd_spike].[pd_5] AS SELECT 1 AS [x];"
+  },
+  {
+    "case": "PROC short kind, mixed case",
+    "sent": "Create Or Alter Proc [azsqlcd_spike].[pd_6] As Select 1 As [x];",
+    "error": null,
+    "definition": "Create   Proc [azsqlcd_spike].[pd_6] As Select 1 As [x];"
+  },
+  {
+    "case": "plain CREATE",
+    "sent": "CREATE PROCEDURE [azsqlcd_spike].[pd_7] AS SELECT 1 AS [x];",
+    "error": null,
+    "definition": "CREATE PROCEDURE [azsqlcd_spike].[pd_7] AS SELECT 1 AS [x];"
+  },
+  {
+    "case": "unicode and tab in body",
+    "sent": "CREATE OR ALTER PROCEDURE [azsqlcd_spike].[pd_8] AS SELECT N'\u00e9\u4e2d\t' AS [x];\t",
+    "error": null,
+    "definition": "CREATE   PROCEDURE [azsqlcd_spike].[pd_8] AS SELECT N'\u00e9\u4e2d\t' AS [x];\t"
+  },
+  {
+    "case": "unicode and tab in body / ALTER",
+    "sent": "ALTER PROCEDURE [azsqlcd_spike].[pd_8] AS SELECT N'\u00e9\u4e2d\t' AS [x];\t",
+    "error": null,
+    "definition": "CREATE PROCEDURE [azsqlcd_spike].[pd_8] AS SELECT N'\u00e9\u4e2d\t' AS [x];\t"
+  }
+]

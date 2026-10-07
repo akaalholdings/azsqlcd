@@ -1,0 +1,1 @@
+CHN003 migrations/migrations.sum:3

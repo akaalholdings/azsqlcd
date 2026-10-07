@@ -1,0 +1,142 @@
+# Pipeline of this database repository. The DBA team owns this file (CODEOWNERS).
+# Every reference to the tool ends with the same tag. Change all of them in one pull request.
+name: db
+
+on:
+  pull_request: # no paths filter: the required check `verify / verify` always reports
+  push:
+    branches: [main]
+    paths: ['schema/**', 'migrations/**', 'onboarding/**', 'azsqlcd.toml'] # what a release holds
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Existing release to promote again, for example r57
+        type: string
+        required: true
+      from_stage:
+        description: First stage that may deploy. Each earlier stage only proves that it holds the release.
+        type: choice
+        options: [dev, sandbox, test, preprod, prod]
+        default: dev
+  schedule:
+    - cron: '17 3 * * *' # drift report, UTC
+
+permissions: {}
+
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: akaalholdings/azsqlcd/.github/workflows/verify.yml@v0.1.0
+    permissions:
+      contents: read
+
+  # Push: builds the commit and creates release r<n>. Dispatch: builds the tag again and compares.
+  release:
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.1.0
+    permissions:
+      contents: write
+    with:
+      release: ${{ inputs.release }}
+
+  # Stage permissions are an upper limit. Inside stage.yml each job takes only what it needs:
+  # contents write = attach plan.json and report.json to the release; id-token = plan and deploy
+  # jobs, each bound to an environment; actions read = approvers of the run; issues = incident issue.
+  # `gated` must equal `gated` of the environment in azsqlcd.toml.
+  dev:
+    needs: release
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.1.0
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+      issues: write
+    with:
+      environment: dev
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      gated: false
+      runs-on: '{"group":"azsql-nonprod"}'
+      check-only: ${{ contains(fromJSON('["sandbox","test","preprod","prod"]'), inputs.from_stage) }}
+
+  sandbox:
+    needs: [release, dev]
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.1.0
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+      issues: write
+    with:
+      environment: sandbox
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      gated: false
+      runs-on: '{"group":"azsql-nonprod"}'
+      check-only: ${{ contains(fromJSON('["test","preprod","prod"]'), inputs.from_stage) }}
+
+  test:
+    needs: [release, sandbox]
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.1.0
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+      issues: write
+    with:
+      environment: test
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      gated: true
+      runs-on: '{"group":"azsql-nonprod"}'
+      check-only: ${{ contains(fromJSON('["preprod","prod"]'), inputs.from_stage) }}
+
+  preprod:
+    needs: [release, test]
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.1.0
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+      issues: write
+    with:
+      environment: preprod
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      gated: true
+      runs-on: '{"group":"azsql-nonprod"}'
+      check-only: ${{ inputs.from_stage == 'prod' }}
+
+  prod:
+    needs: [release, preprod]
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.1.0
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+      issues: write
+    with:
+      environment: prod
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      gated: true
+      runs-on: '{"group":"azsql-prod"}'
+
+  drift:
+    if: ${{ github.event_name == 'schedule' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { environment: dev, runs-on: '{"group":"azsql-nonprod"}' }
+          - { environment: sandbox, runs-on: '{"group":"azsql-nonprod"}' }
+          - { environment: test, runs-on: '{"group":"azsql-nonprod"}' }
+          - { environment: preprod, runs-on: '{"group":"azsql-nonprod"}' }
+          - { environment: prod, runs-on: '{"group":"azsql-prod"}' }
+    uses: akaalholdings/azsqlcd/.github/workflows/drift.yml@v0.1.0
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: ${{ matrix.environment }}
+      runs-on: ${{ matrix.runs-on }}

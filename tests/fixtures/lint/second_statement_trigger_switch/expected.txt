@@ -1,0 +1,3 @@
+# TQ-01: DISABLE is no reserved word and stands in no list of statement words; the closed rule
+# has no place for it after the end of ALTER TABLE
+MODEL_STATEMENT migrations/0001__change.sql:4

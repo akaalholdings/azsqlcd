@@ -1,0 +1,3 @@
+DROP_CONSTRAINT migrations/0001__change.sql:3
+MODEL_STATEMENT migrations/0001__change.sql:3
+MODEL_STATEMENT migrations/0001__change.sql:4

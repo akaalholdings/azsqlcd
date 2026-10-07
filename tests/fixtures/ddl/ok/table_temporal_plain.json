@@ -1,0 +1,74 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Team",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "TeamId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Name",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 100, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ValidFrom",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 7},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": "ROW_START",
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ValidTo",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 7},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": "ROW_END",
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Team",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "TeamId", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [],
+    "temporal": {"class": "Temporal", "period_start": "ValidFrom", "period_end": "ValidTo", "history_schema": "dbo", "history_table": "Team_History", "retention": null}
+  }
+]

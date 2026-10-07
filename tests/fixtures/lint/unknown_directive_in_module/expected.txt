@@ -1,0 +1,4 @@
+DIR001 schema/procedures/sales.usp_Report.sql:1
+DIR001 schema/procedures/sales.usp_Report.sql:2
+DIR001 schema/procedures/sales.usp_Report.sql:5
+# near-miss: DIR002

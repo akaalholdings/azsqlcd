@@ -1,0 +1,15 @@
+[
+  {
+    "class": "Sequence",
+    "schema": "sales",
+    "name": "InvoiceNo",
+    "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 18, "scale": 0},
+    "start": -100,
+    "increment": -1,
+    "minvalue": -1000000,
+    "maxvalue": -1,
+    "cycle": false,
+    "cached": false,
+    "cache_size": null
+  }
+]

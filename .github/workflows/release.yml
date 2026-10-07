@@ -1,0 +1,146 @@
+# Reusable: build once.
+#   Push to main, input empty:  job `create` builds the commit and creates the release r<seq>.
+#   Input given (a dispatch):   job `existing` checks out the tag, builds again, compares with the
+#                               stored release and creates nothing (A23).
+# The release name always comes from the tool output. User input is only compared with it.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Empty on a push to main. Else an existing release, for example r57.
+        type: string
+        default: ''
+      runs-on:
+        description: JSON. Needs bash, gh and git.
+        type: string
+        default: '"ubuntu-latest"'
+    outputs:
+      release:
+        description: Release name, r<release_seq>
+        value: ${{ jobs.create.outputs.release || jobs.existing.outputs.release }}
+      digest:
+        description: Manifest digest. Every later job checks the downloaded release against it.
+        value: ${{ jobs.create.outputs.digest || jobs.existing.outputs.digest }}
+
+permissions: {}
+
+jobs:
+  create:
+    if: ${{ github.event_name == 'push' && inputs.release == '' }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    permissions:
+      contents: write
+    outputs:
+      release: ${{ steps.build.outputs.release }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: build
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            build
+            --commit
+            ${{ github.sha }}
+            --out
+            dist
+            --ci
+            github
+      - id: publish
+        name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ steps.build.outputs.release }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          hex='^[0-9a-f]{64}$'
+          if ! [[ "$RELEASE" =~ $name && "$DIGEST" =~ $hex ]]; then
+            echo "::error::the build gave no release name or no digest"
+            exit 1
+          fi
+          if gh release view "$RELEASE" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # A second run for the same commit. Nothing is created; the stored release must match.
+            # manifest.json is canonical JSON and the digest is its sha256: equal bytes, equal digest.
+            gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p manifest.json -D stored
+            if ! cmp -s stored/manifest.json dist/manifest.json; then
+              echo "::error::release $RELEASE exists and differs from a build of this commit"
+              exit 1
+            fi
+            exit 0
+          fi
+          if tag_commit=$(git rev-parse -q --verify "refs/tags/$RELEASE^{commit}"); then
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $RELEASE exists at another commit; a release cannot be created on it"
+              exit 1
+            fi
+          fi
+          gh release create "$RELEASE" dist/bundle.tar dist/manifest.json -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$RELEASE" --notes "digest $DIGEST"
+
+  existing:
+    if: ${{ inputs.release != '' }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.build.outputs.release }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - id: name
+        name: Check the release name
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$REQUESTED" =~ $name ]]; then
+            echo "::error::input release must match ^r[0-9]+\$"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.release }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: commit
+        shell: bash
+        run: echo "sha=$(git rev-parse --verify 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            build
+            --commit
+            ${{ steps.commit.outputs.sha }}
+            --out
+            dist
+            --ci
+            github
+      - id: compare
+        name: Compare the build with the stored release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.release }}
+          RELEASE: ${{ steps.build.outputs.release }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE" != "$REQUESTED" ]; then
+            echo "::error::the tag $REQUESTED does not build the release of that name"
+            exit 1
+          fi
+          # manifest.json is canonical JSON and the digest is its sha256: equal bytes, equal digest.
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p manifest.json -D stored
+          if ! cmp -s stored/manifest.json dist/manifest.json; then
+            echo "::error::release $RELEASE: the stored manifest differs from a build of the tag"
+            exit 1
+          fi

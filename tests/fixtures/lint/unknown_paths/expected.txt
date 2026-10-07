@@ -1,0 +1,4 @@
+UNKNOWN_PATH migrations/notes.txt:1
+UNKNOWN_PATH schema/misc/sales.Helper.sql:1
+UNKNOWN_PATH schema/tables/archive/sales.Old.sql:1
+UNKNOWN_PATH schema/views/readme.md:1

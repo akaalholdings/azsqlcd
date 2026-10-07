@@ -1,0 +1,17 @@
+{
+  "class": "CreateIndex",
+  "schema": "sales",
+  "table": "Order",
+  "index": {
+    "class": "Index",
+    "name": "NCCI_Order",
+    "unique": false,
+    "clustered": false,
+    "columns": [],
+    "included": ["CustomerId", "Total"],
+    "filter": {"class": "Expression", "tokens": ["[Total]", ">", "0"]},
+    "options": [["COMPRESSION_DELAY", "30"]],
+    "columnstore": true
+  },
+  "exec_options": []
+}

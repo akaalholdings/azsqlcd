@@ -1,0 +1,1 @@
+{"class": "AlterSequence", "schema": "sales", "name": "OrderNo", "restart": true, "restart_with": null, "increment": null, "minvalue": null, "maxvalue": null, "cycle": null, "cached": null, "cache_size": null}

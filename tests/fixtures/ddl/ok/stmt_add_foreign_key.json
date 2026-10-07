@@ -1,0 +1,9 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "OrderLine",
+  "constraint": {"class": "ForeignKey", "name": "FK_OrderLine_OrderHeader", "columns": ["OrderId"], "ref_schema": "sales", "ref_table": "OrderHeader", "ref_columns": ["OrderId"], "on_delete": "CASCADE", "on_update": "SET NULL"},
+  "for_column": null,
+  "with_check": null,
+  "exec_options": []
+}

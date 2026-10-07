@@ -1,0 +1,1 @@
+{"class": "AlterColumnProperty", "schema": "sales", "table": "Document", "column": "DocumentId", "add": true, "property": "NOT FOR REPLICATION"}

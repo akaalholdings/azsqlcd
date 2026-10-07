@@ -1,0 +1,1 @@
+{"class": "DropIndex", "schema": "sales", "table": "OrderHeader", "name": "IX_OrderHeader_Customer_Open"}

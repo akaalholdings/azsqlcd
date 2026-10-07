@@ -1,0 +1,57 @@
+[project]
+name = "azsqlcd"
+version = "0.1.0"
+description = "End-to-end CI/CD for Azure SQL Database: object files in git, proven migrations, guarded deploys"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [
+    { name = "azsqlcd contributors" },
+]
+# The core is stdlib only. Offline commands (lint, verify, gen, build) need no third-party package.
+dependencies = []
+
+[project.optional-dependencies]
+# Database commands only. session.py is the one module that imports the driver.
+db = [
+    "mssql-python==1.15.0",
+    "azure-identity>=1.23.0",
+]
+
+[project.scripts]
+azsqlcd = "azsqlcd.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/azsqlcd"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.407",
+    "pytest>=8.4.0",
+    "pyyaml>=6.0.3",
+    "ruff>=0.14.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests/unit"]
+addopts = "--import-mode=importlib"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pyright]
+# scripts/ uses names of the package: a rename must fail in CI, not in the owner's live run
+include = ["src", "scripts"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"

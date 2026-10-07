@@ -1,0 +1,254 @@
+# Reusable: onboarding of one target (Part 2 (c)).
+#   export            plan identity, read only. The object files are an artefact for a pull request.
+#   baseline-report   plan identity, read only. The report is an artefact.
+#   baseline          deploy identity, behind the approval of the deploy environment. Writes state rows.
+# The caller (onboard.yml of the database repository) owns the dispatch form and runs release.yml
+# first, so `release` and `digest` name a release that was built again from its tag.
+name: onboard
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev, sandbox, test, preprod or prod
+        type: string
+        required: true
+      target:
+        description: Target id from azsqlcd.toml
+        type: string
+        required: true
+      action:
+        description: export, baseline-report or baseline
+        type: string
+        required: true
+      release:
+        description: Release name from release.yml
+        type: string
+        required: true
+      digest:
+        description: Manifest digest from release.yml
+        type: string
+        required: true
+      confirm_database:
+        description: Name of the database (baseline-report and baseline). The tool compares it with the target.
+        type: string
+        default: ''
+      runs-on:
+        description: 'JSON. Runner of the database jobs, for example {"group":"azsql-nonprod"}. Ephemeral runners only.'
+        type: string
+        required: true
+      runs-on-light:
+        description: JSON. Runner of the job that holds no database identity. Needs bash, gh and jq.
+        type: string
+        default: '"ubuntu-latest"'
+
+permissions: {}
+
+jobs:
+  targets:
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions:
+      contents: read
+    outputs:
+      target: ${{ steps.select.outputs.target }}
+    steps:
+      - id: inputs
+        name: Check the inputs
+        shell: bash
+        env:
+          ACTION: ${{ inputs.action }}
+          RELEASE: ${{ inputs.release }}
+          TARGET: ${{ inputs.target }}
+          CONFIRM_DATABASE: ${{ inputs.confirm_database }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in
+            export) ;;
+            baseline-report|baseline)
+              if [ -z "$CONFIRM_DATABASE" ]; then echo "::error::input confirm_database is required for $ACTION"; exit 1; fi ;;
+            *) echo "::error::input action must be export, baseline-report or baseline"; exit 1 ;;
+          esac
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          # One argument per line: a line break in a value would add an argument.
+          for value in "$TARGET" "$CONFIRM_DATABASE"; do
+            case "$value" in
+              *$'\n'*|*$'\r'*) echo "::error::an input holds a line break"; exit 1 ;;
+            esac
+          done
+      - id: fetch
+        name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - id: targets
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            targets
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --ci
+            github
+      - id: select
+        name: Select the target
+        shell: bash
+        env:
+          MATRIX: ${{ steps.targets.outputs.matrix }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          target=$(jq -c --arg id "$TARGET" '[.[] | select(.id == $id)] | if length == 1 then .[0] else empty end' <<< "$MATRIX")
+          if [ -z "$target" ]; then echo "::error::the environment has no target with this id"; exit 1; fi
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+  # export and baseline-report: read only, plan identity, no approval.
+  read:
+    needs: targets
+    if: ${{ inputs.action == 'export' || inputs.action == 'baseline-report' }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment }}-plan
+    permissions:
+      contents: read
+      id-token: write
+    # Every database command of the job writes its triage log here (docs/triage.md).
+    env:
+      AZSQLCD_LOG_DIR: azsqlcd-logs
+    steps:
+      # The files of the release commit: azsqlcd.toml for export, onboarding/ for the report.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.release }}
+          persist-credentials: false
+      - name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - id: login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ fromJSON(needs.targets.outputs.target).plan_client_id }}
+          tenant-id: ${{ fromJSON(needs.targets.outputs.target).tenant_id }}
+          allow-no-subscriptions: true
+      - if: ${{ inputs.action == 'export' }}
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          args: |
+            export
+            --root
+            .
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ inputs.target }}
+            --out
+            export
+            --ci
+            github
+      - if: ${{ inputs.action == 'baseline-report' }}
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          args: |
+            baseline
+            --report-only
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ inputs.target }}
+            --confirm-database
+            ${{ inputs.confirm_database }}
+            --ci
+            github
+      # Also after a tool exit that is not 0: the report of a baseline that differs is the result.
+      # Not when the login failed: the tool did not run, and "no files" would hide the first error.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() && steps.login.outcome == 'success' }}
+        with:
+          name: onboard-${{ inputs.action }}-${{ inputs.environment }}-${{ inputs.target }}
+          path: ${{ inputs.action == 'export' && 'export' || format('onboarding/{0}', inputs.environment) }}
+          if-no-files-found: error
+          overwrite: true
+      # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
+      - name: Upload the triage log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: azsqlcd-logs-${{ inputs.environment }}-${{ inputs.target }}-read
+          path: azsqlcd-logs
+          if-no-files-found: ignore
+          overwrite: true
+
+  # baseline: writes the state rows. Deploy identity, behind the approval of the deploy environment.
+  baseline:
+    needs: targets
+    if: ${{ inputs.action == 'baseline' }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    # Every database command of the job writes its triage log here (docs/triage.md).
+    env:
+      AZSQLCD_LOG_DIR: azsqlcd-logs
+    steps:
+      - name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ fromJSON(needs.targets.outputs.target).deploy_client_id }}
+          tenant-id: ${{ fromJSON(needs.targets.outputs.target).tenant_id }}
+          allow-no-subscriptions: true
+      - uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          args: |
+            baseline
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ inputs.target }}
+            --confirm-database
+            ${{ inputs.confirm_database }}
+            --ci
+            github
+      # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
+      - name: Upload the triage log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: azsqlcd-logs-${{ inputs.environment }}-${{ inputs.target }}-baseline
+          path: azsqlcd-logs
+          if-no-files-found: ignore
+          overwrite: true

@@ -1,0 +1,4 @@
+index:[sales].[Account].[idx1]=[IX_Account_Opened]
+constraint:[sales].[PK__Account__3214EC07]=[PK_Account]
+constraint:[sales].[DF__Account__Balance]=[DF_Account_Balance]
+constraint:[sales].[CK__Account__1A2B]=[CK_Account_Old]

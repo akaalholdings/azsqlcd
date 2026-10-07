@@ -1,0 +1,2 @@
+table:[sales].[Ordr]=[Order]
+column:[sales].[Order].[Note]=[Remark]

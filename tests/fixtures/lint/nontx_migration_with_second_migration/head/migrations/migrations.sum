@@ -1,0 +1,4 @@
+azsqlcd-sum 1
+0001__add_note.sql sha256:f1d7d80f0f02b1ac09068092d3bf472c321e41c67a9a258a0a4de5630df0f360 tx
+0002__ix_order_status.sql sha256:75d82a88b322e4d6d0400bce34f9c1898c352df953df3b4a1528ad07563413ba nontx
+0003__add_flag.sql sha256:153ac92ebd740baf3feff557107eb16efe4ba96e809caf51da302e14c3c8ccb2 tx

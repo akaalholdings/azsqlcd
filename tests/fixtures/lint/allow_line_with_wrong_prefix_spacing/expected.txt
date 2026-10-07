@@ -1,0 +1,2 @@
+ALLOW_FORMAT migrations/0001__change.sql:3
+DROP_COLUMN migrations/0001__change.sql:4

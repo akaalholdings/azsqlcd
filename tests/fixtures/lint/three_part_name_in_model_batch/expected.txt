@@ -1,0 +1,1 @@
+THREE_PART_NAME migrations/0001__change.sql:3

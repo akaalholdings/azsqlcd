@@ -1,0 +1,212 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "InvoiceLine",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "InvoiceLineId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1000, "increment": 10},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "InvoiceId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "TenantId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Sku",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": "Latin1_General_100_BIN2",
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Quantity",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_InvoiceLine_Quantity",
+          "expression": {"class": "Expression", "tokens": ["(", "(", "1", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "UnitPrice",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 19, "scale": 4},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Note",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": "max", "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "CreatedUtc",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 3},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_InvoiceLine_CreatedUtc",
+          "expression": {"class": "Expression", "tokens": ["(", "sysutcdatetime", "(", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "LineTotal",
+        "type": null,
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "[Quantity]", "*", "[UnitPrice]", ")"]},
+          "persisted": true
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "IsLarge",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "CASE", "WHEN", "[Quantity]", ">", "100", "THEN", "1", "ELSE", "0", "END", ")"]},
+          "persisted": false
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_InvoiceLine",
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "InvoiceLineId", "descending": false}
+        ],
+        "options": [["DATA_COMPRESSION", "PAGE"], ["FILLFACTOR", "90"]]
+      },
+      {
+        "class": "Unique",
+        "name": "UQ_InvoiceLine_Sku",
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "InvoiceId", "descending": false},
+          {"class": "KeyColumn", "name": "Sku", "descending": true}
+        ],
+        "options": []
+      },
+      {
+        "class": "Check",
+        "name": "CK_InvoiceLine_Quantity",
+        "expression": {"class": "Expression", "tokens": ["(", "[Quantity]", ">", "0", "AND", "[Quantity]", "<=", "10000", ")"]}
+      },
+      {"class": "ForeignKey", "name": "FK_InvoiceLine_Invoice", "columns": ["InvoiceId"], "ref_schema": "sales", "ref_table": "Invoice", "ref_columns": ["InvoiceId"], "on_delete": "CASCADE", "on_update": "NO ACTION"},
+      {"class": "ForeignKey", "name": "FK_InvoiceLine_Tenant", "columns": ["TenantId"], "ref_schema": "admin", "ref_table": "Tenant", "ref_columns": ["TenantId"], "on_delete": "NO ACTION", "on_update": "CASCADE"}
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "CIX_InvoiceLine",
+        "unique": false,
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "InvoiceId", "descending": false},
+          {"class": "KeyColumn", "name": "InvoiceLineId", "descending": true}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      },
+      {
+        "class": "Index",
+        "name": "UX_InvoiceLine_Open",
+        "unique": true,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "TenantId", "descending": false},
+          {"class": "KeyColumn", "name": "Sku", "descending": false}
+        ],
+        "included": ["Quantity", "UnitPrice"],
+        "filter": {"class": "Expression", "tokens": ["[Note]", "IS", "NULL"]},
+        "options": [["FILLFACTOR", "80"], ["IGNORE_DUP_KEY", "OFF"]]
+      }
+    ],
+    "temporal": null
+  }
+]

@@ -1,0 +1,1 @@
+{"class": "SetSystemVersioning", "schema": "dbo", "table": "Team", "on": true, "history_schema": "dbo", "history_table": "Team_History", "retention": [30, "DAYS"]}

@@ -1,0 +1,10 @@
+{
+  "class": "CreateType",
+  "type": {
+    "class": "AliasType",
+    "schema": "dbo",
+    "name": "Postcode",
+    "base": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 8, "precision": null, "scale": null},
+    "nullable": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "class": "AddConstraint",
+  "schema": "dbo",
+  "table": "Customer",
+  "constraint": {
+    "class": "DefaultConstraint",
+    "name": "DF_Customer_Created",
+    "expression": {"class": "Expression", "tokens": ["(", "SYSUTCDATETIME", "(", ")", ")"]}
+  },
+  "for_column": "CreatedUtc",
+  "with_check": null,
+  "exec_options": []
+}

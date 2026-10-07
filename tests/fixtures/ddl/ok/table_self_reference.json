@@ -1,0 +1,49 @@
+[
+  {
+    "class": "Table",
+    "schema": "hr",
+    "name": "Employee",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "EmployeeId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ManagerId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Employee",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "EmployeeId", "descending": false}
+        ],
+        "options": []
+      },
+      {"class": "ForeignKey", "name": "FK_Employee_Manager", "columns": ["ManagerId"], "ref_schema": "hr", "ref_table": "Employee", "ref_columns": ["EmployeeId"], "on_delete": "NO ACTION", "on_update": "NO ACTION"}
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

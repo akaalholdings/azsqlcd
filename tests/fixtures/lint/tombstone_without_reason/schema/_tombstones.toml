@@ -1,0 +1,3 @@
+[[drop]]
+object = "PROCEDURE:[sales].[usp_LegacyExport]"
+reason = " "

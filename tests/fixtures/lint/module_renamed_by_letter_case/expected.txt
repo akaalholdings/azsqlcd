@@ -1,0 +1,2 @@
+# near-miss: TMB001
+MODULE_CASE schema/views/SALES.VW_OPEN.sql:1

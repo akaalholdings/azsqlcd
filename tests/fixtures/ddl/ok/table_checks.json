@@ -1,0 +1,160 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "OrderLine",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "OrderId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "LineNumber",
+        "type": {"class": "TypeRef", "name": "smallint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Quantity",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "UnitPrice",
+        "type": {"class": "TypeRef", "name": "money", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Discount",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 5, "scale": 4},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Status",
+        "type": {"class": "TypeRef", "name": "char", "schema": null, "length": 1, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Sku",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ShipDate",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "DueDate",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "Check",
+        "name": "CK_OrderLine_LineNumber",
+        "expression": {"class": "Expression", "tokens": ["(", "[LineNumber]", ">", "0", ")"]}
+      },
+      {
+        "class": "Check",
+        "name": "CK_OrderLine_Quantity",
+        "expression": {"class": "Expression", "tokens": ["(", "[Quantity]", ">", "0", "AND", "[Quantity]", "<=", "10000", ")"]}
+      },
+      {
+        "class": "Check",
+        "name": "CK_OrderLine_Status",
+        "expression": {"class": "Expression", "tokens": ["(", "[Status]", "IN", "(", "'N'", ",", "'P'", ",", "'S'", ",", "'X'", ")", ")"]}
+      },
+      {
+        "class": "Check",
+        "name": "CK_OrderLine_Sku",
+        "expression": {"class": "Expression", "tokens": ["(", "[Sku]", "LIKE", "'[A-Z][A-Z]-[0-9][0-9][0-9][0-9]%'", "OR", "[Sku]", "LIKE", "'LEGACY\\_%'", "ESCAPE", "'\\'", ")"]}
+      },
+      {
+        "class": "Check",
+        "name": "CK_OrderLine_Dates",
+        "expression": {"class": "Expression", "tokens": ["(", "[ShipDate]", "IS", "NULL", "OR", "[DueDate]", "IS", "NULL", "OR", "[ShipDate]", "<=", "[DueDate]", ")"]}
+      },
+      {
+        "class": "Check",
+        "name": "CK_OrderLine_Price",
+        "expression": {"class": "Expression", "tokens": ["(", "(", "[UnitPrice]", ">=", "(", "0", ")", ")", "AND", "(", "[UnitPrice]", "*", "[Quantity]", ")", "<", "1000000", ")"]}
+      }
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

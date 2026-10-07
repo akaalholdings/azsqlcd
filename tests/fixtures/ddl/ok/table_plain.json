@@ -1,0 +1,74 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Customer",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "CustomerId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "FirstName",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 50, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "LastName",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 50, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Email",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 320, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Customer",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "CustomerId", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

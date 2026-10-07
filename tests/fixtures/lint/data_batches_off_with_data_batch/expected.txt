@@ -1,0 +1,4 @@
+# the switch is off by default: one finding per data batch, at its data line; DATA_NO_WHERE,
+# ALLOW_UNUSED, FORBIDDEN_TOKEN and DATA_DDL of these batches are not reported
+DATA000 migrations/0001__change.sql:5
+DATA000 migrations/0001__change.sql:8

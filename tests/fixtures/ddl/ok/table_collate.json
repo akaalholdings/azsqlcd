@@ -1,0 +1,78 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Document",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "DocumentId",
+        "type": {"class": "TypeRef", "name": "uniqueidentifier", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Document_Id",
+          "expression": {"class": "Expression", "tokens": ["(", "NEWID", "(", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Title",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 200, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": "Latin1_General_100_CI_AS_SC",
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Slug",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 200, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": "Latin1_General_100_BIN2_UTF8",
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Notes",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": "max", "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Document",
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "DocumentId", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

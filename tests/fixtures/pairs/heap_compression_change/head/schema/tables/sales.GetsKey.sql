@@ -1,0 +1,4 @@
+CREATE TABLE [sales].[GetsKey] (
+    [Id] int NOT NULL,
+    CONSTRAINT [PK_GetsKey] PRIMARY KEY CLUSTERED ([Id]) WITH (DATA_COMPRESSION = NONE)
+);

@@ -1,0 +1,55 @@
+# Onboarding of one target. export and baseline-report read only (plan identity).
+# baseline writes the state rows and runs behind the approval of the deploy environment.
+name: onboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, sandbox, test, preprod, prod]
+        required: true
+      target:
+        description: Target id from azsqlcd.toml
+        type: string
+        required: true
+      action:
+        type: choice
+        options: [export, baseline-report, baseline]
+        required: true
+      release:
+        description: Release to use, for example r3
+        type: string
+        required: true
+      confirm_database:
+        description: Name of the database (baseline-report and baseline)
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  # Builds the tag again and compares with the stored release. It creates nothing on a dispatch;
+  # `contents: write` is only the upper limit that release.yml declares for a push.
+  release:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.1.0
+    permissions:
+      contents: write
+    with:
+      release: ${{ inputs.release }}
+
+  onboard:
+    needs: release
+    uses: akaalholdings/azsqlcd/.github/workflows/onboard.yml@v0.1.0
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: ${{ inputs.environment }}
+      target: ${{ inputs.target }}
+      action: ${{ inputs.action }}
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      confirm_database: ${{ inputs.confirm_database }}
+      runs-on: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod"}' || '{"group":"azsql-nonprod"}' }}

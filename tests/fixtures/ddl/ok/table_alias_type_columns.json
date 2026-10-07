@@ -1,0 +1,64 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Contact",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "ContactId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Phone",
+        "type": {"class": "TypeRef", "name": "PhoneNumber", "schema": "dbo", "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Country",
+        "type": {"class": "TypeRef", "name": "Country Code", "schema": "ref", "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Mobile",
+        "type": {"class": "TypeRef", "name": "PhoneNumber", "schema": "dbo", "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [],
+    "indexes": [],
+    "temporal": null
+  }
+]

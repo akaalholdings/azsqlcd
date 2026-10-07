@@ -1,0 +1,19 @@
+{
+  "class": "AddColumn",
+  "schema": "sales",
+  "table": "Buyer",
+  "column": {
+    "class": "Column",
+    "name": "TaxNumber",
+    "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+    "nullable": true,
+    "identity": null,
+    "default": null,
+    "computed": null,
+    "collation": null,
+    "generated": null,
+    "hidden": false,
+    "masked": "default()"
+  },
+  "with_values": false
+}

@@ -1,0 +1,3 @@
+CREATE TYPE [dbo].[IdList] AS TABLE (
+    [Id] int NOT NULL
+);

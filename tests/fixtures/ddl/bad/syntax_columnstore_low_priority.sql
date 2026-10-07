@@ -1,0 +1,4 @@
+-- expect: SYNTAX
+-- says: WAIT_AT_LOW_PRIORITY is not valid on a columnstore index
+-- line: 4
+CREATE CLUSTERED COLUMNSTORE INDEX [CCI_T] ON [dbo].[T] WITH (ONLINE = ON (WAIT_AT_LOW_PRIORITY (MAX_DURATION = 5 MINUTES, ABORT_AFTER_WAIT = SELF)));

@@ -1,0 +1,19 @@
+[project]
+name = "sales"
+tenant_id = "00000000-0000-0000-0000-000000000001"
+table_model = false
+module_chunk = 100
+min_token_minutes = 20
+
+[identities]
+plan = "00000000-0000-0000-0000-000000000002"
+deploy = "00000000-0000-0000-0000-000000000003"
+
+[env.dev]
+plan_identity = "plan"
+deploy_identity = "deploy"
+drift = "report"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+targets = [{ id = "sales-dev", server = "sql-sales-dev.database.windows.net", database = "sales" }]

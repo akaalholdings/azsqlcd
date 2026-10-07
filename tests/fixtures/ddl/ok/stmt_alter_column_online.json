@@ -1,0 +1,10 @@
+{
+  "class": "AlterColumn",
+  "schema": "sales",
+  "table": "Order",
+  "column": "Status",
+  "type": {"class": "TypeRef", "name": "smallint", "schema": null, "length": null, "precision": null, "scale": null},
+  "nullable": false,
+  "collation": null,
+  "exec_options": [["ONLINE", "ON"]]
+}

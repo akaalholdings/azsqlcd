@@ -1,0 +1,2 @@
+ALLOW_UNUSED migrations/0001__change.sql:3
+STATEMENT_UNREADABLE migrations/0001__change.sql:4

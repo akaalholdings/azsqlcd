@@ -1,0 +1,1 @@
+ALTER TABLE [sales].[Document] ADD CONSTRAINT [FK_Document_Owner] FOREIGN KEY ([OwnerId]) REFERENCES [sales].[Owner] ([OwnerId]) ON UPDATE CASCADE NOT FOR REPLICATION;

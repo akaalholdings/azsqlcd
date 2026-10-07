@@ -1,0 +1,104 @@
+name: azsqlcd
+description: Run the azsqlcd command line from the checkout of this action. No build backend runs.
+
+inputs:
+  args:
+    description: >-
+      One argument per line. Empty lines are dropped, so an argument cannot be empty and cannot
+      hold a line break.
+    required: true
+  db:
+    description: "'true' installs the db extra (driver and azure-identity). Database commands need it."
+    default: 'false'
+
+# The tool writes these keys to GITHUB_OUTPUT when it runs with `--ci github`.
+outputs:
+  matrix:
+    description: 'targets: JSON list with one row per target'
+    value: ${{ steps.run.outputs.matrix }}
+  timeout:
+    description: 'targets: job timeout in minutes for the deploy job'
+    value: ${{ steps.run.outputs.timeout }}
+  release:
+    description: 'build: release name, r<release_seq>'
+    value: ${{ steps.run.outputs.release }}
+  digest:
+    description: 'build: manifest digest'
+    value: ${{ steps.run.outputs.digest }}
+  plan_sha256:
+    description: 'plan, deploy: hash of the plan'
+    value: ${{ steps.run.outputs.plan_sha256 }}
+  pending:
+    description: "plan: 'true' when a deploy would write to the database"
+    value: ${{ steps.run.outputs.pending }}
+  exit_code:
+    description: Exit code of the tool
+    value: ${{ steps.run.outputs.exit_code }}
+  reason_code:
+    description: Stable reason code of a non-zero exit
+    value: ${{ steps.run.outputs.reason_code }}
+
+runs:
+  using: composite
+  steps:
+    # AZSQLCD_OFFLINE=1 is set on the machine of a private runner whose image holds uv, Python 3.12
+    # and a filled uv cache. An expression (`env.`) cannot read a machine variable, so bash reads it.
+    - id: mode
+      shell: bash
+      run: |
+        if [ "${AZSQLCD_OFFLINE:-}" = "1" ]; then echo "offline=1"; else echo "offline=0"; fi >> "$GITHUB_OUTPUT"
+
+    - if: steps.mode.outputs.offline != '1'
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        version: '0.10.4'
+        enable-cache: false
+
+    - id: run
+      shell: bash
+      env:
+        AZSQLCD_ARGS: ${{ inputs.args }}
+        AZSQLCD_DB: ${{ inputs.db }}
+        UV_PYTHON: '3.12'
+        # Findings go to stdout and the last line (reason code, exit code) to stderr. Unbuffered and
+        # in one stream (2>&1 below), the log shows them in the order in which the tool wrote them.
+        PYTHONUNBUFFERED: '1'
+      run: |
+        # GitHub starts bash with -e. This script reads each exit code itself, so -e is off.
+        set +e
+        set -uo pipefail
+
+        # One argument per line into an array. Nothing in an argument is expanded by the shell.
+        ARGS=()
+        while IFS= read -r line || [ -n "$line" ]; do
+          line="${line%$'\r'}"
+          if [ -n "$line" ]; then ARGS+=("$line"); fi
+        done <<< "$AZSQLCD_ARGS"
+        if [ "${#ARGS[@]}" -eq 0 ]; then
+          echo "::error::azsqlcd: tool did not start (no arguments)"
+          exit 2
+        fi
+
+        SYNC=(--project "$GITHUB_ACTION_PATH" --frozen --no-dev --no-install-project)
+        if [ "$AZSQLCD_DB" = "true" ]; then SYNC+=(--extra db); fi
+        if [ "${AZSQLCD_OFFLINE:-}" = "1" ]; then export UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never; fi
+
+        uv sync "${SYNC[@]}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::azsqlcd: tool did not start (uv sync exit $rc)"
+          exit "$rc"
+        fi
+
+        # -P: the working directory is the checkout of a database repository, for `verify` the code
+        # of a pull request. Without -P, `python -m` puts it first on the module path, and a
+        # directory azsqlcd/ or a file argparse.py of that checkout would run in place of the tool.
+        PYTHONPATH="$GITHUB_ACTION_PATH/src" \
+          uv run --project "$GITHUB_ACTION_PATH" --no-sync python -P -m azsqlcd "${ARGS[@]}" 2>&1
+        rc=$?
+        # 1 and 2 belong to Python, argparse and uv. Only the codes below are decisions of the tool.
+        case "$rc" in
+          0|21|22|23|24|25|30) ;;
+          *) echo "::error::azsqlcd: tool did not start (exit $rc is not a tool exit code)" ;;
+        esac
+        exit "$rc"

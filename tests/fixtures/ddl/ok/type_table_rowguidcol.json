@@ -1,0 +1,25 @@
+[
+  {
+    "class": "TableType",
+    "schema": "dbo",
+    "name": "GuidList",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "Id",
+        "type": {"class": "TypeRef", "name": "uniqueidentifier", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null,
+        "rowguidcol": true
+      }
+    ],
+    "constraints": [],
+    "indexes": []
+  }
+]

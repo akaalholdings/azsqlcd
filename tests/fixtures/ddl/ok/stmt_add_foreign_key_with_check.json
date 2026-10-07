@@ -1,0 +1,9 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "OrderLine",
+  "constraint": {"class": "ForeignKey", "name": "FK_OrderLine_Product", "columns": ["TenantId", "ProductId"], "ref_schema": "catalog", "ref_table": "Product", "ref_columns": ["TenantId", "ProductId"], "on_delete": "NO ACTION", "on_update": "NO ACTION"},
+  "for_column": null,
+  "with_check": true,
+  "exec_options": []
+}

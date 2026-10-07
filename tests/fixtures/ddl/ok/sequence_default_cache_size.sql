@@ -1,0 +1,2 @@
+-- path: schema/sequences/dbo.Counter.sql
+CREATE SEQUENCE [dbo].[Counter] AS int START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 NO CYCLE CACHE;

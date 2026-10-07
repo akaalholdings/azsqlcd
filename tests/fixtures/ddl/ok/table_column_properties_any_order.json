@@ -1,0 +1,114 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Patient",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "PatientId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1, "increment": 1, "not_for_replication": true},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "RowId",
+        "type": {"class": "TypeRef", "name": "uniqueidentifier", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Patient_RowId",
+          "expression": {"class": "Expression", "tokens": ["newid", "(", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null,
+        "rowguidcol": true
+      },
+      {
+        "class": "Column",
+        "name": "Email",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 320, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Phone",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null,
+        "sparse": true
+      },
+      {
+        "class": "Column",
+        "name": "Notes",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": "max", "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null,
+        "sparse": true
+      },
+      {
+        "class": "Column",
+        "name": "Parent",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Patient",
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "PatientId", "descending": false}
+        ],
+        "options": []
+      },
+      {"class": "ForeignKey", "name": "FK_Patient_Parent", "columns": ["Parent"], "ref_schema": "dbo", "ref_table": "Patient", "ref_columns": ["PatientId"], "on_delete": "NO ACTION", "on_update": "NO ACTION", "not_for_replication": true},
+      {
+        "class": "Check",
+        "name": "CK_Patient_Email",
+        "expression": {"class": "Expression", "tokens": ["(", "Email", "like", "'%@%'", ")"]},
+        "not_for_replication": true
+      }
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

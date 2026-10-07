@@ -1,0 +1,3 @@
+# near-miss: DATA000
+# the switch is on: the data rules read the batch
+DATA_NO_WHERE migrations/0001__change.sql:4

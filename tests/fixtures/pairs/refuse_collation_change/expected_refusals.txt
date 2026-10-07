@@ -1,0 +1,2 @@
+COLLATION_CHANGE TABLE:[sales].[Word]
+COLLATION_CHANGE TABLE:[sales].[Word]

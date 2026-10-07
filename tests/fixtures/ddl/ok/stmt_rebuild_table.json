@@ -1,0 +1,1 @@
+{"class": "RebuildTable", "schema": "dw", "table": "Staging", "compression": "ROW", "exec_options": []}

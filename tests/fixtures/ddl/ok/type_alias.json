@@ -1,0 +1,9 @@
+[
+  {
+    "class": "AliasType",
+    "schema": "dbo",
+    "name": "PhoneNumber",
+    "base": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+    "nullable": false
+  }
+]

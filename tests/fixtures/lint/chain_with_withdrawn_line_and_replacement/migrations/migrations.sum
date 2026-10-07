@@ -1,0 +1,5 @@
+azsqlcd-sum 1
+baseline
+0001__add_note.sql sha256:f1d7d80f0f02b1ac09068092d3bf472c321e41c67a9a258a0a4de5630df0f360 tx
+0002__add_flag.sql sha256:a1e7718db7c9b7e42b6b05b6a01bf3a1767de1639c7fe217e420468976bf843c tx withdrawn
+0003__add_flag_v2.sql sha256:45fac763a1cbd40fe785618c6956851da738a497ca92579a8a9c2f7ff3133f9a tx replaces=0002__add_flag.sql

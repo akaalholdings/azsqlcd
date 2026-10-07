@@ -1,0 +1,1 @@
+{"class": "DropConstraint", "schema": "dbo", "table": "Customer", "name": "DF_Customer_Created"}

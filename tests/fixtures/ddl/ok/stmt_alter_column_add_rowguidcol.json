@@ -1,0 +1,1 @@
+{"class": "AlterColumnProperty", "schema": "sales", "table": "Document", "column": "RowGuid", "add": true, "property": "ROWGUIDCOL"}

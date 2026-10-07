@@ -1,0 +1,1 @@
+ALLOW_UNUSED migrations/0001__change.sql:4

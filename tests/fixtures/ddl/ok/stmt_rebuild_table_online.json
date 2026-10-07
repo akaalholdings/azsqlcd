@@ -1,0 +1,7 @@
+{
+  "class": "RebuildTable",
+  "schema": "dw",
+  "table": "Staging",
+  "compression": "NONE",
+  "exec_options": [["MAXDOP", "4"], ["ONLINE", "ON"], ["WAIT_AT_LOW_PRIORITY", "MAX_DURATION = 5 MINUTES, ABORT_AFTER_WAIT = SELF"]]
+}

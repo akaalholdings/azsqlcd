@@ -1,0 +1,13 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "OrderLine",
+  "constraint": {
+    "class": "Check",
+    "name": "CK_OrderLine_Qty2",
+    "expression": {"class": "Expression", "tokens": ["(", "[Quantity]", "<", "500000", ")"]}
+  },
+  "for_column": null,
+  "with_check": false,
+  "exec_options": []
+}

@@ -1,0 +1,1 @@
+ALTER TABLE [sales].[Document] ALTER COLUMN [DocumentId] ADD NOT FOR REPLICATION;

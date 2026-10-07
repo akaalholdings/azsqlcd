@@ -1,0 +1,3 @@
+CREATE TABLE [sales].[B] (
+    [Id] int NOT NULL
+) WITH (DATA_COMPRESSION = ROW);

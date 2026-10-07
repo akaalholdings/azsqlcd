@@ -1,0 +1,34 @@
+# Reusable: the pull-request check of a database repository.
+# This job runs code from a pull request before any review. It holds no identity: contents read
+# only, no id-token, no environment, no driver. Lint is not a safety proof; the tool says so in
+# the job summary.
+name: verify
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: JSON. Use a hosted runner. Never a runner that can reach a database.
+        type: string
+        default: '"ubuntu-latest"'
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            verify
+            --base
+            ${{ github.event.pull_request.base.sha }}
+            --ci
+            github

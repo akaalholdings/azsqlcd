@@ -1,0 +1,4 @@
+ALTER TABLE [dbo].[Staff] SET (SYSTEM_VERSIONING = OFF);
+GO
+DROP TABLE [dbo].[Staff];
+GO

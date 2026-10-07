@@ -1,0 +1,108 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Template",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "TemplateId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Body",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 400, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Template_Body",
+          "expression": {"class": "Expression", "tokens": ["(", "N'line one\nGO\nline three; -- not a comment /* nor this */ it''s quoted'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Sep",
+        "type": {"class": "TypeRef", "name": "char", "schema": null, "length": 1, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Template_Sep",
+          "expression": {"class": "Expression", "tokens": ["(", "';'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Marker",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 10, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Quote",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 10, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Template_Quote",
+          "expression": {"class": "Expression", "tokens": ["(", "N''''", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "Check",
+        "name": "CK_Template_Marker",
+        "expression": {"class": "Expression", "tokens": ["(", "[Marker]", "<>", "'--'", "AND", "[Marker]", "<>", "'/*'", "AND", "[Marker]", "NOT", "LIKE", "'%GO%'", ")"]}
+      }
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_Template_Marker",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Marker", "descending": false}
+        ],
+        "included": [],
+        "filter": {"class": "Expression", "tokens": ["[Marker]", "<>", "');--'", "AND", "[Marker]", "<>", "N'GO'"]},
+        "options": []
+      }
+    ],
+    "temporal": null
+  }
+]

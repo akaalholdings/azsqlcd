@@ -1,0 +1,9 @@
+[
+  {
+    "class": "AliasType",
+    "schema": "dbo",
+    "name": "Amount",
+    "base": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 19, "scale": 4},
+    "nullable": true
+  }
+]

@@ -1,0 +1,4 @@
+-- expect: SYNTAX
+-- says: REBUILD needs WITH (DATA_COMPRESSION
+-- line: 4
+ALTER TABLE [dbo].[T] REBUILD WITH (ONLINE = ON);

@@ -1,0 +1,163 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "Document",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "DocumentId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1, "increment": 1, "not_for_replication": true},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "RowGuid",
+        "type": {"class": "TypeRef", "name": "uniqueidentifier", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Document_RowGuid",
+          "expression": {"class": "Expression", "tokens": ["(", "newsequentialid", "(", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null,
+        "rowguidcol": true
+      },
+      {
+        "class": "Column",
+        "name": "OwnerId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Email",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 320, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": "Latin1_General_100_CI_AS",
+        "generated": null,
+        "hidden": false,
+        "masked": "email()"
+      },
+      {
+        "class": "Column",
+        "name": "CardNo",
+        "type": {"class": "TypeRef", "name": "char", "schema": null, "length": 16, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "partial(0, \"XXXXXXXXXXXX\", 4)"
+      },
+      {
+        "class": "Column",
+        "name": "Salary",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 19, "scale": 4},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "random(1.0000, 100.0000)"
+      },
+      {
+        "class": "Column",
+        "name": "BornOn",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "datetime(\"Y\")"
+      },
+      {
+        "class": "Column",
+        "name": "Notes",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 400, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Body",
+        "type": {"class": "TypeRef", "name": "xml", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Document",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "DocumentId", "descending": false}
+        ],
+        "options": [["XML_COMPRESSION", "ON"]]
+      },
+      {
+        "class": "Check",
+        "name": "CK_Document_Owner",
+        "expression": {"class": "Expression", "tokens": ["(", "[OwnerId]", ">", "0", ")"]},
+        "not_for_replication": true
+      },
+      {"class": "ForeignKey", "name": "FK_Document_Owner", "columns": ["OwnerId"], "ref_schema": "sales", "ref_table": "Owner", "ref_columns": ["OwnerId"], "on_delete": "CASCADE", "on_update": "NO ACTION", "not_for_replication": true}
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "NCCI_Document",
+        "unique": false,
+        "clustered": false,
+        "columns": [],
+        "included": ["OwnerId", "Salary"],
+        "filter": {"class": "Expression", "tokens": ["[OwnerId]", ">", "100"]},
+        "options": [["COMPRESSION_DELAY", "10"], ["DATA_COMPRESSION", "COLUMNSTORE_ARCHIVE"]],
+        "columnstore": true
+      }
+    ],
+    "temporal": null
+  }
+]

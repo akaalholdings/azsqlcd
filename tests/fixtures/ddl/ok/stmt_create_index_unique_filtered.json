@@ -1,0 +1,18 @@
+{
+  "class": "CreateIndex",
+  "schema": "dbo",
+  "table": "Customer",
+  "index": {
+    "class": "Index",
+    "name": "UX_Customer_Email",
+    "unique": true,
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "Email", "descending": false}
+    ],
+    "included": [],
+    "filter": {"class": "Expression", "tokens": ["[Email]", "IS", "NOT", "NULL"]},
+    "options": []
+  },
+  "exec_options": []
+}

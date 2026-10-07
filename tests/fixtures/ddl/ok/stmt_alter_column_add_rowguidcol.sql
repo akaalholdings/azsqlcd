@@ -1,0 +1,1 @@
+ALTER TABLE [sales].[Document] ALTER COLUMN [RowGuid] ADD ROWGUIDCOL;

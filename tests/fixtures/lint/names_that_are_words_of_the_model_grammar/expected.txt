@@ -1,0 +1,3 @@
+# near-miss: MODEL_STATEMENT
+# the closed rule of one statement reads tokens: a name without brackets has its place
+LCK001 migrations/0001__change.sql:5

@@ -1,0 +1,1 @@
+CONFIG_INVALID azsqlcd.toml:1

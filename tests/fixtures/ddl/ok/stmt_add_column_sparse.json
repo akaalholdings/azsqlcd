@@ -1,0 +1,20 @@
+{
+  "class": "AddColumn",
+  "schema": "sales",
+  "table": "Document",
+  "column": {
+    "class": "Column",
+    "name": "Extra",
+    "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 200, "precision": null, "scale": null},
+    "nullable": true,
+    "identity": null,
+    "default": null,
+    "computed": null,
+    "collation": null,
+    "generated": null,
+    "hidden": false,
+    "masked": null,
+    "sparse": true
+  },
+  "with_values": false
+}

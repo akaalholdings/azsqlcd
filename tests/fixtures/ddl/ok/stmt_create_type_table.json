@@ -1,0 +1,35 @@
+{
+  "class": "CreateType",
+  "type": {
+    "class": "TableType",
+    "schema": "dbo",
+    "name": "IdList",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "Id",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": null,
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "Id", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": []
+  }
+}

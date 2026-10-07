@@ -1,0 +1,4 @@
+{
+  "class": "CreateSynonym",
+  "synonym": {"class": "Synonym", "schema": "dbo", "name": "Cust", "target_schema": "sales", "target_name": "Customer"}
+}

@@ -1,0 +1,74 @@
+[
+  {
+    "class": "Table",
+    "schema": "audit",
+    "name": "Login",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "LoginId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Account",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 128, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ValidFrom",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 7},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": "ROW_START",
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ValidTo",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 7},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": "ROW_END",
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Login",
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "LoginId", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [],
+    "temporal": {"class": "Temporal", "period_start": "ValidFrom", "period_end": "ValidTo", "history_schema": "archive", "history_table": "Login", "retention": [6, "MONTHS"]}
+  }
+]

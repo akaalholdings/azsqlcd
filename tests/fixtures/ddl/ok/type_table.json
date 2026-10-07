@@ -1,0 +1,121 @@
+[
+  {
+    "class": "TableType",
+    "schema": "dbo",
+    "name": "OrderLineList",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "LineNumber",
+        "type": {"class": "TypeRef", "name": "smallint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Sku",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Quantity",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "UnitPrice",
+        "type": {"class": "TypeRef", "name": "money", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": null,
+          "expression": {"class": "Expression", "tokens": ["(", "0", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Total",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "[Quantity]", "*", "[UnitPrice]", ")"]},
+          "persisted": false
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "Check",
+        "name": null,
+        "expression": {"class": "Expression", "tokens": ["(", "[Quantity]", ">", "0", ")"]}
+      },
+      {
+        "class": "PrimaryKey",
+        "name": null,
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "LineNumber", "descending": false}
+        ],
+        "options": []
+      },
+      {
+        "class": "Unique",
+        "name": null,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Sku", "descending": true}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_Sku",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Sku", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      }
+    ]
+  }
+]

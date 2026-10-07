@@ -1,0 +1,4 @@
+-- expect: SYNTAX
+-- says: FOREIGN KEY or CHECK
+-- line: 4
+ALTER TABLE [dbo].[T] WITH CHECK ADD CONSTRAINT [PK_T] PRIMARY KEY CLUSTERED ([Id]);

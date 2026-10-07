@@ -1,0 +1,70 @@
+# Human recovery on one target. Runs behind the approval of the deploy environment.
+# Read docs/runbook.md of the tool repository first; it names the action for each reason code.
+name: resolve
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, sandbox, test, preprod, prod]
+        required: true
+      target:
+        description: Target id from azsqlcd.toml
+        type: string
+        required: true
+      release:
+        description: The release that the failed run used, for example r57
+        type: string
+        required: true
+      action:
+        type: choice
+        options: [mark-applied, mark-not-applied, accept-drift, adopt-module, clear-run, rebind-environment]
+        required: true
+      subject:
+        description: Migration file, object key, run id or environment name (the action decides)
+        type: string
+        required: true
+      confirm_database:
+        description: Name of the database
+        type: string
+        required: true
+      reason:
+        description: Why. Stored in the database.
+        type: string
+        required: true
+      force_no_readback:
+        description: mark-applied only. Record the migration with no catalog read-back.
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  # Builds the tag again and compares with the stored release. It creates nothing on a dispatch;
+  # `contents: write` is only the upper limit that release.yml declares for a push.
+  release:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.1.0
+    permissions:
+      contents: write
+    with:
+      release: ${{ inputs.release }}
+
+  resolve:
+    needs: release
+    uses: akaalholdings/azsqlcd/.github/workflows/resolve.yml@v0.1.0
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: ${{ inputs.environment }}
+      target: ${{ inputs.target }}
+      release: ${{ needs.release.outputs.release }}
+      digest: ${{ needs.release.outputs.digest }}
+      action: ${{ inputs.action }}
+      subject: ${{ inputs.subject }}
+      confirm_database: ${{ inputs.confirm_database }}
+      reason: ${{ inputs.reason }}
+      force_no_readback: ${{ inputs.force_no_readback }}
+      runs-on: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod"}' || '{"group":"azsql-nonprod"}' }}

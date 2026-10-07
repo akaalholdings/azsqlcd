@@ -1,0 +1,3 @@
+[[drop]]
+object = "PROCEDURE:[sales].[usp_Old]"
+reason = "replaced by usp_New in r40"

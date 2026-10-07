@@ -1,0 +1,127 @@
+[
+  {
+    "class": "Table",
+    "schema": "my.schema",
+    "name": "Order Details]v2",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "Order ID",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Line Number",
+        "type": {"class": "TypeRef", "name": "smallint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Weird]Name",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 10, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "dotted.name",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "double\"quoted",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "select",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Ünïcödé",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 5, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK Order Details",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "Order ID", "descending": false},
+          {"class": "KeyColumn", "name": "Line Number", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX Order Details]v2 select",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "select", "descending": true}
+        ],
+        "included": ["Weird]Name", "double\"quoted"],
+        "filter": null,
+        "options": []
+      }
+    ],
+    "temporal": null
+  }
+]

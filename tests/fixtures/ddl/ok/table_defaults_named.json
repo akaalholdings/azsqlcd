@@ -1,0 +1,195 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "AuditEvent",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "AuditEventId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1, "increment": 1},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "EventUtc",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 3},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_EventUtc",
+          "expression": {"class": "Expression", "tokens": ["(", "sysutcdatetime", "(", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "EventDate",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_EventDate",
+          "expression": {"class": "Expression", "tokens": ["(", "CONVERT", "(", "date", ",", "DATEADD", "(", "day", ",", "-", "1", ",", "SYSUTCDATETIME", "(", ")", ")", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "CorrelationId",
+        "type": {"class": "TypeRef", "name": "uniqueidentifier", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_CorrelationId",
+          "expression": {"class": "Expression", "tokens": ["NEWSEQUENTIALID", "(", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Actor",
+        "type": {"class": "TypeRef", "name": "sysname", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_Actor",
+          "expression": {"class": "Expression", "tokens": ["(", "SUSER_SNAME", "(", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Severity",
+        "type": {"class": "TypeRef", "name": "tinyint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_Severity",
+          "expression": {"class": "Expression", "tokens": ["(", "(", "1", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Amount",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 19, "scale": 4},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_Amount",
+          "expression": {"class": "Expression", "tokens": ["(", "(", "0.0", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Payload",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": "max", "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_Payload",
+          "expression": {"class": "Expression", "tokens": ["(", "N'{}'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Source",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 30, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_Source",
+          "expression": {"class": "Expression", "tokens": ["(", "'app'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Bucket",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_Bucket",
+          "expression": {"class": "Expression", "tokens": ["(", "ABS", "(", "CHECKSUM", "(", "NEWID", "(", ")", ")", ")", "%", "(", "16", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "SeqNo",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_AuditEvent_SeqNo",
+          "expression": {"class": "Expression", "tokens": ["(", "NEXT", "VALUE", "FOR", "[dbo]", ".", "[AuditSeq]", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [],
+    "indexes": [],
+    "temporal": null
+  }
+]

@@ -1,0 +1,76 @@
+{
+  "class": "CreateTable",
+  "table": {
+    "class": "Table",
+    "schema": "sales",
+    "name": "Shipment",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "ShipmentId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1, "increment": 1},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "OrderId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ShippedUtc",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 3},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Shipment",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "ShipmentId", "descending": false}
+        ],
+        "options": []
+      },
+      {"class": "ForeignKey", "name": "FK_Shipment_Order", "columns": ["OrderId"], "ref_schema": "sales", "ref_table": "Order", "ref_columns": ["OrderId"], "on_delete": "NO ACTION", "on_update": "NO ACTION"}
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_Shipment_Order",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "OrderId", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      }
+    ],
+    "temporal": null
+  }
+}

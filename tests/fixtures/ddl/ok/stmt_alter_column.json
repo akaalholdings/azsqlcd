@@ -1,0 +1,10 @@
+{
+  "class": "AlterColumn",
+  "schema": "dbo",
+  "table": "Customer",
+  "column": "Email",
+  "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 320, "precision": null, "scale": null},
+  "nullable": false,
+  "collation": "Latin1_General_100_CI_AS",
+  "exec_options": []
+}

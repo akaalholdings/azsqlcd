@@ -1,0 +1,12 @@
+CREATE OR ALTER VIEW [rpt].[vw_Margin]
+WITH VIEW_METADATA, SCHEMABINDING
+AS
+/* WITH SCHEMABINDING AS
+GO
+CREATE VIEW x AS SELECT 1 */
+SELECT t.[OrderId],
+       dbo.fn_Clamp(t.[Total], 0, 100) AS [Margin], -- AS GO CREATE SCHEMABINDING
+       'WITH SCHEMABINDING AS
+GO
+CREATE' AS [Words]
+FROM [sales].[vw_OrderTotals] AS t;

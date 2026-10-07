@@ -1,0 +1,1 @@
+DRP003 schema/views/sales.vw_Open.sql:3

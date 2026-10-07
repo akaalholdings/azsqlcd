@@ -1,0 +1,58 @@
+{
+  "L10 ALTER TABLE that does not parse": {
+    "source": "L10.json observed/bad_alter_table/error",
+    "expected_number": null,
+    "class": "OTHER",
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Incorrect syntax near the keyword 'COLUMN'.",
+    "redacted": "[Microsoft][SQL Server]Incorrect syntax near the keyword <redacted>."
+  },
+  "L11 column change under a schema-bound view": {
+    "source": "L11.json observed/chained_schemabinding/table_change_while_bound/error",
+    "expected_number": null,
+    "class": "OTHER",
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]The object 'l11_v1' is dependent on column 'b'.",
+    "redacted": "[Microsoft][SQL Server]The object <redacted> is dependent on column <redacted>."
+  },
+  "L11 unbind of the referenced view first": {
+    "source": "L11.json observed/chained_schemabinding/unbind_of_the_referenced_view_first/error",
+    "expected_number": 3729,
+    "class": "OTHER",
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Cannot ALTER 'azsqlcd_spike.l11_v1' because it is being referenced by object 'l11_v2'.",
+    "redacted": "[Microsoft][SQL Server]Cannot ALTER <redacted> because it is being referenced by object <redacted>."
+  },
+  "L2 duplicate key in a batch": {
+    "source": "L2.json observed/cases[0]/attempt/error",
+    "expected_number": 2627,
+    "class": "OTHER",
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Violation of PRIMARY KEY constraint 'l2_pk'. Cannot insert duplicate key in object 'azsqlcd_spike.l2_t'. The duplicate key value is (1).",
+    "redacted": "[Microsoft][SQL Server]Violation of PRIMARY KEY constraint <redacted>. Cannot insert duplicate key in object <redacted>. The duplicate key value is <redacted>"
+  },
+  "L2 divide by zero in a batch": {
+    "source": "L2.json observed/cases[2]/attempt/error",
+    "expected_number": null,
+    "class": "OTHER",
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Divide by zero error encountered.",
+    "redacted": "[Microsoft][SQL Server]Divide by zero error encountered."
+  },
+  "L2 RAISERROR of a script, severity 16": {
+    "source": "L2.json observed/cases[5]/attempt/error",
+    "expected_number": null,
+    "class": "OTHER",
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]azsqlcd spike",
+    "redacted": "[Microsoft][SQL Server]azsqlcd spike"
+  },
+  "L5 next batch on a session that was killed while idle": {
+    "source": "L5.json observed/with_applock/first_execute/error",
+    "expected_number": null,
+    "class": "SESSION_LOST",
+    "sqlstate": "08S01",
+    "text": "[Microsoft]TCP Provider: Error code 0x20",
+    "redacted": "[Microsoft]TCP Provider: Error code 0x20"
+  }
+}

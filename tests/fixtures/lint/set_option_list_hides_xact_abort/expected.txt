@@ -1,0 +1,2 @@
+FORBIDDEN_TOKEN migrations/0001__change.sql:4
+FORBIDDEN_TOKEN migrations/0001__change.sql:6

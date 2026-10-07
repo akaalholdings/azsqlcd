@@ -1,0 +1,2 @@
+# data_batches = false, written out: a data batch that breaks no data rule is still refused
+DATA000 migrations/0001__change.sql:3

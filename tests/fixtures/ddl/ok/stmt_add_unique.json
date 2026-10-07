@@ -1,0 +1,17 @@
+{
+  "class": "AddConstraint",
+  "schema": "dbo",
+  "table": "Customer",
+  "constraint": {
+    "class": "Unique",
+    "name": "UQ_Customer_Email",
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "Email", "descending": true}
+    ],
+    "options": [["FILLFACTOR", "80"]]
+  },
+  "for_column": null,
+  "with_check": null,
+  "exec_options": []
+}

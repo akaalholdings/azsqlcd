@@ -1,0 +1,182 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "Loose",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "a",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_a",
+          "expression": {"class": "Expression", "tokens": ["0"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "b",
+        "type": {"class": "TypeRef", "name": "datetime", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_b",
+          "expression": {"class": "Expression", "tokens": ["GETDATE", "(", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "c",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_c",
+          "expression": {"class": "Expression", "tokens": ["NULL"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "d",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_d",
+          "expression": {"class": "Expression", "tokens": ["-", "1"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "e",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_e",
+          "expression": {"class": "Expression", "tokens": ["NEXT", "VALUE", "FOR", "[dbo]", ".", "[LooseSeq]"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "f",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_f",
+          "expression": {"class": "Expression", "tokens": ["(", "1", ")", "+", "(", "2", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "g",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 5, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_g",
+          "expression": {"class": "Expression", "tokens": ["N'a'", "+", "N'b'"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "h",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 3, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_h",
+          "expression": {"class": "Expression", "tokens": ["'x'", "COLLATE", "Latin1_General_BIN2"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "i",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 3},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_i",
+          "expression": {"class": "Expression", "tokens": ["CURRENT_TIMESTAMP"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "j",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Loose_j",
+          "expression": {"class": "Expression", "tokens": ["CONVERT", "(", "date", ",", "'2026-01-01'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [],
+    "indexes": [],
+    "temporal": null
+  }
+]

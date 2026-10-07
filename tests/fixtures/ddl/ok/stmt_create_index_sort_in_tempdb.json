@@ -1,0 +1,19 @@
+{
+  "class": "CreateIndex",
+  "schema": "dbo",
+  "table": "Customer",
+  "index": {
+    "class": "Index",
+    "name": "IX_Customer_LastName",
+    "unique": false,
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "LastName", "descending": false},
+      {"class": "KeyColumn", "name": "FirstName", "descending": false}
+    ],
+    "included": [],
+    "filter": null,
+    "options": []
+  },
+  "exec_options": [["ONLINE", "OFF"], ["SORT_IN_TEMPDB", "ON"]]
+}

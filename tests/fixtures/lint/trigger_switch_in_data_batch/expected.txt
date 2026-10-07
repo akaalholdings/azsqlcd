@@ -1,0 +1,2 @@
+DATA_FORBIDDEN migrations/0001__change.sql:4
+DATA_FORBIDDEN migrations/0001__change.sql:6

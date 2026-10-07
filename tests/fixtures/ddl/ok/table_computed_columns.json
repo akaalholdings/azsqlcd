@@ -1,0 +1,193 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "Invoice",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "InvoiceId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1000, "increment": 1},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Net",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 19, "scale": 4},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "TaxRate",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 5, "scale": 4},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Tax",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "[Net]", "*", "[TaxRate]", ")"]},
+          "persisted": false
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Gross",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "[Net]", "+", "(", "[Net]", "*", "[TaxRate]", ")", ")"]},
+          "persisted": true
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "GrossRounded",
+        "type": null,
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "CONVERT", "(", "decimal", "(", "19", ",", "2", ")", ",", "ROUND", "(", "[Net]", "+", "(", "[Net]", "*", "[TaxRate]", ")", ",", "2", ")", ")", ")"]},
+          "persisted": true
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "CreatedUtc",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 0},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "InvoiceYear",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "DATEPART", "(", "year", ",", "[CreatedUtc]", ")", ")"]},
+          "persisted": false
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Ref",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "CONCAT", "(", "'INV-'", ",", "RIGHT", "(", "'000000'", "+", "CAST", "(", "[InvoiceId]", "AS", "varchar", "(", "10", ")", ")", ",", "6", ")", ")", ")"]},
+          "persisted": true
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Kind",
+        "type": null,
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "CASE", "WHEN", "[Net]", "=", "0", "THEN", "'),('", "ELSE", "N'x'", "END", ")"]},
+          "persisted": true
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Doubled",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["[Net]", "*", "2"]},
+          "persisted": false
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Invoice",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "InvoiceId", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

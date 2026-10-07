@@ -1,0 +1,2 @@
+# LB-07, table_model = false: no model proof exists, so the chain rule asks for the replacement
+CHN006 migrations/migrations.sum:2

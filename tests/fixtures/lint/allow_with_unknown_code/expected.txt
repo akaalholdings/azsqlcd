@@ -1,0 +1,2 @@
+ALLOW_UNUSED migrations/0001__change.sql:3
+DROP_TABLE migrations/0001__change.sql:4

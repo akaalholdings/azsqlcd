@@ -1,0 +1,3 @@
+FORBIDDEN_TOKEN schema/procedures/sales.usp_Check.sql:4
+FORBIDDEN_TOKEN schema/procedures/sales.usp_Check.sql:6
+FORBIDDEN_TOKEN schema/views/sales.vw_Odd.sql:3

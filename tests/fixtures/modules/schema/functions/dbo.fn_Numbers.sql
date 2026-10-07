@@ -1,0 +1,2 @@
+CREATE OR ALTER FUNCTION [dbo].[fn_Numbers] (@n int) RETURNS TABLE
+RETURN SELECT TOP (@n) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [n] FROM sys.all_objects;

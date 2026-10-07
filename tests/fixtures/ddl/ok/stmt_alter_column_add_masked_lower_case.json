@@ -1,0 +1,1 @@
+{"class": "MaskColumn", "schema": "sales", "table": "Buyer", "column": "Mail", "function": "email()"}

@@ -1,0 +1,23 @@
+{
+  "class": "AddColumn",
+  "schema": "dbo",
+  "table": "Customer",
+  "column": {
+    "class": "Column",
+    "name": "IsActive",
+    "type": {"class": "TypeRef", "name": "bit", "schema": null, "length": null, "precision": null, "scale": null},
+    "nullable": true,
+    "identity": null,
+    "default": {
+      "class": "DefaultConstraint",
+      "name": "DF_Customer_IsActive",
+      "expression": {"class": "Expression", "tokens": ["(", "1", ")"]}
+    },
+    "computed": null,
+    "collation": null,
+    "generated": null,
+    "hidden": false,
+    "masked": null
+  },
+  "with_values": true
+}

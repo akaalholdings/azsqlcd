@@ -1,0 +1,14 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "Document",
+  "constraint": {
+    "class": "Check",
+    "name": "CK_Document_Owner",
+    "expression": {"class": "Expression", "tokens": ["(", "[OwnerId]", ">", "0", ")"]},
+    "not_for_replication": true
+  },
+  "for_column": null,
+  "with_check": false,
+  "exec_options": []
+}

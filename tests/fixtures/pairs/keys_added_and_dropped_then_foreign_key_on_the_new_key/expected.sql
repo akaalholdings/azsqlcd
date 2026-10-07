@@ -1,0 +1,8 @@
+ALTER TABLE [sales].[Tag] DROP CONSTRAINT [UQ_Tag_Label];
+GO
+ALTER TABLE [sales].[Tag] ADD CONSTRAINT [PK_Tag] PRIMARY KEY CLUSTERED ([TagId]);
+GO
+ALTER TABLE [sales].[Tag] ADD CONSTRAINT [UQ_Tag_Code] UNIQUE NONCLUSTERED ([Code]);
+GO
+ALTER TABLE [sales].[OrderTag] ADD CONSTRAINT [FK_OrderTag_Tag] FOREIGN KEY ([Code]) REFERENCES [sales].[Tag] ([Code]);
+GO

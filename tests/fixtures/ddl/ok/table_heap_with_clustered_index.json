@@ -1,0 +1,65 @@
+[
+  {
+    "class": "Table",
+    "schema": "dw",
+    "name": "Reading",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "DeviceId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ReadingUtc",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 3},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Reading",
+        "type": {"class": "TypeRef", "name": "float", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "CIX_Reading",
+        "unique": true,
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "ReadingUtc", "descending": true},
+          {"class": "KeyColumn", "name": "DeviceId", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      }
+    ],
+    "temporal": null
+  }
+]

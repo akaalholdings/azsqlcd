@@ -1,0 +1,3 @@
+CREATE OR ALTER VIEW [rpt].[Margin]
+AS
+SELECT 1 AS [One];

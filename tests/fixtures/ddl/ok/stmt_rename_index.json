@@ -1,0 +1,1 @@
+{"class": "Rename", "kind": "index", "old": ["sales", "Order", "IX_Order_Stat"], "new_name": "IX_Order_Status"}

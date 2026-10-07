@@ -1,0 +1,7 @@
+CREATE OR ALTER FUNCTION dbo.fn_NoAs (@x int)
+RETURNS int
+WITH SCHEMABINDING
+BEGIN
+    DECLARE @y AS int = (SELECT CAST(@x AS int) AS v);
+    RETURN @y;
+END;

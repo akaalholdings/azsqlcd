@@ -1,0 +1,3 @@
+[[drop]]
+object = "VIEW:[sales].[usp_Old]"
+reason = "was a view until r40"

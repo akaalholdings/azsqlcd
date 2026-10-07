@@ -1,0 +1,9 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "Document",
+  "constraint": {"class": "ForeignKey", "name": "FK_Document_Owner", "columns": ["OwnerId"], "ref_schema": "sales", "ref_table": "Owner", "ref_columns": ["OwnerId"], "on_delete": "NO ACTION", "on_update": "CASCADE", "not_for_replication": true},
+  "for_column": null,
+  "with_check": null,
+  "exec_options": []
+}

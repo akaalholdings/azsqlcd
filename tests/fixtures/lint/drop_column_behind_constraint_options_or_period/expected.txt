@@ -1,0 +1,5 @@
+DROP_CONSTRAINT migrations/0001__change.sql:3
+DROP_COLUMN migrations/0001__change.sql:3
+DROP_CONSTRAINT migrations/0001__change.sql:5
+DROP_COLUMN migrations/0001__change.sql:5
+DROP_COLUMN migrations/0001__change.sql:5

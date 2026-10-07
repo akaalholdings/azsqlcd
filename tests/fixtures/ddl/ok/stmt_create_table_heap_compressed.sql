@@ -1,0 +1,1 @@
+CREATE TABLE [dw].[Staging] ([Id] int NOT NULL) WITH (DATA_COMPRESSION = ROW);

@@ -1,0 +1,122 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "OrderHeader",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "OrderId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "CustomerId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "BillToId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "CurrencyCode",
+        "type": {"class": "TypeRef", "name": "char", "schema": null, "length": 3, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_OrderHeader_Currency",
+          "expression": {"class": "Expression", "tokens": ["(", "'GBP'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "TenantId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "WarehouseId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "BinId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_OrderHeader",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "OrderId", "descending": false}
+        ],
+        "options": []
+      },
+      {"class": "ForeignKey", "name": "FK_OrderHeader_Customer", "columns": ["CustomerId"], "ref_schema": "dbo", "ref_table": "Customer", "ref_columns": ["CustomerId"], "on_delete": "NO ACTION", "on_update": "CASCADE"},
+      {"class": "ForeignKey", "name": "FK_OrderHeader_BillTo", "columns": ["BillToId"], "ref_schema": "dbo", "ref_table": "Address", "ref_columns": ["AddressId"], "on_delete": "SET NULL", "on_update": "NO ACTION"},
+      {"class": "ForeignKey", "name": "FK_OrderHeader_Currency", "columns": ["CurrencyCode"], "ref_schema": "ref", "ref_table": "Currency", "ref_columns": ["CurrencyCode"], "on_delete": "NO ACTION", "on_update": "CASCADE"},
+      {"class": "ForeignKey", "name": "FK_OrderHeader_Bin", "columns": ["TenantId", "WarehouseId", "BinId"], "ref_schema": "inventory", "ref_table": "Bin", "ref_columns": ["TenantId", "WarehouseId", "BinId"], "on_delete": "CASCADE", "on_update": "NO ACTION"},
+      {"class": "ForeignKey", "name": "FK_OrderHeader_Tenant", "columns": ["TenantId"], "ref_schema": "admin", "ref_table": "Tenant", "ref_columns": ["TenantId"], "on_delete": "SET DEFAULT", "on_update": "NO ACTION"}
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

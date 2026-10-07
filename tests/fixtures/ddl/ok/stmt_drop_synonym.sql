@@ -1,0 +1,1 @@
+DROP SYNONYM [dbo].[Cust];

@@ -1,0 +1,1 @@
+ALTER TABLE [sales].[Document] WITH NOCHECK ADD CONSTRAINT [CK_Document_Owner] CHECK NOT FOR REPLICATION ([OwnerId] > 0);

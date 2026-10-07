@@ -1,0 +1,3 @@
+[[drop]]
+object = "VIEW:[rpt].[Margin]"
+reason = "now a function"

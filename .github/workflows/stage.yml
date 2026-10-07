@@ -1,0 +1,465 @@
+# Reusable: one environment of one database repository.
+#
+#   gated = true    targets > plan (<env>-plan) > gate > approval > deploy of that plan (<env>)
+#   gated = false   targets > deploy with an inline plan under the lock (<env>)      (A26)
+#   check-only      targets > plan > gate; the gate fails when a target has pending work
+#
+# Rules of this file:
+#   - A value from `inputs` or `matrix` reaches a shell only through `env:`.
+#   - A job that holds `id-token: write` names an environment. No other job can get a token.
+#   - No concurrency group. The applock, the release order and the plan hash decide (A30).
+name: stage
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev, sandbox, test, preprod or prod
+        type: string
+        required: true
+      release:
+        description: Release name from release.yml, for example r57
+        type: string
+        required: true
+      digest:
+        description: Manifest digest from release.yml
+        type: string
+        required: true
+      gated:
+        description: Must equal `gated` of this environment in azsqlcd.toml. true = the environment has reviewers.
+        type: boolean
+        required: true
+      runs-on:
+        description: 'JSON. Runner of the database jobs, for example {"group":"azsql-nonprod"}. Ephemeral runners only.'
+        type: string
+        required: true
+      runs-on-light:
+        description: JSON. Runner of the jobs that hold no database identity. Needs bash, gh and jq.
+        type: string
+        default: '"ubuntu-latest"'
+      check-only:
+        description: true = the stage is before from_stage. It must hold the release already and never deploys.
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  # No database access and no id-token. The tool checks the downloaded release against the digest.
+  targets:
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+      timeout: ${{ steps.targets.outputs.timeout }}
+    steps:
+      - id: fetch
+        name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - id: targets
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            targets
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --ci
+            github
+      - id: agree
+        name: The gated input must equal azsqlcd.toml
+        shell: bash
+        env:
+          MATRIX: ${{ steps.targets.outputs.matrix }}
+          GATED: ${{ inputs.gated }}
+        run: |
+          set -euo pipefail
+          differs=$(jq -r --argjson gated "$GATED" '[.[] | select(.gated != $gated) | .id] | join(" ")' <<< "$MATRIX")
+          if [ -n "$differs" ]; then
+            echo "::error::input gated=$GATED differs from azsqlcd.toml for: $differs"
+            exit 1
+          fi
+
+  plan:
+    needs: targets
+    if: ${{ inputs.gated || inputs.check-only }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment }}-plan
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    # Every database command of the job writes its triage log here (docs/triage.md).
+    env:
+      AZSQLCD_LOG_DIR: azsqlcd-logs
+    steps:
+      - name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ matrix.target.plan_client_id }}
+          tenant-id: ${{ matrix.target.tenant_id }}
+          allow-no-subscriptions: true
+      - id: plan
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          args: |
+            plan
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ matrix.target.id }}
+            --out
+            plan/plan-${{ inputs.environment }}-${{ matrix.target.id }}
+            --ci
+            github
+      - id: outcome
+        name: Record the outcome
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB: plan
+          DIR: plan/plan-${{ inputs.environment }}-${{ matrix.target.id }}
+          TARGET: ${{ matrix.target.id }}
+          OUTCOME: ${{ steps.plan.outcome }}
+          EXIT_CODE: ${{ steps.plan.outputs.exit_code }}
+          REASON_CODE: ${{ steps.plan.outputs.reason_code }}
+          PENDING: ${{ steps.plan.outputs.pending }}
+        run: |
+          set -euo pipefail
+          id='^[A-Za-z0-9_-]+$'; number='^[0-9]+$'; code='^[A-Z0-9_]+$'; word='^[a-z]+$'; flag='^(true|false)$'
+          if ! [[ "$TARGET" =~ $id ]]; then echo "::error::the target id holds a character that is not allowed"; exit 1; fi
+          [[ "$OUTCOME" =~ $word ]] || OUTCOME=none
+          [[ "$EXIT_CODE" =~ $number ]] || EXIT_CODE=none
+          [[ "$REASON_CODE" =~ $code ]] || REASON_CODE=none
+          [[ "$PENDING" =~ $flag ]] || PENDING=none
+          mkdir -p "$DIR"
+          printf '%s\n' "job=$JOB" "target=$TARGET" "outcome=$OUTCOME" "exit_code=$EXIT_CODE" \
+            "reason_code=$REASON_CODE" "pending=$PENDING" > "$DIR/outcome.txt"
+      # The artefact holds one directory that has the name of the artefact. A download by pattern
+      # with merge-multiple then gives <path>/<artefact name>/ for one target and for several.
+      # Without it, download-artifact puts a single matching artefact into <path> itself.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: plan-${{ inputs.environment }}-${{ matrix.target.id }}
+          path: plan
+          overwrite: true
+      # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
+      - name: Upload the triage log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: azsqlcd-logs-${{ inputs.environment }}-${{ matrix.target.id }}-plan
+          path: azsqlcd-logs
+          if-no-files-found: ignore
+          overwrite: true
+
+  # Collects the plan results. No token, no database.
+  gate:
+    needs: plan
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions: {}
+    outputs:
+      pending: ${{ steps.gate.outputs.pending }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: plan-${{ inputs.environment }}-*
+          path: plans
+          merge-multiple: true
+      - id: gate
+        name: Does a target have pending work
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          CHECK_ONLY: ${{ inputs.check-only }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          count=0
+          pending=false
+          for file in plans/*/outcome.txt; do
+            count=$((count + 1))
+            case "$(sed -n 's/^pending=//p' "$file")" in
+              true) pending=true ;;
+              false) ;;
+              *) echo "::error::$file: the plan did not report if work is pending"; exit 1 ;;
+            esac
+          done
+          if [ "$count" -eq 0 ]; then echo "::error::no plan result was found"; exit 1; fi
+          if [ "$CHECK_ONLY" = "true" ] && [ "$pending" = "true" ]; then
+            echo "::error::$ENVIRONMENT is before from_stage but does not hold this release. Promote from an earlier stage."
+            exit 1
+          fi
+          echo "pending=$pending" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [targets, gate]
+    # gated: after the gate, and only when a target has pending work (no approval for a no-op).
+    # not gated: the plan and gate jobs are skipped and the plan is computed under the lock.
+    if: >-
+      ${{
+        !cancelled() && !inputs.check-only && needs.targets.result == 'success' &&
+        ((inputs.gated && needs.gate.result == 'success' && needs.gate.outputs.pending == 'true') ||
+         (!inputs.gated && needs.gate.result == 'skipped'))
+      }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    timeout-minutes: ${{ fromJSON(needs.targets.outputs.timeout) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    # Every database command of the job writes its triage log here (docs/triage.md).
+    env:
+      AZSQLCD_LOG_DIR: azsqlcd-logs
+    steps:
+      - name: Download the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ inputs.gated }}
+        with:
+          name: plan-${{ inputs.environment }}-${{ matrix.target.id }}
+          path: plan
+      # A28. The approvers of this run for this environment. The list is empty when the environment
+      # has no reviewers. The approvals API holds no time of approval: approved_utc is the time at
+      # which this job, which starts only after the approval, read the record.
+      - id: audit
+        name: Read the approvers of this run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '.[] | select(.state == "approved") | .user.login as $login | .environments[] | [.name, $login] | @tsv' \
+            > "$RUNNER_TEMP/approvals.tsv"
+          approved_by=$(awk -F '\t' -v e="$ENVIRONMENT" '$1 == e { print $2 }' "$RUNNER_TEMP/approvals.tsv" | sort -u | paste -s -d , -)
+          login='^[][A-Za-z0-9_,-]*$'
+          if ! [[ "$approved_by" =~ $login ]]; then echo "::error::an approver login holds a character that is not allowed"; exit 1; fi
+          {
+            echo "approved_by=$approved_by"
+            echo "approved_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ matrix.target.deploy_client_id }}
+          tenant-id: ${{ matrix.target.tenant_id }}
+          allow-no-subscriptions: true
+      - id: deploy
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          # An expression that gives '' leaves an empty line; the action drops empty lines.
+          args: |
+            deploy
+            --bundle
+            release
+            --digest
+            ${{ inputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ matrix.target.id }}
+            ${{ inputs.gated && '--expect-plan-file' || '--inline-plan' }}
+            ${{ inputs.gated && format('plan/plan-{0}-{1}/plan.json', inputs.environment, matrix.target.id) || '' }}
+            --out
+            report/report-${{ inputs.environment }}-${{ matrix.target.id }}
+            ${{ steps.audit.outputs.approved_by && '--approved-by' || '' }}
+            ${{ steps.audit.outputs.approved_by }}
+            ${{ steps.audit.outputs.approved_by && '--approved-utc' || '' }}
+            ${{ steps.audit.outputs.approved_by && steps.audit.outputs.approved_utc || '' }}
+            --triggering-actor
+            ${{ github.triggering_actor }}
+            --ci-run-url
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+            --ci
+            github
+      - id: outcome
+        name: Record the outcome
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB: deploy
+          DIR: report/report-${{ inputs.environment }}-${{ matrix.target.id }}
+          TARGET: ${{ matrix.target.id }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+          EXIT_CODE: ${{ steps.deploy.outputs.exit_code }}
+          REASON_CODE: ${{ steps.deploy.outputs.reason_code }}
+          PENDING: ''
+        run: |
+          set -euo pipefail
+          id='^[A-Za-z0-9_-]+$'; number='^[0-9]+$'; code='^[A-Z0-9_]+$'; word='^[a-z]+$'; flag='^(true|false)$'
+          if ! [[ "$TARGET" =~ $id ]]; then echo "::error::the target id holds a character that is not allowed"; exit 1; fi
+          [[ "$OUTCOME" =~ $word ]] || OUTCOME=none
+          [[ "$EXIT_CODE" =~ $number ]] || EXIT_CODE=none
+          [[ "$REASON_CODE" =~ $code ]] || REASON_CODE=none
+          [[ "$PENDING" =~ $flag ]] || PENDING=none
+          mkdir -p "$DIR"
+          printf '%s\n' "job=$JOB" "target=$TARGET" "outcome=$OUTCOME" "exit_code=$EXIT_CODE" \
+            "reason_code=$REASON_CODE" "pending=$PENDING" > "$DIR/outcome.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: report-${{ inputs.environment }}-${{ matrix.target.id }}
+          path: report
+          overwrite: true
+      # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
+      - name: Upload the triage log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: azsqlcd-logs-${{ inputs.environment }}-${{ matrix.target.id }}-deploy
+          path: azsqlcd-logs
+          if-no-files-found: ignore
+          overwrite: true
+
+  # A28. plan.json and report.json outlive the artefact retention as assets of the release.
+  record:
+    needs: [plan, deploy]
+    if: ${{ always() && !inputs.check-only && (needs.plan.result != 'skipped' || needs.deploy.result != 'skipped') }}
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: plan-${{ inputs.environment }}-*
+          path: out
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: report-${{ inputs.environment }}-*
+          path: out
+          merge-multiple: true
+      - id: attach
+        name: Attach plan.json and report.json to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
+          mkdir -p assets
+          count=0
+          for dir in out/plan-* out/report-*; do
+            suffix=${dir#out/}
+            suffix=${suffix#plan-}
+            suffix=${suffix#report-}
+            for kind in plan report; do
+              if [ -f "$dir/$kind.json" ]; then
+                cp "$dir/$kind.json" "assets/$kind-$suffix-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+                count=$((count + 1))
+              fi
+            done
+          done
+          if [ "$count" -eq 0 ]; then echo "no plan.json or report.json to attach"; exit 0; fi
+          gh release upload "$RELEASE" -R "$GITHUB_REPOSITORY" assets/*.json
+
+  # A29. One open issue per target, label azsqlcd-incident. The issue holds codes and links; never
+  # SQL text and never engine error text.
+  incident:
+    needs: [targets, plan, gate, deploy]
+    if: ${{ always() && inputs.gated && !inputs.check-only && contains(needs.*.result, 'failure') }}
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: plan-${{ inputs.environment }}-*
+          path: out
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: report-${{ inputs.environment }}-*
+          path: out
+          merge-multiple: true
+      - id: issue
+        name: Open or update the incident issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # This job also runs when the name check of another job failed: the issue never holds the raw input.
+          name='^r[0-9]+$'
+          if ! [[ "$RELEASE" =~ $name ]]; then RELEASE='(not a release name)'; fi
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          gh label create azsqlcd-incident -R "$GITHUB_REPOSITORY" --color B60205 \
+            --description "azsqlcd: a plan or a deploy needs a human" > /dev/null 2>&1 || true
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label azsqlcd-incident --state open --limit 500 \
+            --json number,title --jq '.[] | [.number, .title] | @tsv')
+
+          raise_issue() {  # target, job, exit code, reason code
+            local title="azsqlcd incident: $ENVIRONMENT / $1"
+            local body number
+            body=$(printf '%s\n' "Environment: $ENVIRONMENT" "Target: $1" "Release: $RELEASE" "Job: $2" \
+              "Exit code: $3" "Reason code: $4" "Run: $run_url" "" \
+              "Runbook: docs/runbook.md of the tool repository. Find the exit code, then the reason code." \
+              "Close this issue when the target is deployed or resolved.")
+            number=$(awk -F '\t' -v t="$title" '$2 == t { print $1; exit }' <<< "$open")
+            if [ -n "$number" ]; then
+              gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label azsqlcd-incident --body "$body"
+            fi
+          }
+
+          count=0
+          for file in out/*/outcome.txt; do
+            if [ "$(sed -n 's/^outcome=//p' "$file")" = "success" ]; then continue; fi
+            raise_issue "$(sed -n 's/^target=//p' "$file")" "$(sed -n 's/^job=//p' "$file")" \
+              "$(sed -n 's/^exit_code=//p' "$file")" "$(sed -n 's/^reason_code=//p' "$file")"
+            count=$((count + 1))
+          done
+          # A job failed before the tool reported: runner lost, login failed, release not readable.
+          if [ "$count" -eq 0 ]; then raise_issue "no tool report" "see the run" none none; fi

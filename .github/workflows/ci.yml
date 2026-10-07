@@ -1,0 +1,43 @@
+# CI of the tool repository. No job connects to a database (D2, D10).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.12', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # .gitattributes (eol=lf) decides the line ends, also with core.autocrlf=true on a Windows
+      # runner. This step proves it: a CRLF checkout changes fixture bytes and fails 36 tests.
+      - name: line ends are LF
+        shell: bash
+        run: |
+          if git ls-files --eol | grep -E '[[:space:]]w/(crlf|mixed)[[:space:]]' | grep -v 'attr/-text'; then
+            echo 'the files above are not LF: see .gitattributes (eol=lf)' >&2
+            exit 1
+          fi
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.4'
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      # No extra: the core and every offline command must work with the standard library only.
+      - run: uv sync --frozen
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync ruff format --check
+      - run: uv run --no-sync pyright
+      - run: uv run --no-sync pytest -q

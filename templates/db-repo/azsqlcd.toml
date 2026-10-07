@@ -1,0 +1,82 @@
+# azsqlcd.toml: the project, its identities, its environments and their targets.
+# The file holds no secrets; a client id is not a secret. Every key is checked and an unknown key is
+# an error. Replace each example value.
+
+[project]
+name = "example"                                    # stored in azsqlcd.meta.project of every target
+tenant_id = "00000000-0000-0000-0000-000000000000"  # Entra tenant of the identities
+table_model = false                                 # true after the table files are exported and proven
+module_chunk = 100                                  # modules per transaction on a first converge
+min_token_minutes = 20                              # a deploy needs a token with at least this life left
+# data_batches: false = a '-- azsqlcd:data' batch in a migration is an error (lint DATA000); true = the data rules apply.
+# data_batches = false
+
+# Client ids of the identities. `scripts/setup_repo.py --print-azure` prints how to create them.
+[identities]
+nonprod_plan = "00000000-0000-0000-0000-000000000001"
+prod_plan = "00000000-0000-0000-0000-000000000002"
+nonprod_deploy = "00000000-0000-0000-0000-000000000003"
+test_deploy = "00000000-0000-0000-0000-000000000004"
+preprod_deploy = "00000000-0000-0000-0000-000000000005"
+prod_deploy = "00000000-0000-0000-0000-000000000006"
+
+# One table per environment. Several physical databases with one schema are several targets.
+# A target id is unique in the file and holds only letters, digits, '_' and '-'.
+# `server`: use the failover-group listener name if the database is in a failover group.
+[env.dev]
+plan_identity = "nonprod_plan"    # read only: plan, drift, export, baseline report
+deploy_identity = "nonprod_deploy"
+drift = "report"                  # report | block. Drift on an object that the plan touches always blocks.
+lock_timeout_ms = 30000           # SET LOCK_TIMEOUT of the deploy session
+applock_wait_s = 600              # wait for another run that holds the deploy lock
+job_timeout_minutes = 120         # lower limit of the deploy job timeout
+gated = false                     # must equal `gated` of this stage in .github/workflows/db.yml
+targets = [{ id = "example-dev", server = "sql-example-dev.database.windows.net", database = "example" }]
+
+[env.sandbox]
+plan_identity = "nonprod_plan"
+deploy_identity = "nonprod_deploy"
+drift = "report"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = false
+targets = [{ id = "example-sandbox", server = "sql-example-sandbox.database.windows.net", database = "example" }]
+
+[env.test]
+plan_identity = "nonprod_plan"
+deploy_identity = "test_deploy"
+drift = "block"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true                      # plan job, approval, then the deploy of that plan
+targets = [{ id = "example-test", server = "sql-example-test.database.windows.net", database = "example" }]
+
+[env.preprod]
+plan_identity = "prod_plan"
+deploy_identity = "preprod_deploy"
+drift = "block"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true
+targets = [{ id = "example-preprod", server = "sql-example-preprod.database.windows.net", database = "example" }]
+
+[env.prod]
+plan_identity = "prod_plan"
+deploy_identity = "prod_deploy"
+drift = "block"
+lock_timeout_ms = 10000           # short: a busy table stops the deploy with exit 24, not the workload
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true
+targets = [{ id = "example-prod", server = "sql-example-prod.database.windows.net", database = "example" }]
+
+# Objects that the tool never creates, alters, drops or refreshes. `export` writes this list.
+[unmanaged]
+objects = []                      # for example "TABLE:[audit].[Log]"
+
+# Unmanaged dependants of a dropped, renamed or retyped column that a DBA accepted.
+[ack]
+unmanaged_dependants = []         # for example "[rpt].[vMargin] -> [sales].[Order].[LegacyCode]"

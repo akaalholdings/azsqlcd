@@ -1,0 +1,27 @@
+{
+  "class": "CreateTable",
+  "table": {
+    "class": "Table",
+    "schema": "dw",
+    "name": "Staging",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "Id",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [],
+    "indexes": [],
+    "temporal": null,
+    "compression": "ROW"
+  }
+}

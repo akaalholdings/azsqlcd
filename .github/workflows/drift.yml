@@ -1,0 +1,115 @@
+# Reusable: drift report for one environment. The schedule is in the caller (db.yml).
+# The bundle is built from the head of main in this run; no release is read. The job uses the plan
+# identity, which cannot write. Exit 30 (drift found) fails the job.
+name: drift
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev, sandbox, test, preprod or prod
+        type: string
+        required: true
+      runs-on:
+        description: 'JSON. Runner of the database job, for example {"group":"azsql-nonprod"}. Ephemeral runners only.'
+        type: string
+        required: true
+      runs-on-light:
+        description: JSON. Runner of the job that holds no database identity.
+        type: string
+        default: '"ubuntu-latest"'
+
+permissions: {}
+
+jobs:
+  targets:
+    runs-on: ${{ fromJSON(inputs.runs-on-light) }}
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: build
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            build
+            --commit
+            ${{ github.sha }}
+            --out
+            release
+            --ci
+            github
+      - id: targets
+        uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          args: |
+            targets
+            --bundle
+            release
+            --digest
+            ${{ steps.build.outputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --ci
+            github
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: drift-bundle-${{ inputs.environment }}
+          path: release
+          if-no-files-found: error
+          overwrite: true
+
+  drift:
+    needs: targets
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment: ${{ inputs.environment }}-plan
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    # Every database command of the job writes its triage log here (docs/triage.md).
+    env:
+      AZSQLCD_LOG_DIR: azsqlcd-logs
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: drift-bundle-${{ inputs.environment }}
+          path: release
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ matrix.target.plan_client_id }}
+          tenant-id: ${{ matrix.target.tenant_id }}
+          allow-no-subscriptions: true
+      - uses: akaalholdings/azsqlcd@v0.1.0
+        with:
+          db: true
+          args: |
+            drift
+            --bundle
+            release
+            --digest
+            ${{ needs.targets.outputs.digest }}
+            --env
+            ${{ inputs.environment }}
+            --target
+            ${{ matrix.target.id }}
+            --ci
+            github
+      # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
+      - name: Upload the triage log
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: azsqlcd-logs-${{ inputs.environment }}-${{ matrix.target.id }}-drift
+          path: azsqlcd-logs
+          if-no-files-found: ignore
+          overwrite: true

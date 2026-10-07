@@ -1,0 +1,3 @@
+CREATE OR ALTER PROCEDURE [rpt].[Report]
+AS
+SELECT 1 AS [One];

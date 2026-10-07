@@ -1,0 +1,263 @@
+{
+  "sql_modules": [
+    {
+      "case": "procedure with comments above the header",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "-- comment above the header\n/* block comment */\nCREATE OR ALTER PROCEDURE [azsqlcd_spike].[l7_p]\n    @a int = 1\nAS\nSELECT @a AS [a];\n",
+      "definition": "-- comment above the header\n/* block comment */\nCREATE   PROCEDURE [azsqlcd_spike].[l7_p]\n    @a int = 1\nAS\nSELECT @a AS [a];\n"
+    },
+    {
+      "case": "procedure with comments above the header",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "-- comment above the header\n/* block comment */\nCREATE OR ALTER PROCEDURE [azsqlcd_spike].[l7_p]\n    @a int = 1\nAS\nSELECT @a AS [a];\n",
+      "definition": "-- comment above the header\n/* block comment */\nCREATE   PROCEDURE [azsqlcd_spike].[l7_p]\n    @a int = 1\nAS\nSELECT @a AS [a];\n"
+    },
+    {
+      "case": "procedure with comments above the header",
+      "step": "ALTER",
+      "sent": "-- comment above the header\n/* block comment */\nALTER PROCEDURE [azsqlcd_spike].[l7_p]\n    @a int = 1\nAS\nSELECT @a AS [a];\n",
+      "definition": "-- comment above the header\n/* block comment */\nCREATE PROCEDURE [azsqlcd_spike].[l7_p]\n    @a int = 1\nAS\nSELECT @a AS [a];\n"
+    },
+    {
+      "case": "procedure with AS between parameter and type, no parentheses",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE OR ALTER PROCEDURE [azsqlcd_spike].[l7_pa] @a AS int = 1 AS SELECT @a AS [a];\n",
+      "definition": "CREATE   PROCEDURE [azsqlcd_spike].[l7_pa] @a AS int = 1 AS SELECT @a AS [a];\n"
+    },
+    {
+      "case": "procedure with AS between parameter and type, no parentheses",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE OR ALTER PROCEDURE [azsqlcd_spike].[l7_pa] @a AS int = 1 AS SELECT @a AS [a];\n",
+      "definition": "CREATE   PROCEDURE [azsqlcd_spike].[l7_pa] @a AS int = 1 AS SELECT @a AS [a];\n"
+    },
+    {
+      "case": "procedure with AS between parameter and type, no parentheses",
+      "step": "ALTER",
+      "sent": "ALTER PROCEDURE [azsqlcd_spike].[l7_pa] @a AS int = 1 AS SELECT @a AS [a];\n",
+      "definition": "CREATE PROCEDURE [azsqlcd_spike].[l7_pa] @a AS int = 1 AS SELECT @a AS [a];\n"
+    },
+    {
+      "case": "view with CRLF line ends and spaces at line ends",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE OR ALTER VIEW [azsqlcd_spike].[l7_v]\r\nAS\r\nSELECT 1 AS [x]   \r\n;\r\n",
+      "definition": "CREATE   VIEW [azsqlcd_spike].[l7_v]\r\nAS\r\nSELECT 1 AS [x]   \r\n;\r\n"
+    },
+    {
+      "case": "view with CRLF line ends and spaces at line ends",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE OR ALTER VIEW [azsqlcd_spike].[l7_v]\r\nAS\r\nSELECT 1 AS [x]   \r\n;\r\n",
+      "definition": "CREATE   VIEW [azsqlcd_spike].[l7_v]\r\nAS\r\nSELECT 1 AS [x]   \r\n;\r\n"
+    },
+    {
+      "case": "view with CRLF line ends and spaces at line ends",
+      "step": "ALTER",
+      "sent": "ALTER VIEW [azsqlcd_spike].[l7_v]\r\nAS\r\nSELECT 1 AS [x]   \r\n;\r\n",
+      "definition": "CREATE VIEW [azsqlcd_spike].[l7_v]\r\nAS\r\nSELECT 1 AS [x]   \r\n;\r\n"
+    },
+    {
+      "case": "scalar function",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE OR ALTER FUNCTION [azsqlcd_spike].[l7_fn] (@a int)\nRETURNS int\nAS\nBEGIN\n    RETURN @a + 1;\nEND;\n",
+      "definition": "CREATE   FUNCTION [azsqlcd_spike].[l7_fn] (@a int)\nRETURNS int\nAS\nBEGIN\n    RETURN @a + 1;\nEND;\n"
+    },
+    {
+      "case": "scalar function",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE OR ALTER FUNCTION [azsqlcd_spike].[l7_fn] (@a int)\nRETURNS int\nAS\nBEGIN\n    RETURN @a + 1;\nEND;\n",
+      "definition": "CREATE   FUNCTION [azsqlcd_spike].[l7_fn] (@a int)\nRETURNS int\nAS\nBEGIN\n    RETURN @a + 1;\nEND;\n"
+    },
+    {
+      "case": "scalar function",
+      "step": "ALTER",
+      "sent": "ALTER FUNCTION [azsqlcd_spike].[l7_fn] (@a int)\nRETURNS int\nAS\nBEGIN\n    RETURN @a + 1;\nEND;\n",
+      "definition": "CREATE FUNCTION [azsqlcd_spike].[l7_fn] (@a int)\nRETURNS int\nAS\nBEGIN\n    RETURN @a + 1;\nEND;\n"
+    },
+    {
+      "case": "inline table-valued function",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE OR ALTER FUNCTION [azsqlcd_spike].[l7_if] (@a int)\nRETURNS TABLE\nAS\nRETURN (SELECT @a AS [a]);\n",
+      "definition": "CREATE   FUNCTION [azsqlcd_spike].[l7_if] (@a int)\nRETURNS TABLE\nAS\nRETURN (SELECT @a AS [a]);\n"
+    },
+    {
+      "case": "inline table-valued function",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE OR ALTER FUNCTION [azsqlcd_spike].[l7_if] (@a int)\nRETURNS TABLE\nAS\nRETURN (SELECT @a AS [a]);\n",
+      "definition": "CREATE   FUNCTION [azsqlcd_spike].[l7_if] (@a int)\nRETURNS TABLE\nAS\nRETURN (SELECT @a AS [a]);\n"
+    },
+    {
+      "case": "inline table-valued function",
+      "step": "ALTER",
+      "sent": "ALTER FUNCTION [azsqlcd_spike].[l7_if] (@a int)\nRETURNS TABLE\nAS\nRETURN (SELECT @a AS [a]);\n",
+      "definition": "CREATE FUNCTION [azsqlcd_spike].[l7_if] (@a int)\nRETURNS TABLE\nAS\nRETURN (SELECT @a AS [a]);\n"
+    },
+    {
+      "case": "multi-statement table-valued function",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE OR ALTER FUNCTION [azsqlcd_spike].[l7_tf] ()\nRETURNS @r TABLE ([a] int NULL)\nAS\nBEGIN\n    INSERT INTO @r ([a]) VALUES (1);\n    RETURN;\nEND;\n",
+      "definition": "CREATE   FUNCTION [azsqlcd_spike].[l7_tf] ()\nRETURNS @r TABLE ([a] int NULL)\nAS\nBEGIN\n    INSERT INTO @r ([a]) VALUES (1);\n    RETURN;\nEND;\n"
+    },
+    {
+      "case": "multi-statement table-valued function",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE OR ALTER FUNCTION [azsqlcd_spike].[l7_tf] ()\nRETURNS @r TABLE ([a] int NULL)\nAS\nBEGIN\n    INSERT INTO @r ([a]) VALUES (1);\n    RETURN;\nEND;\n",
+      "definition": "CREATE   FUNCTION [azsqlcd_spike].[l7_tf] ()\nRETURNS @r TABLE ([a] int NULL)\nAS\nBEGIN\n    INSERT INTO @r ([a]) VALUES (1);\n    RETURN;\nEND;\n"
+    },
+    {
+      "case": "multi-statement table-valued function",
+      "step": "ALTER",
+      "sent": "ALTER FUNCTION [azsqlcd_spike].[l7_tf] ()\nRETURNS @r TABLE ([a] int NULL)\nAS\nBEGIN\n    INSERT INTO @r ([a]) VALUES (1);\n    RETURN;\nEND;\n",
+      "definition": "CREATE FUNCTION [azsqlcd_spike].[l7_tf] ()\nRETURNS @r TABLE ([a] int NULL)\nAS\nBEGIN\n    INSERT INTO @r ([a]) VALUES (1);\n    RETURN;\nEND;\n"
+    },
+    {
+      "case": "trigger",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE OR ALTER TRIGGER [azsqlcd_spike].[l7_tr] ON [azsqlcd_spike].[l7_t]\nAFTER INSERT\nAS\nSET NOCOUNT ON;\n",
+      "definition": "CREATE   TRIGGER [azsqlcd_spike].[l7_tr] ON [azsqlcd_spike].[l7_t]\nAFTER INSERT\nAS\nSET NOCOUNT ON;\n"
+    },
+    {
+      "case": "trigger",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE OR ALTER TRIGGER [azsqlcd_spike].[l7_tr] ON [azsqlcd_spike].[l7_t]\nAFTER INSERT\nAS\nSET NOCOUNT ON;\n",
+      "definition": "CREATE   TRIGGER [azsqlcd_spike].[l7_tr] ON [azsqlcd_spike].[l7_t]\nAFTER INSERT\nAS\nSET NOCOUNT ON;\n"
+    },
+    {
+      "case": "trigger",
+      "step": "ALTER",
+      "sent": "ALTER TRIGGER [azsqlcd_spike].[l7_tr] ON [azsqlcd_spike].[l7_t]\nAFTER INSERT\nAS\nSET NOCOUNT ON;\n",
+      "definition": "CREATE TRIGGER [azsqlcd_spike].[l7_tr] ON [azsqlcd_spike].[l7_t]\nAFTER INSERT\nAS\nSET NOCOUNT ON;\n"
+    },
+    {
+      "case": "lower-case verb with extra spaces",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "create   or   alter   procedure [azsqlcd_spike].[l7_lc] as select 1 as [x];",
+      "definition": "create         procedure [azsqlcd_spike].[l7_lc] as select 1 as [x];"
+    },
+    {
+      "case": "lower-case verb with extra spaces",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "create   or   alter   procedure [azsqlcd_spike].[l7_lc] as select 1 as [x];",
+      "definition": "create         procedure [azsqlcd_spike].[l7_lc] as select 1 as [x];"
+    },
+    {
+      "case": "lower-case verb with extra spaces",
+      "step": "ALTER",
+      "sent": "alter   procedure [azsqlcd_spike].[l7_lc] as select 1 as [x];",
+      "definition": "CREATE   procedure [azsqlcd_spike].[l7_lc] as select 1 as [x];"
+    },
+    {
+      "case": "comments between the words of the verb",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE /* c1 */ OR /* c2 */ ALTER -- c3\n VIEW [azsqlcd_spike].[l7_cm] AS SELECT 1 AS [x];",
+      "definition": "CREATE /* c1 */  /* c2 */  -- c3\n VIEW [azsqlcd_spike].[l7_cm] AS SELECT 1 AS [x];"
+    },
+    {
+      "case": "comments between the words of the verb",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE /* c1 */ OR /* c2 */ ALTER -- c3\n VIEW [azsqlcd_spike].[l7_cm] AS SELECT 1 AS [x];",
+      "definition": "CREATE /* c1 */  /* c2 */  -- c3\n VIEW [azsqlcd_spike].[l7_cm] AS SELECT 1 AS [x];"
+    },
+    {
+      "case": "line break and tab between the words of the verb",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "CREATE\nOR\tALTER\r\nPROCEDURE [azsqlcd_spike].[l7_ws] AS SELECT 1 AS [x];",
+      "definition": "CREATE\n\t\r\nPROCEDURE [azsqlcd_spike].[l7_ws] AS SELECT 1 AS [x];"
+    },
+    {
+      "case": "line break and tab between the words of the verb",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "CREATE\nOR\tALTER\r\nPROCEDURE [azsqlcd_spike].[l7_ws] AS SELECT 1 AS [x];",
+      "definition": "CREATE\n\t\r\nPROCEDURE [azsqlcd_spike].[l7_ws] AS SELECT 1 AS [x];"
+    },
+    {
+      "case": "line break and tab between the words of the verb",
+      "step": "ALTER",
+      "sent": "ALTER\r\nPROCEDURE [azsqlcd_spike].[l7_ws] AS SELECT 1 AS [x];",
+      "definition": "CREATE\r\nPROCEDURE [azsqlcd_spike].[l7_ws] AS SELECT 1 AS [x];"
+    },
+    {
+      "case": "PROC, mixed case, empty lines before and after the text",
+      "step": "CREATE OR ALTER, object is new",
+      "sent": "\n\n  Create Or Alter Proc [azsqlcd_spike].[l7_mx] As Select N'\u00e9\u4e2d\t' As [x];  \n\n\t",
+      "definition": "\n\n  Create   Proc [azsqlcd_spike].[l7_mx] As Select N'\u00e9\u4e2d\t' As [x];  \n\n\t"
+    },
+    {
+      "case": "PROC, mixed case, empty lines before and after the text",
+      "step": "CREATE OR ALTER, object exists",
+      "sent": "\n\n  Create Or Alter Proc [azsqlcd_spike].[l7_mx] As Select N'\u00e9\u4e2d\t' As [x];  \n\n\t",
+      "definition": "\n\n  Create   Proc [azsqlcd_spike].[l7_mx] As Select N'\u00e9\u4e2d\t' As [x];  \n\n\t"
+    },
+    {
+      "case": "PROC, mixed case, empty lines before and after the text",
+      "step": "ALTER",
+      "sent": "\n\n  ALTER Proc [azsqlcd_spike].[l7_mx] As Select N'\u00e9\u4e2d\t' As [x];  \n\n\t",
+      "definition": "\n\n  CREATE Proc [azsqlcd_spike].[l7_mx] As Select N'\u00e9\u4e2d\t' As [x];  \n\n\t"
+    }
+  ],
+  "referenced_entities_after_column_drop": {
+    "view that uses the column": {
+      "class": "OTHER",
+      "number": 207,
+      "sqlstate": null,
+      "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+      "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+    },
+    "view that does not use the column": [
+      [
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          null,
+          1718297181,
+          false,
+          true,
+          false
+        ],
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          "a",
+          1718297181,
+          false,
+          true,
+          false
+        ]
+      ]
+    ],
+    "view with SELECT *": [
+      [
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          null,
+          1718297181,
+          false,
+          true,
+          false
+        ],
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          "a",
+          1718297181,
+          false,
+          true,
+          false
+        ]
+      ]
+    ],
+    "procedure that uses the column": {
+      "class": "OTHER",
+      "number": 207,
+      "sqlstate": null,
+      "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+      "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+    },
+    "inline function that uses the column": {
+      "class": "OTHER",
+      "number": 207,
+      "sqlstate": null,
+      "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+      "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+    }
+  }
+}

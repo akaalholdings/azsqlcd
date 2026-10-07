@@ -1,0 +1,6 @@
+CREATE OR ALTER PROCEDURE [sales].[usp_Export]
+WITH EXECUTE AS CALLER
+AS
+EXECUTE AS USER = 'export_reader';
+SELECT 1 AS [One];
+REVERT;

@@ -1,0 +1,79 @@
+# azsqlcd.toml of the demo database. The file holds no secrets; a client id is not a secret.
+# Every value below is an example: the GUIDs are all zeros with a counter, and no server has the
+# name "replace-me-<env>". Replace each one before a database command runs. The offline commands
+# (lint, gen, verify, build, targets) read the file and connect to nothing.
+
+[project]
+name = "demo-sales"                                 # stored in azsqlcd.meta.project of every target
+tenant_id = "00000000-0000-0000-0000-000000000000"  # Entra tenant of the identities
+table_model = true                                  # the table files are the model: gen writes, verify proves
+module_chunk = 100                                  # modules per transaction on a first converge
+min_token_minutes = 20                              # a deploy needs a token with at least this life left
+
+# Client ids of the identities. `scripts/setup_repo.py --print-azure` prints how to create them.
+[identities]
+nonprod_plan = "00000000-0000-0000-0000-000000000001"
+prod_plan = "00000000-0000-0000-0000-000000000002"
+nonprod_deploy = "00000000-0000-0000-0000-000000000003"
+test_deploy = "00000000-0000-0000-0000-000000000004"
+preprod_deploy = "00000000-0000-0000-0000-000000000005"
+prod_deploy = "00000000-0000-0000-0000-000000000006"
+
+# Promotion order: dev > sandbox > test > preprod > prod. One target for each environment.
+[env.dev]
+plan_identity = "nonprod_plan"    # read only: plan, drift, export, baseline report
+deploy_identity = "nonprod_deploy"
+drift = "report"                  # report | block. Drift on an object that the plan touches always blocks.
+lock_timeout_ms = 30000           # SET LOCK_TIMEOUT of the deploy session
+applock_wait_s = 600              # wait for another run that holds the deploy lock
+job_timeout_minutes = 120         # lower limit of the deploy job timeout
+gated = false                     # must equal `gated` of this stage in .github/workflows/db.yml
+targets = [{ id = "demo-dev", server = "replace-me-dev.database.windows.net", database = "demo_sales" }]
+
+[env.sandbox]
+plan_identity = "nonprod_plan"
+deploy_identity = "nonprod_deploy"
+drift = "report"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = false
+targets = [{ id = "demo-sandbox", server = "replace-me-sandbox.database.windows.net", database = "demo_sales" }]
+
+[env.test]
+plan_identity = "nonprod_plan"
+deploy_identity = "test_deploy"
+drift = "block"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true                      # plan job, approval, then the deploy of that plan
+targets = [{ id = "demo-test", server = "replace-me-test.database.windows.net", database = "demo_sales" }]
+
+[env.preprod]
+plan_identity = "prod_plan"
+deploy_identity = "preprod_deploy"
+drift = "block"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true
+targets = [{ id = "demo-preprod", server = "replace-me-preprod.database.windows.net", database = "demo_sales" }]
+
+[env.prod]
+plan_identity = "prod_plan"
+deploy_identity = "prod_deploy"
+drift = "block"
+lock_timeout_ms = 10000           # short: a busy table stops the deploy with exit 24, not the workload
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true
+targets = [{ id = "demo-prod", server = "replace-me-prod.database.windows.net", database = "demo_sales" }]
+
+# Objects that the tool never creates, alters, drops or refreshes. `export` writes this list.
+[unmanaged]
+objects = []
+
+# Unmanaged dependants of a dropped, renamed or retyped column that a DBA accepted.
+[ack]
+unmanaged_dependants = []

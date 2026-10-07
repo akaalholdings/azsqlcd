@@ -1,0 +1,190 @@
+[
+  {
+    "class": "Table",
+    "schema": "Application",
+    "name": "People",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "PersonID",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Application_People_PersonID",
+          "expression": {"class": "Expression", "tokens": ["(", "NEXT", "VALUE", "FOR", "[Sequences]", ".", "[PersonID]", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "FullName",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 50, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "PreferredName",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 50, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "SearchName",
+        "type": null,
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "concat", "(", "[PreferredName]", ",", "N' '", ",", "[FullName]", ")", ")"]},
+          "persisted": true
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "IsEmployee",
+        "type": {"class": "TypeRef", "name": "bit", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "CustomFields",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": "max", "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "OtherLanguages",
+        "type": null,
+        "nullable": null,
+        "identity": null,
+        "default": null,
+        "computed": {
+          "class": "Computed",
+          "expression": {"class": "Expression", "tokens": ["(", "json_query", "(", "[CustomFields]", ",", "N'$.OtherLanguages'", ")", ")"]},
+          "persisted": false
+        },
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "LastEditedBy",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ValidFrom",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 7},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": "ROW_START",
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "ValidTo",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 7},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": "ROW_END",
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Application_People",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "PersonID", "descending": false}
+        ],
+        "options": []
+      },
+      {"class": "ForeignKey", "name": "FK_Application_People_Application_People", "columns": ["LastEditedBy"], "ref_schema": "Application", "ref_table": "People", "ref_columns": ["PersonID"], "on_delete": "NO ACTION", "on_update": "NO ACTION"}
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_Application_People_FullName",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "FullName", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      },
+      {
+        "class": "Index",
+        "name": "IX_Application_People_IsEmployee",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "IsEmployee", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      }
+    ],
+    "temporal": {"class": "Temporal", "period_start": "ValidFrom", "period_end": "ValidTo", "history_schema": "Application", "history_table": "People_Archive", "retention": null}
+  }
+]

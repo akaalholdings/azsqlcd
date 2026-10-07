@@ -1,0 +1,16 @@
+{
+  "class": "CreateSequence",
+  "sequence": {
+    "class": "Sequence",
+    "schema": "sales",
+    "name": "OrderNo",
+    "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+    "start": 1,
+    "increment": 1,
+    "minvalue": 1,
+    "maxvalue": 2147483647,
+    "cycle": false,
+    "cached": true,
+    "cache_size": 100
+  }
+}

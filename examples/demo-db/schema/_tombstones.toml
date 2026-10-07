@@ -1,0 +1,7 @@
+# Modules (view, procedure, function, trigger) that this repository dropped.
+# Add one entry in the pull request that deletes the module file. The deploy then drops the object
+# when it holds a managed row for it. Tables are dropped by a migration, not here.
+#
+# [[drop]]
+# object = "PROCEDURE:[sales].[usp_LegacyExport]"
+# reason = "replaced by usp_Export in r40"

@@ -1,0 +1,19 @@
+{
+  "class": "CreateIndex",
+  "schema": "dw",
+  "table": "Reading",
+  "index": {
+    "class": "Index",
+    "name": "CIX_Reading",
+    "unique": false,
+    "clustered": true,
+    "columns": [
+      {"class": "KeyColumn", "name": "ReadingUtc", "descending": true},
+      {"class": "KeyColumn", "name": "DeviceId", "descending": false}
+    ],
+    "included": [],
+    "filter": null,
+    "options": []
+  },
+  "exec_options": []
+}

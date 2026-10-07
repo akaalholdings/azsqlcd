@@ -1,0 +1,7 @@
+-- expect: SYNTAX
+-- says: one object per file
+-- line: 7
+-- path: schema/sequences/dbo.S.sql
+CREATE SEQUENCE [dbo].[S] AS int START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 100 NO CYCLE NO CACHE;
+GO
+CREATE SEQUENCE [dbo].[S2] AS int START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 100 NO CYCLE NO CACHE;

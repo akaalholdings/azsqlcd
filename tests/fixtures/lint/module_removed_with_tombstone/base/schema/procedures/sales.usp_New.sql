@@ -1,0 +1,3 @@
+CREATE OR ALTER PROCEDURE [sales].[usp_New]
+AS
+SELECT 1 AS [One];

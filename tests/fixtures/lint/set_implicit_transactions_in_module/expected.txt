@@ -1,0 +1,2 @@
+FORBIDDEN_TOKEN schema/procedures/sales.usp_Load.sql:6
+FORBIDDEN_TOKEN schema/procedures/sales.usp_Load.sql:7

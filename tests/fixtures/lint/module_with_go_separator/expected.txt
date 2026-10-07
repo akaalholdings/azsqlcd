@@ -1,0 +1,1 @@
+MODULE_INVALID schema/views/sales.vw_Open.sql:4

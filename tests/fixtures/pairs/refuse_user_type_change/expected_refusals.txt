@@ -1,0 +1,3 @@
+USER_TYPE_CHANGE TYPE:[dbo].[IdList]
+USER_TYPE_CHANGE TYPE:[dbo].[Phone]
+USER_TYPE_CHANGE TYPE:[dbo].[Swap]

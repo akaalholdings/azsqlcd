@@ -1,0 +1,3 @@
+CREATE OR ALTER PROCEDURE [sales].[report]
+AS
+SELECT 1 AS [One];

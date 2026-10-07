@@ -1,0 +1,3 @@
+azsqlcd-sum 1
+0001__change.sql sha256:5e9e5b362bc94793737077b286b5c5b7ab198667b8c8035f83b4c5bfaf87ab86 tx
+0002__build.sql sha256:3aa599bcf94aabccdcdbe7d97b96065c90844622f6cacdc6695ad9ef5ccc84b1 nontx

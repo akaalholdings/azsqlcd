@@ -1,0 +1,19 @@
+{
+  "class": "AddColumn",
+  "schema": "dbo",
+  "table": "Customer",
+  "column": {
+    "class": "Column",
+    "name": "Phone",
+    "type": {"class": "TypeRef", "name": "PhoneNumber", "schema": "dbo", "length": null, "precision": null, "scale": null},
+    "nullable": true,
+    "identity": null,
+    "default": null,
+    "computed": null,
+    "collation": null,
+    "generated": null,
+    "hidden": false,
+    "masked": null
+  },
+  "with_values": false
+}

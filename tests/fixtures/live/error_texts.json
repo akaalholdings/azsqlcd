@@ -1,0 +1,202 @@
+{
+  "L3 syntax error: the batch does not parse": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": null,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Incorrect syntax near the keyword 'FROM'.",
+    "redacted": "[Microsoft][SQL Server]Incorrect syntax near the keyword <redacted>."
+  },
+  "L3 unknown column of a table that exists: the batch does not compile": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 207,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid column name 'nope'.",
+    "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+  },
+  "L3 unknown table: compiled when the statement runs": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 208,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid object name 'azsqlcd_spike.l3_no'.",
+    "redacted": "[Microsoft][SQL Server]Invalid object name <redacted>."
+  },
+  "L3 unknown column of a table that the same batch makes: compiled when the statement runs": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 207,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid column name 'nope'.",
+    "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+  },
+  "L3 conversion error at run time": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 245,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Conversion failed when converting the varchar value 'abc' to data type int.",
+    "redacted": "[Microsoft][SQL Server]Conversion failed when converting the varchar value <redacted> to data type int."
+  },
+  "1222 locking read of a row with an open update": {
+    "expected_number": 1222,
+    "class": "LOCK_TIMEOUT",
+    "number": 1222,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Lock request time out period exceeded.",
+    "redacted": "[Microsoft][SQL Server]Lock request time out period exceeded."
+  },
+  "L11 create before its reference: view": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 208,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid object name 'azsqlcd_spike.l11_missing'.",
+    "redacted": "[Microsoft][SQL Server]Invalid object name <redacted>."
+  },
+  "L11 create before its reference: inline table-valued function": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 208,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid object name 'azsqlcd_spike.l11_missing'.",
+    "redacted": "[Microsoft][SQL Server]Invalid object name <redacted>."
+  },
+  "3729 CREATE OR ALTER of a function that a CHECK uses": {
+    "expected_number": 3729,
+    "class": "OTHER",
+    "number": 3729,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Cannot ALTER 'azsqlcd_spike.l11_f' because it is being referenced by object 'l11_c'.",
+    "redacted": "[Microsoft][SQL Server]Cannot ALTER <redacted> because it is being referenced by object <redacted>."
+  },
+  "2601 second step row for one migration": {
+    "expected_number": 2601,
+    "class": "OTHER",
+    "number": 2601,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Cannot insert duplicate key row in object 'azsqlcd_spike.l15_step' with unique index 'l15_ux'. The duplicate key value is (0001__a.sql).",
+    "redacted": "[Microsoft][SQL Server]Cannot insert duplicate key row in object <redacted> with unique index <redacted>. The duplicate key value is <redacted>"
+  },
+  "sp_refreshsqlmodule of a view that uses a dropped column": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": 207,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+    "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+  },
+  "208": {
+    "expected_number": 208,
+    "class": "OTHER",
+    "number": 208,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid object name 'azsqlcd_spike.x1_missing'.",
+    "redacted": "[Microsoft][SQL Server]Invalid object name <redacted>."
+  },
+  "2714": {
+    "expected_number": 2714,
+    "class": "OTHER",
+    "number": 2714,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]There is already an object named 'x1_t' in the database.",
+    "redacted": "[Microsoft][SQL Server]There is already an object named <redacted> in the database."
+  },
+  "2627": {
+    "expected_number": 2627,
+    "class": "OTHER",
+    "number": 2627,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Violation of PRIMARY KEY constraint 'x1_pk'. Cannot insert duplicate key in object 'azsqlcd_spike.x1_t'. The duplicate key value is (1).",
+    "redacted": "[Microsoft][SQL Server]Violation of PRIMARY KEY constraint <redacted>. Cannot insert duplicate key in object <redacted>. The duplicate key value is <redacted>"
+  },
+  "245": {
+    "expected_number": 245,
+    "class": "OTHER",
+    "number": 245,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Conversion failed when converting the varchar value 'abc' to data type int.",
+    "redacted": "[Microsoft][SQL Server]Conversion failed when converting the varchar value <redacted> to data type int."
+  },
+  "1222": {
+    "expected_number": 1222,
+    "class": "LOCK_TIMEOUT",
+    "number": 1222,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Lock request time out period exceeded.",
+    "redacted": "[Microsoft][SQL Server]Lock request time out period exceeded."
+  },
+  "1205": {
+    "expected_number": 1205,
+    "class": "DEADLOCK",
+    "number": 1205,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Transaction (Process ID 100) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.",
+    "redacted": "[Microsoft][SQL Server]Transaction <redacted> was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction."
+  },
+  "18456 connect to a database that does not exist": {
+    "expected_number": 18456,
+    "class": "OTHER",
+    "number": 18456,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Login failed for user '<token-identified principal>'.",
+    "redacted": "[Microsoft][SQL Server]Login failed for user <redacted>."
+  },
+  "3998 an error that a TRY block swallowed, at the end of the batch": {
+    "expected_number": 3998,
+    "class": "OTHER",
+    "number": 3998,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Uncommittable transaction is detected at the end of the batch. The transaction is rolled back.",
+    "redacted": "[Microsoft][SQL Server]Uncommittable transaction is detected at the end of the batch. The transaction is rolled back."
+  },
+  "207 referenced entities after a column drop: view that uses the column": {
+    "expected_number": 207,
+    "class": "OTHER",
+    "number": 207,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+    "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+  },
+  "207 referenced entities after a column drop: procedure that uses the column": {
+    "expected_number": 207,
+    "class": "OTHER",
+    "number": 207,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+    "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+  },
+  "207 referenced entities after a column drop: inline function that uses the column": {
+    "expected_number": 207,
+    "class": "OTHER",
+    "number": 207,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
+    "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+  },
+  "208 referenced entities of a view whose table was dropped": {
+    "expected_number": 208,
+    "class": "OTHER",
+    "number": 208,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Invalid object name 'azsqlcd_spike.x3_t'.",
+    "redacted": "[Microsoft][SQL Server]Invalid object name <redacted>."
+  },
+  "2020 referenced entities of a procedure that names a missing table": {
+    "expected_number": 2020,
+    "class": "OTHER",
+    "number": 2020,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]The dependencies reported for entity \"[azsqlcd_spike].[x3_p_gone]\" might not include references to all columns. This is either because the entity references an object that does not exist or because of an error in one or more statements in the entity.  Before rerunning the query, ensure that there are no errors in the entity and that all objects referenced by the entity exist.",
+    "redacted": "[Microsoft][SQL Server]The dependencies reported for entity <redacted> might not include references to all columns. This is either because the entity references an object that does not exist or because of an error in one or more statements in the entity. Before rerunning the query, ensure that there"
+  },
+  "session killed while the client waits for a batch": {
+    "expected_number": null,
+    "class": "SESSION_LOST",
+    "number": null,
+    "sqlstate": null,
+    "text": "[Microsoft]Unspecified error occurred on SQL Server. Connection may have been terminated by the server.",
+    "redacted": "[Microsoft]Unspecified error occurred on SQL Server. Connection may have been terminated by the server."
+  }
+}

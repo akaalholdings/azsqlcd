@@ -1,0 +1,65 @@
+[
+  {
+    "class": "Table",
+    "schema": "dbo",
+    "name": "lower_case",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "id",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1, "increment": 1},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "name",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 40, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "df_lower_case_name",
+          "expression": {"class": "Expression", "tokens": ["(", "n'x'", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "amount",
+        "type": {"class": "TypeRef", "name": "numeric", "schema": null, "length": null, "precision": 10, "scale": 2},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "pk_lower_case",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "id", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [],
+    "temporal": null
+  }
+]

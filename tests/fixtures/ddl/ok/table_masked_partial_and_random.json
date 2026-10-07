@@ -1,0 +1,143 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "Buyer",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "BuyerId",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": {"class": "Identity", "seed": 1, "increment": 1},
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "default()"
+      },
+      {
+        "class": "Column",
+        "name": "Phone",
+        "type": {"class": "TypeRef", "name": "varchar", "schema": null, "length": 20, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": "Latin1_General_100_BIN2",
+        "generated": null,
+        "hidden": false,
+        "masked": "partial(1, \"XXXX\", 0)"
+      },
+      {
+        "class": "Column",
+        "name": "Card",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 30, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "partial(0, \"it''s \"\"hidden\"\", (x)\", 4)"
+      },
+      {
+        "class": "Column",
+        "name": "Month",
+        "type": {"class": "TypeRef", "name": "tinyint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": {
+          "class": "DefaultConstraint",
+          "name": "DF_Buyer_Month",
+          "expression": {"class": "Expression", "tokens": ["(", "(", "1", ")", ")"]}
+        },
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "random(1, 12)"
+      },
+      {
+        "class": "Column",
+        "name": "Balance",
+        "type": {"class": "TypeRef", "name": "decimal", "schema": null, "length": null, "precision": 9, "scale": 2},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "random(1.00, 12.50)"
+      },
+      {
+        "class": "Column",
+        "name": "Score",
+        "type": {"class": "TypeRef", "name": "float", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "random(-1.5, 12)"
+      },
+      {
+        "class": "Column",
+        "name": "Seen",
+        "type": {"class": "TypeRef", "name": "datetime2", "schema": null, "length": null, "precision": null, "scale": 3},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": "datetime(\"Y\")"
+      },
+      {
+        "class": "Column",
+        "name": "Plain",
+        "type": {"class": "TypeRef", "name": "nvarchar", "schema": null, "length": 10, "precision": null, "scale": null},
+        "nullable": true,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_Buyer",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "BuyerId", "descending": false}
+        ],
+        "options": []
+      }
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_Buyer_Phone",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Phone", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": []
+      }
+    ],
+    "temporal": null
+  }
+]

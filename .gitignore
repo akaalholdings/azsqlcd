@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.env
+.env.*
+!.env.example
+.DS_Store
+# working plan file; not part of the history
+docs/plan-azsqlcd.md
+# triage logs of a local run
+.azsqlcd/

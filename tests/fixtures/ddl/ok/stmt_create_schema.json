@@ -1,0 +1,4 @@
+{
+  "class": "CreateSchema",
+  "schema": {"class": "Schema", "name": "reporting", "owner": "dbo"}
+}

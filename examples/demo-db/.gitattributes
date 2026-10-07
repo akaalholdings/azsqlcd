@@ -1,0 +1,4 @@
+# Checksums are taken over file bytes. Keep one line end on every machine.
+*.sql text eol=lf
+*.toml text eol=lf
+migrations/migrations.sum text eol=lf
