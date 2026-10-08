@@ -367,7 +367,7 @@ Allow lines and migration batches.
 | `ALLOW_FORMAT` | error | A comment looks like a directive and is not one: a directive starts with `-- azsqlcd:` exactly (two hyphens, one space, lower case) in column 0. The line is a plain comment and does nothing | Write the line in the exact form, then `azsqlcd gen --resum` |
 | `NNL001` | warning | `ALTER TABLE ... ADD` of a `NOT NULL` column with no `DEFAULT`, on a table that the migration did not create. The engine refuses the statement when the table has a row: it passes in an empty database and fails in the first one with data (seen live: exit 21 `BATCH_FAILED`) | Add a `DEFAULT`; or add the column `NULL`, fill it, and alter it to `NOT NULL` |
 | `FORBIDDEN_TOKEN` | error | Migration batch: `BEGIN TRANSACTION`, `COMMIT`, `ROLLBACK`, `SAVE TRANSACTION`, `RAISERROR`, `RETURN`, `GOTO`, `SET NOEXEC`, `SET PARSEONLY`, `SET XACT_ABORT`, `USE`, or a line that starts with `:`. Module file: the word `PARSEONLY`, or `SET NOEXEC ON` or `OFF`. The rule also applies to `raw` batches | Remove the statement. To stop with an error use `THROW`. For a name write `[PARSEONLY]` |
-| `THREE_PART_NAME` | error | A name with three or more parts | Use two-part names; for a column use a table alias |
+| `THREE_PART_NAME` | error | A name with three or more parts. `DROP INDEX schema.table.index` (the old form) and `DROP STATISTICS schema.table.statistics` are not findings | Use two-part names; for a column use a table alias |
 | `SECURITY_STATEMENT` | error | `GRANT`, `DENY`, `REVOKE`, `REVERT`, `EXECUTE AS`, `ALTER ROLE`, `ALTER AUTHORIZATION` or `CREATE USER` outside a `raw` batch | Remove it: users, roles and permissions are not managed |
 | `DATA_DDL` | error | `CREATE`, `ALTER`, `DROP` or `sp_rename` in a data batch, temporary tables included | Move the statement to a model batch; a data batch is DML only |
 | `DATA_FORBIDDEN` | error | `ENABLE TRIGGER`, `DISABLE TRIGGER`, `DBCC`, or `SELECT ... INTO` a table that is not temporary, in a data batch | Remove the statement; create the table in a model batch |
@@ -376,7 +376,7 @@ Allow lines and migration batches.
 | `STATEMENT_UNREADABLE` | error | The lexer cannot read the object of the statement, so no allow line can match | Write the name as `[schema].[name]` |
 | `DROP_INDEX` | warning | `DROP INDEX` | Check that no query needs the index |
 | `DROP_CONSTRAINT` | warning | `ALTER TABLE ... DROP CONSTRAINT`: the rule is no longer enforced. Also for `ALTER TABLE ... DROP PERIOD FOR SYSTEM_TIME` | Check that the drop is meant |
-| `NTX004` | warning | `ONLINE = ON` without `WAIT_AT_LOW_PRIORITY` in a non-transactional migration: every later statement on the table waits behind the build | Add `WAIT_AT_LOW_PRIORITY (...)` |
+| `NTX004` | warning | `ONLINE = ON` without `WAIT_AT_LOW_PRIORITY` in a non-transactional migration: every later statement on the table waits behind the build. Each statement of a batch is read alone. An online `ALTER COLUMN` and a columnstore build take no such clause and are not findings | Add `WAIT_AT_LOW_PRIORITY (...)` |
 | `NTX005` | error | A non-transactional migration states no `expected-minutes`; the job timeout is computed from it | Write `-- azsqlcd:mode nontx expected-minutes: <N>` |
 | `NTX006` | error | `RESUMABLE = ON` in a transactional migration: a resumable build cannot run in a transaction | Move the statement to a migration with `-- azsqlcd:mode nontx expected-minutes: <N>`, or remove `RESUMABLE = ON` |
 

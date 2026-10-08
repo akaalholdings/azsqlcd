@@ -524,6 +524,7 @@ class _Classifier:
             if self.op(i, ":") and self.sig[i].pos in self.line_starts:
                 message = "a line that starts with ':' is a sqlcmd directive; the tool does not run sqlcmd"
                 self.report("FORBIDDEN_TOKEN", i, message)
+        dropped = self.drop_list_names()
         i = 0
         while i < len(self.sig):
             parts, end = _dotted(self.sig, i)
@@ -532,24 +533,16 @@ class _Classifier:
                 continue
             # [alias].[column].method(...) and [schema].[function](...): the last part is called.
             # After INTO, FROM, TABLE, ... the name is an object and '(' starts a column list:
-            # INSERT INTO [other].[dbo].[t] ([a]) has three parts.
-            is_object = self.word(i - 1) in _OBJECT_WORDS or (
-                self.word(i - 1) == "ON" and self.word(i - 3) == "INDEX"
+            # INSERT INTO [other].[dbo].[t] ([a]) has three parts. A name that DROP INDEX or DROP
+            # STATISTICS holds is an object too.
+            is_object = (
+                self.word(i - 1) in _OBJECT_WORDS
+                or (self.word(i - 1) == "ON" and self.word(i - 3) == "INDEX")
+                or i in dropped
             )
             named = len(parts) - (self.op(end, "(") and not is_object)
-            # DROP INDEX [schema].[table].[index]: the old form of DROP INDEX, three parts and no more
-            old_drop_index = (
-                len(parts) == 3
-                and self.word(0) == "DROP"
-                and self.word(1) == "INDEX"
-                and (
-                    i == (4 if self.word(2) == "IF" and self.word(3) == "EXISTS" else 2)
-                    or self.op(i - 1, ",")
-                )
-                and self.depth[i] == 0
-                and not self.op(end, "(")
-            )
-            if (named >= 3 and not old_drop_index) or (self.op(end, ".") and self.op(end + 1, ".")):
+            # DROP INDEX [schema].[table].[index]: three parts and no more, all of this database
+            if (named >= 3 and not dropped.get(i)) or (self.op(end, ".") and self.op(end + 1, ".")):
                 self.report(
                     "THREE_PART_NAME",
                     i,
@@ -558,21 +551,64 @@ class _Classifier:
                 )
             i = end
 
+    def drop_list_names(self) -> dict[int, bool]:
+        """Index of each name that a DROP INDEX or DROP STATISTICS statement holds -> the name is
+        [schema].[table].[index] or [schema].[table].[statistics]: three parts and nothing after it.
+
+        DROP INDEX [IF EXISTS] <element>, ...: an element is a name alone (the old form) or
+        [index] ON <object> [WITH (...)], and the object is in the result too. DROP STATISTICS has
+        the first form only. The statement can stand anywhere in the batch: behind a condition, in a
+        block, after another statement. The list ends at the first token after an element that is no
+        comma, so a comma list of a later statement is not a part of it.
+        """
+        found: dict[int, bool] = {}
+        for k in range(len(self.sig)):
+            if self.word(k) != "DROP" or self.word(k + 1) not in ("INDEX", "STATISTICS") or self.depth[k]:
+                continue
+            # No statement starts after a comma: ALTER TABLE [s].[t] ADD [c] int NULL, DROP INDEX [ix]
+            if self.op(k - 1, ","):
+                continue
+            # ALTER TABLE [s].[t] DROP INDEX [ix]: the action of ALTER TABLE, its name has one part
+            j = k - 1
+            while self.op(j - 1, "."):
+                j -= 2
+            if self.kind(j) in _IDENT and (self.word(j - 2), self.word(j - 1)) == ("ALTER", "TABLE"):
+                continue
+            j = k + 2
+            if self.word(j) == "IF" and self.word(j + 1) == "EXISTS":
+                j += 2
+            while True:
+                parts, end = _dotted(self.sig, j)
+                if not parts:
+                    break
+                new_form = self.word(end) == "ON"
+                found[j] = (
+                    len(parts) == 3 and not new_form and not self.op(end, "(") and not self.op(end, ".")
+                )
+                if new_form:
+                    at = end + 1
+                    target, end = _dotted(self.sig, at)
+                    if not target:
+                        break
+                    found[at] = False
+                    options = self.close(end + 1) if self.word(end) == "WITH" else None
+                    if options is not None:
+                        end = options + 1
+                if not self.op(end, ","):
+                    break
+                j = end + 1
+        return found
+
     def online_build(self) -> None:
-        """NTX004: an online build with no low-priority wait queues behind every open transaction."""
-        if any(self.word(i) == "WAIT_AT_LOW_PRIORITY" for i in range(len(self.sig))):
-            return
-        # ALTER TABLE ... ALTER COLUMN ... WITH (ONLINE = ON) and CREATE ... COLUMNSTORE INDEX take no
-        # low-priority wait: the engine has no such clause there, so the rule must not ask for it
-        if any(
-            self.word(i) == "ALTER" and self.word(i + 1) == "COLUMN" and self.depth[i] == 0
-            for i in range(len(self.sig))
-        ):
-            return
-        if self.word(0) == "CREATE" and "COLUMNSTORE" in (self.word(1), self.word(2)):
-            return
+        """NTX004: an online build with no low-priority wait queues behind every open transaction.
+        Each ONLINE = ON is read with its own statement: a batch can hold more than one."""
         for i in range(len(self.sig)):
             if self.word(i) == "ONLINE" and self.op(i + 1, "=") and self.word(i + 2) == "ON":
+                # ONLINE = ON (WAIT_AT_LOW_PRIORITY (...))
+                if self.op(i + 3, "(") and self.word(i + 4) == "WAIT_AT_LOW_PRIORITY":
+                    continue
+                if self.takes_no_wait(i):
+                    continue
                 self.report(
                     "NTX004",
                     i,
@@ -580,6 +616,24 @@ class _Classifier:
                     "normal queue and every later statement on the table waits behind it",
                 )
                 return
+
+    def takes_no_wait(self, i: int) -> bool:
+        """The option at i is one of ALTER TABLE ... ALTER COLUMN ... WITH (ONLINE = ON) or of CREATE
+        [CLUSTERED | NONCLUSTERED] COLUMNSTORE INDEX. The engine has no low-priority wait there, so
+        the rule must not ask for it. On the way back, outside parentheses, that ALTER or CREATE
+        comes before any other word that starts a statement."""
+        for k in range(i - 1, -1, -1):
+            if self.depth[k] or not (self.op(k, ";") or self.word(k) in _STATEMENT_WORDS):
+                continue
+            # ALTER COLUMN [c] DROP SPARSE WITH (ONLINE = ON): DROP is no statement here
+            if (self.word(k - 3), self.word(k - 2), self.word(k)) == ("ALTER", "COLUMN", "DROP"):
+                continue
+            if self.word(k) == "ALTER":
+                return self.word(k + 1) == "COLUMN"
+            # an index can have the name COLUMNSTORE: CREATE INDEX COLUMNSTORE ON ...
+            c = k + 1 + (self.word(k + 1) in ("CLUSTERED", "NONCLUSTERED"))
+            return (self.word(k), self.word(c), self.word(c + 1)) == ("CREATE", "COLUMNSTORE", "INDEX")
+        return False
 
     def resumable(self) -> None:
         """NTX006: the engine refuses RESUMABLE = ON inside an explicit transaction, and every batch

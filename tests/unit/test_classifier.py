@@ -1332,3 +1332,211 @@ def test_nothing_follows_the_action_set_default_as_if_it_were_an_expression(seco
     assert errors(facts(fk + " ON UPDATE SET DEFAULT NOT FOR REPLICATION;", mode="nontx")) == []
     assert "MODEL_STATEMENT" in errors(facts(f"{fk}\n{second}", mode="nontx"))
     assert "MODEL_STATEMENT" in errors(facts(f"{fk} {second}", mode="nontx"))
+
+
+# ------------------------------------------------------------------ the old form of DROP INDEX in any place
+RAW_NONTX = "-- azsqlcd:raw TABLE:[audit].[Log] reason: outside the model\n"
+
+
+def three_part(found: BatchFacts) -> list[str]:
+    """The name of each THREE_PART_NAME finding, as its message shows it."""
+    return [f.message.partition(":")[0] for f in found.findings if f.code == "THREE_PART_NAME"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Order_Cust' "
+        "AND object_id = OBJECT_ID(N'sales.Order'))\n    DROP INDEX [sales].[Order].[IX_Order_Cust];",
+        "IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Order_Cust')\nBEGIN\n"
+        "    DROP INDEX sales.[Order].IX_Order_Cust;\nEND",
+        "DROP INDEX [sales].[Order].[IX_A];\nDROP INDEX [sales].[Order].[IX_B];",
+        "IF INDEXPROPERTY(OBJECT_ID(N'sales.Order'), N'IX', 'IndexID') IS NOT NULL\n"
+        "    DROP INDEX sales.[Order].IX",
+        "IF 1 = 1 DROP INDEX s.t.a, s.u.b",
+        "IF 1 = 1 DROP INDEX IF EXISTS s.t.a",
+        "IF 1 = 1 DROP INDEX IF EXISTS s.t.a, s.u.b;",
+        "IF 1 = 0 SELECT 1 ELSE DROP INDEX s.t.a",
+        "IF 1 = 1 BEGIN IF 2 = 2 BEGIN DROP INDEX s.t.a; DROP INDEX s.u.b END END",
+        "BEGIN TRY DROP INDEX s.t.a; END TRY BEGIN CATCH THROW; END CATCH",
+        "SELECT 1 FROM [s].[t] DROP INDEX s.t.a",
+        # the rule does not decide if the engine takes both forms in one list
+        "IF 1 = 1 DROP INDEX s.t.a, [ix] ON [s].[t]",
+        "IF 1 = 1 DROP INDEX [ix] ON [s].[t] WITH (ONLINE = ON, MAXDOP = 2), s.t.a",
+    ],
+)
+def test_the_old_form_of_drop_index_is_no_three_part_name_wherever_the_statement_stands(sql):
+    """DROP INDEX schema.table.index names an index of this database: with a database name the old
+    form has four parts. The statement is the same one behind a condition, in a block and after
+    another statement, so the batch is not refused there."""
+    assert codes(raw(sql)) == []
+    assert set(codes(data(sql))) == {"DATA_DDL"}  # the rule of a data batch, not of the name
+
+
+@pytest.mark.parametrize(
+    ("sql", "refused"),
+    [
+        ("IF 1 = 1 DROP INDEX [other].[s].[t].[ix]", ["[other].[s].[t].[ix]"]),
+        ("IF 1 = 1 DROP INDEX s.t.a, [other].[s].[t].[ix]", ["[other].[s].[t].[ix]"]),
+        ("IF 1 = 1 DROP INDEX [ix] ON [other].[s].[t]", ["[other].[s].[t]"]),
+        ("IF 1 = 1 DROP INDEX [ix] ON [s].[t], [ix2] ON [other].[s].[u]", ["[other].[s].[u]"]),
+        ("IF EXISTS (SELECT 1 FROM [other].[dbo].[T]) DROP INDEX [s].[t].[ix]", ["[other].[dbo].[T]"]),
+        ("DROP INDEX [s].[t].[ix]; SELECT 1 FROM [other].[dbo].[T]", ["[other].[dbo].[T]"]),
+        ("IF 1 = 1 DROP TABLE [other].[s].[t]", ["[other].[s].[t]"]),
+        ("IF 1 = 1 DROP VIEW [other].[s].[v]", ["[other].[s].[v]"]),
+        ("IF 1 = 1 DROP PROCEDURE [other].[s].[p]", ["[other].[s].[p]"]),
+        # a comma list of another statement, after a DROP INDEX statement of the same batch
+        ("DROP INDEX s.t.a; SELECT a.b.c, d.e.f FROM [s].[u] AS a", ["[a].[b].[c]", "[d].[e].[f]"]),
+        ("DROP INDEX s.t.a SELECT a.[x], d.e.f FROM [s].[u] AS a", ["[d].[e].[f]"]),
+        (
+            "DROP INDEX s.t.a; INSERT INTO [s].[u] ([x], [y]) VALUES (a.b.c, d.e.f)",
+            ["[a].[b].[c]", "[d].[e].[f]"],
+        ),
+        ("DROP INDEX s.t.a; EXEC [s].[p] a.b.c, d.e.f", ["[a].[b].[c]", "[d].[e].[f]"]),
+        # what the old form cannot hold: a call, a fourth dot, ON after three parts
+        ("IF 1 = 1 DROP INDEX [a].[b].[c](1)", ["[a].[b].[c]"]),
+        ("IF 1 = 1 DROP INDEX s.t.a, [a].[b].[c](1), s.u.b", ["[a].[b].[c]", "[s].[u].[b]"]),
+        ("IF 1 = 1 DROP INDEX a.b.c..d", ["[a].[b].[c]"]),
+        ("IF 1 = 1 DROP INDEX [a].[b].[c] ON [s].[t]", ["[a].[b].[c]"]),
+        # DROP INDEX that is no statement: the action of ALTER TABLE, and inside parentheses
+        ("ALTER TABLE [s].[t] DROP INDEX a.b.c", ["[a].[b].[c]"]),
+        ("ALTER TABLE [s].[t] ADD [c] int NULL, DROP INDEX [other].[dbo].[T]", ["[other].[dbo].[T]"]),
+        ("ALTER TABLE [s].[t] DROP COLUMN [c], DROP INDEX [other].[dbo].[T]", ["[other].[dbo].[T]"]),
+        ("DROP INDEX s.t.a, DROP INDEX other.dbo.T", ["[other].[dbo].[T]"]),
+        ("SELECT 1 WHERE EXISTS (DROP INDEX a.b.c)", ["[a].[b].[c]"]),
+        # the new form: '(' after the object starts the next statement, it is no call
+        ("DROP INDEX IF EXISTS [ix] ON [other].[dbo].[T]\n(SELECT 1)", ["[other].[dbo].[T]"]),
+        (
+            "IF 1 = 1 DROP INDEX [ix] ON [s].[t], [ix2] ON [other].[dbo].[T] (SELECT 1)",
+            ["[other].[dbo].[T]"],
+        ),
+    ],
+)
+def test_only_the_names_of_a_drop_index_list_are_exempt_from_three_part_name(sql, refused):
+    """The exemption is for a name that is an element of the list of a DROP INDEX statement, with
+    three parts and nothing after them. Every other name of the batch is read as before."""
+    assert three_part(raw(sql)) == refused
+    assert three_part(data(sql)) == refused
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DROP STATISTICS s.t.stat",
+        "IF 1 = 1 DROP STATISTICS [s].[t].[stat], s.u.stat2",
+        "DROP INDEX s.t.a; DROP STATISTICS s.t.stat;",
+    ],
+)
+def test_drop_statistics_with_schema_table_and_statistics_is_no_three_part_name(sql):
+    """DROP STATISTICS table.statistics: with the schema the name has three parts and stays in this
+    database, as the old form of DROP INDEX."""
+    assert codes(raw(sql)) == []
+
+
+@pytest.mark.parametrize(
+    ("sql", "refused"),
+    [
+        ("IF 1 = 1 DROP STATISTICS other.s.t.stat", ["[other].[s].[t].[stat]"]),
+        ("DROP STATISTICS s.t.stat, other.s.t.stat2", ["[other].[s].[t].[stat2]"]),
+        ("DROP STATISTICS s.t.stat; SELECT 1 FROM other.dbo.T", ["[other].[dbo].[T]"]),
+        ("DROP STATISTICS s.t.stat SELECT a.[x], d.e.f FROM [s].[u] AS a", ["[d].[e].[f]"]),
+        ("UPDATE STATISTICS other.dbo.T", ["[other].[dbo].[T]"]),
+    ],
+)
+def test_only_the_names_of_a_drop_statistics_list_are_exempt_from_three_part_name(sql, refused):
+    assert three_part(raw(sql)) == refused
+    assert three_part(data(sql)) == refused
+
+
+def test_a_model_batch_reads_the_list_of_drop_index_by_the_same_rule():
+    assert codes(facts("DROP INDEX [s].[t].[ix]")) == ["DROP_INDEX"]
+    assert codes(facts("DROP INDEX IF EXISTS s.t.a, s.u.b;")) == ["DROP_INDEX"]
+    assert "THREE_PART_NAME" in codes(facts("DROP INDEX [a].[b].[c](1)"))
+    assert "THREE_PART_NAME" in codes(facts("DROP INDEX [a].[b].[c] ON [s].[t]"))
+    assert "THREE_PART_NAME" in codes(facts("DROP INDEX s.t.a, [other].[s].[t].[ix]"))
+
+
+# ------------------------------------------------------------------ NTX004 in a batch of several statements
+def test_an_online_columnstore_build_behind_a_condition_is_not_asked_for_a_low_priority_wait():
+    """The exemption of test_an_online_columnstore_build_is_not_asked_for_a_low_priority_wait is for
+    the statement that holds ONLINE = ON, not for the first statement of the batch."""
+    build = "CREATE CLUSTERED COLUMNSTORE INDEX [cci] ON [s].[t] WITH (ONLINE = ON)"
+    guard = "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'cci')\n    "
+    assert codes(facts(RAW_NONTX + guard + build, mode="nontx")) == []
+    assert codes(facts(RAW_NONTX + f"BEGIN\n    {build};\nEND", mode="nontx")) == []
+    nonclustered = "CREATE NONCLUSTERED COLUMNSTORE INDEX [ncci] ON [s].[t] ([a]) WITH (ONLINE = ON)"
+    assert codes(facts(RAW_NONTX + guard + nonclustered, mode="nontx")) == []
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        "CREATE CLUSTERED COLUMNSTORE INDEX [cci] ON [s].[t];",
+        "CREATE CLUSTERED COLUMNSTORE INDEX [cci] ON [s].[t] WITH (ONLINE = ON);",
+        "CREATE CLUSTERED COLUMNSTORE INDEX [cci] ON [s].[t] WITH (ONLINE = ON)",  # no ';'
+    ],
+)
+def test_a_columnstore_build_does_not_hide_the_online_build_after_it(first):
+    found = facts(RAW_NONTX + first + "\nCREATE INDEX [ix] ON [s].[u] ([a]) WITH (ONLINE = ON)", mode="nontx")
+    assert [(f.code, f.line) for f in found.findings] == [("NTX004", 5)]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE INDEX COLUMNSTORE ON [s].[t] ([a]) WITH (ONLINE = ON)",
+        "IF 1 = 1 CREATE INDEX COLUMNSTORE ON [s].[t] ([a]) WITH (ONLINE = ON)",
+        "CREATE NONCLUSTERED INDEX COLUMNSTORE ON [s].[t] ([a]) WITH (ONLINE = ON)",
+    ],
+)
+def test_a_rowstore_index_with_the_name_columnstore_is_asked_for_a_low_priority_wait(sql):
+    """COLUMNSTORE is no reserved word. The exemption needs the words COLUMNSTORE INDEX."""
+    assert codes(facts(RAW_NONTX + sql, mode="nontx")) == ["NTX004"]
+
+
+WAIT_BUILD = (
+    "CREATE INDEX [ix1] ON [s].[t] ([a]) "
+    "WITH (ONLINE = ON (WAIT_AT_LOW_PRIORITY (MAX_DURATION = 1 MINUTES, ABORT_AFTER_WAIT = SELF)));"
+)
+ONLINE_BUILD = "CREATE INDEX [ix2] ON [s].[u] ([a]) WITH (ONLINE = ON);"
+ALTER_COLUMN = "ALTER TABLE [s].[t] ALTER COLUMN [a] bigint NOT NULL"
+
+
+@pytest.mark.parametrize(
+    ("sql", "line"),
+    [
+        (f"{WAIT_BUILD}\n{ONLINE_BUILD}", 5),
+        (f"{ONLINE_BUILD}\n{WAIT_BUILD}", 4),
+        (f"{ALTER_COLUMN};\n{ONLINE_BUILD}", 5),
+        (f"{ALTER_COLUMN}\n{ONLINE_BUILD}", 5),  # no ';'
+        (f"{ONLINE_BUILD}\n{ALTER_COLUMN};", 4),
+        (f"{ALTER_COLUMN} WITH (ONLINE = ON);\n{ONLINE_BUILD}", 5),
+    ],
+)
+def test_another_statement_of_the_batch_does_not_hide_an_online_build_with_no_wait(sql, line):
+    """NTX004 reads the statement that holds ONLINE = ON. A low-priority wait or an ALTER COLUMN in
+    another statement of the batch says nothing about this build."""
+    found = facts(RAW_NONTX + sql, mode="nontx")
+    assert [(f.code, f.line) for f in found.findings] == [("NTX004", line)]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        f"IF 1 = 1 {WAIT_BUILD}",
+        f"{WAIT_BUILD}\n{WAIT_BUILD}",
+        f"IF 1 = 1 {ALTER_COLUMN} WITH (ONLINE = ON)",
+        f"{WAIT_BUILD}\n{ALTER_COLUMN} WITH (ONLINE = ON);",
+        # DROP is a word of ALTER COLUMN here, it starts no statement
+        "IF 1 = 1 ALTER TABLE [s].[t] ALTER COLUMN [a] DROP SPARSE WITH (ONLINE = ON)",
+    ],
+)
+def test_ntx004_keeps_its_exemptions_for_each_statement_of_a_batch(sql):
+    assert codes(facts(RAW_NONTX + sql, mode="nontx")) == []
+
+
+def test_a_low_priority_wait_is_the_clause_of_its_online_option():
+    """ONLINE = ON (WAIT_AT_LOW_PRIORITY (...)) is the form that the tool writes and reads. The word
+    in another place of the statement is not the wait of this build."""
+    apart = "CREATE INDEX [ix] ON [s].[t] ([a]) WITH (ONLINE = ON, WAIT_AT_LOW_PRIORITY (MAX_DURATION = 1))"
+    assert codes(facts(RAW_NONTX + apart, mode="nontx")) == ["NTX004"]
