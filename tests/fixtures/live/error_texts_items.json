@@ -13,7 +13,7 @@
     "class": "OTHER",
     "sqlstate": null,
     "text": "[Microsoft][SQL Server]The object 'l11_v1' is dependent on column 'b'.",
-    "redacted": "[Microsoft][SQL Server]The object <redacted> is dependent on column <redacted>."
+    "redacted": "[Microsoft][SQL Server]The object 'l11_v1' is dependent on column 'b'."
   },
   "L11 unbind of the referenced view first": {
     "source": "L11.json observed/chained_schemabinding/unbind_of_the_referenced_view_first/error",

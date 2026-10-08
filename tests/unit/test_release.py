@@ -36,8 +36,23 @@ CRLF_BYTES = b"CREATE OR ALTER VIEW [dbo].[crlf] AS\r\nSELECT 1 AS [x];\r\n"
 M1, M2, M3, M4 = "0001__a.sql", "0002__b.sql", "0003__c.sql", "0004__d.sql"
 
 
+# git refuses a bare repository that it finds by itself (a hardening that git recommends). The
+# variables go to the git that the TOOL starts; run_git has its own environment (GIT_ENV).
+HARDENED_GIT = {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "safe.bareRepository",
+    "GIT_CONFIG_VALUE_0": "explicit",
+}
+# Windows: a temporary directory, the name of a test and LONG_PATH pass 260 characters together
+CLONE = ("clone", "-q", "-c", "core.longpaths=true")
+
+
 def run_git(repo: Path, *args: str | bytes) -> str:
-    done = subprocess.run(["git", *args], cwd=repo, env=GIT_ENV, capture_output=True, check=True)
+    done = subprocess.run(["git", *args], cwd=repo, env=GIT_ENV, capture_output=True, check=False)
+    # the text of git is the only thing that says why: CalledProcessError does not show it
+    if done.returncode != 0:
+        error = done.stderr.decode("utf-8", "replace").strip()
+        raise AssertionError(f"git {args[0]!r} failed (exit {done.returncode}) in {repo}: {error}")
     return done.stdout.decode().strip()
 
 
@@ -49,6 +64,7 @@ def new_repo(path: Path) -> Path:
         ("user.email", "test@example.invalid"),
         ("init.defaultBranch", "main"),
         ("core.autocrlf", "false"),
+        ("core.longpaths", "true"),
         ("commit.gpgsign", "false"),
     ):
         run_git(path, "config", key, value)
@@ -249,15 +265,126 @@ def test_the_working_tree_and_the_index_are_never_read(tmp_path):
 
 
 def test_a_repository_without_a_working_tree_gives_the_same_release(history, tmp_path):
-    run_git(tmp_path, "clone", "-q", "--bare", str(history.repo), "bare.git")
+    run_git(tmp_path, *CLONE, "--bare", str(history.repo), "bare.git")
     set_origin_main(tmp_path / "bare.git", history.c5)
     assert release.build(tmp_path / "bare.git", history.c5) == release.build(history.repo, history.c5)
 
 
 def test_a_shallow_clone_cannot_be_released_because_it_cannot_count_the_releases(history, tmp_path):
-    run_git(tmp_path, "clone", "-q", "--depth", "1", history.repo.as_uri(), "shallow")
+    run_git(tmp_path, *CLONE, "--depth", "1", history.repo.as_uri(), "shallow")
     assert run_git(tmp_path / "shallow", "rev-list", "--count", "--first-parent", "HEAD") == "1"
     refusal("SHALLOW_REPOSITORY", release.build, tmp_path / "shallow", "HEAD")
+
+
+# ------------------------------------------------------------------ a hardened git
+@pytest.mark.parametrize("kind", ["working tree", "clone", "bare clone", "shallow clone"])
+def test_a_release_is_built_where_git_refuses_a_bare_repository_that_it_finds_by_itself(
+    history, built_c5, tmp_path, monkeypatch, kind
+):
+    """The first pilot: git with safe.bareRepository=explicit. The root that the caller gives is
+    the repository that the caller named, so the tool names its git directory to git."""
+    repo = history.repo
+    if kind != "working tree":
+        how = {"clone": [str(repo)], "bare clone": ["--bare", str(repo)]}
+        run_git(tmp_path, *CLONE, *how.get(kind, ["--depth", "1", repo.as_uri()]), "made")
+        repo = tmp_path / "made"
+    for name, value in HARDENED_GIT.items():
+        monkeypatch.setenv(name, value)
+    if kind == "shallow clone":
+        refusal("SHALLOW_REPOSITORY", release.build, repo, "HEAD")
+        return
+    if repo != history.repo:
+        set_origin_main(repo, history.c5)  # run_git has its own environment: no hardening there
+    built = release.build(repo, history.c5)
+    assert built == built_c5
+    assert release.read_tree(repo, history.c5) == built_c5.files
+    release.write(built, tmp_path / "dist")
+    assert release.read_bundle(tmp_path / "dist", release.digest(built_c5.manifest)) == release.Bundle(
+        built_c5.manifest, built_c5.files
+    )
+
+
+def git_commands(monkeypatch) -> list[list[str]]:
+    """The command lines of every git that the tool starts from now on."""
+    commands: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(command, **kwargs):
+        commands.append(list(command))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(release.subprocess, "run", spy)
+    return commands
+
+
+def test_only_a_root_that_is_a_bare_repository_is_named_to_git(history, tmp_path, monkeypatch):
+    run_git(tmp_path, *CLONE, "--bare", str(history.repo), "bare.git")
+    commands = git_commands(monkeypatch)
+    release.git(["rev-parse", "HEAD"], history.repo)
+    release.git(["rev-parse", "HEAD"], history.repo / "schema")  # git finds .git above it, as before
+    assert [c[1:] for c in commands] == [["--no-replace-objects", "rev-parse", "HEAD"]] * 2
+    del commands[:]
+    release.git(["rev-parse", "HEAD"], tmp_path / "bare.git")
+    git_dir = f"--git-dir={(tmp_path / 'bare.git').resolve()}"
+    assert [c[1:] for c in commands] == [["--no-replace-objects", git_dir, "rev-parse", "HEAD"]]
+
+
+def test_a_git_directory_that_the_environment_names_is_not_replaced(history, tmp_path, monkeypatch):
+    """GIT_DIR is the explicit name already, and git reads it before the folder of the command."""
+    run_git(tmp_path, *CLONE, "--bare", str(history.repo), "bare.git")
+    run_git(tmp_path / "bare.git", "update-ref", "refs/heads/main", history.c1)
+    monkeypatch.setenv("GIT_DIR", str(history.repo / ".git"))
+    commands = git_commands(monkeypatch)
+    # the commit of the repository that GIT_DIR names, not of the folder: as git always did
+    assert release.git(["rev-parse", "HEAD"], tmp_path / "bare.git") == history.local.encode() + b"\n"
+    assert [c[1:] for c in commands] == [["--no-replace-objects", "rev-parse", "HEAD"]]
+
+
+def bare_layout_in_a_working_tree(tmp_path: Path) -> SimpleNamespace:
+    """A checkout that holds, as its own files, the layout of a bare repository at the root and in
+    a folder: HEAD, objects/ and refs/. It is content of a pull request, with a config of its own."""
+    run_git(tmp_path, "-c", "init.defaultBranch=main", "init", "-q", "--bare", "planted.git")
+    repo = new_repo(tmp_path / "repo")
+    for target in (repo, repo / "inner"):
+        shutil.copytree(tmp_path / "planted.git", target, dirs_exist_ok=True)
+        (target / "objects" / "keep").write_bytes(b"")
+        (target / "refs" / "keep").write_bytes(b"")
+    sha = commit(repo, "c1", {"azsqlcd.toml": TOML, VIEW_PATH: VIEW})
+    set_origin_main(repo, sha)
+    return SimpleNamespace(repo=repo, inner=repo / "inner", sha=sha)
+
+
+def test_the_layout_of_a_bare_repository_inside_a_working_tree_is_never_named_to_git(tmp_path, monkeypatch):
+    """safe.bareRepository=explicit exists for this case: a bare repository that is content of a
+    checkout. The tool names a git directory only when no working tree is around it."""
+    made = bare_layout_in_a_working_tree(tmp_path)
+    commands = git_commands(monkeypatch)
+    assert release.build(made.repo, "HEAD").manifest.commit == made.sha  # .git wins, as in git
+    for name, value in HARDENED_GIT.items():
+        monkeypatch.setenv(name, value)
+    assert release.build(made.repo, "HEAD").manifest.commit == made.sha
+    error = refusal("GIT_FAILED", release.git, ["rev-parse", "HEAD"], made.inner)
+    assert "safe.bareRepository" in error.message  # git refused it; the tool did not name it
+    assert not [c for c in commands if any(part.startswith("--git-dir") for part in c)]
+
+
+def test_a_git_failure_shows_the_first_line_of_a_long_error_text_and_its_end(history, monkeypatch):
+    """git writes the cause first ('fatal: ...', 'error: ...') and can write many hint lines after
+    it; the end of the text alone would hold the hints only."""
+    stderr = b"fatal: the cause in one line\n" + b"hint: one more line of advice\n" * 40 + b"hint: last\n"
+
+    def failed(command, **kwargs):
+        return subprocess.CompletedProcess(command, 128, b"", stderr)
+
+    monkeypatch.setattr(release.subprocess, "run", failed)
+    error = refusal("GIT_FAILED", release.git, ["rev-parse", "HEAD"], history.repo)
+    assert error.message.startswith("git rev-parse failed (exit 128): fatal: the cause in one line [...] ")
+    assert error.message.endswith("hint: last") and len(error.message) < 600
+
+
+def test_the_git_helper_of_these_tests_shows_what_git_said(history):
+    with pytest.raises(AssertionError, match=r"git 'rev-parse' failed \(exit 128\) in .*: fatal: Needed"):
+        run_git(history.repo, "rev-parse", "--verify", "refs/heads/no-such-branch")
 
 
 @pytest.mark.parametrize("revision", ["no-such-branch", "0" * 40, "--all", "-h", ""])
@@ -598,7 +725,7 @@ def test_the_digest_changes_with_every_part_of_the_identity(history):
 
 # ------------------------------------------------------------------ write
 def test_two_builds_of_one_commit_give_the_same_digest_and_the_same_tar_bytes(history, tmp_path):
-    run_git(tmp_path, "clone", "-q", str(history.repo), "elsewhere")
+    run_git(tmp_path, *CLONE, str(history.repo), "elsewhere")
     set_origin_main(tmp_path / "elsewhere", history.c5)
     first = release.build(history.repo, history.c5)
     second = release.build(tmp_path / "elsewhere", history.c5)

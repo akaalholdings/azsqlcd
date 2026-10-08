@@ -1,0 +1,2 @@
+PAR001 migrations/0001__change.sql:3
+PAR001 schema/views/sales.vw_Rate.sql:3
