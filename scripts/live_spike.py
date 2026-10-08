@@ -8,6 +8,11 @@ Read docs/live-testing.md first.
         --confirm-disposable-database D [--items L1,L5] [--out DIR]       (one line)
     uv run python scripts/live_spike.py --list            print the items; no connection is made
 
+The script signs in as the tool does, by the variable AZSQLCD_AUTH: not set or `entra` (the Azure
+CLI session of az login), `managed-identity`, or `sql` with AZSQLCD_SQL_USER and
+AZSQLCD_SQL_PASSWORD. A SQL login has no access token: the item about token life (L13) is then
+reported as "not applicable", not as a pass.
+
 Guards, all required, checked before the first write:
   - --confirm-disposable-database repeats --database exactly, and DB_NAME() is that name;
   - the name does not contain "prod";
@@ -20,7 +25,9 @@ was stopped) and at the end. A statement that would make a second schema runs in
 that is rolled back.
 
 Each item is one function. It returns {id, title, result, observed, decides}; result is pass,
-fail, inconclusive or manual. "decides" says what the result changes in the tool.
+fail, inconclusive, manual or not applicable. "decides" says what the result changes in the tool.
+An item can add "note": one line that is printed for every result, a pass too (L9: the time of
+the read of every module, which export and baseline make and a deploy does not).
 
 Output under --out (default tests/fixtures/live/):
   spike/<id>.json      one file for each item that ran
@@ -40,6 +47,7 @@ import importlib
 import importlib.metadata
 import json
 import multiprocessing
+import os
 import platform
 import re
 import sys
@@ -53,8 +61,8 @@ from typing import Any
 from azsqlcd import __version__, catalog, lex, modules, names, runner, sqlerrors
 from azsqlcd import session as db
 from azsqlcd.errors import ToolError, refused
-from azsqlcd.session import AccessToken, AzureCliTokenProvider, Session, TokenProvider
-from azsqlcd.sqlerrors import ErrorClass, SqlError
+from azsqlcd.session import AccessToken, Credential, Session, SqlLogin, TokenProvider
+from azsqlcd.sqlerrors import ErrorClass, SqlError, redact
 from azsqlcd.state import rows
 
 SPIKE_SCHEMA = "azsqlcd_spike"
@@ -65,6 +73,7 @@ DEFAULT_OUT = "tests/fixtures/live"
 LOCK_RESOURCE = "azsqlcd_spike:lock"  # never the lock of the tool: a spike takes no part in a deploy
 
 PASS, FAIL, INCONCLUSIVE, MANUAL = "pass", "fail", "inconclusive", "manual"
+NOT_APPLICABLE = "not applicable"  # an item about access tokens, for a sign-in that has none
 
 # L1 to L17 are the items of the blueprint (live_spikes). L5b is the second half of L5. X1 to X10
 # are probes that the build added: they close "unverified_live" entries of the module reports.
@@ -151,6 +160,9 @@ CONNECTION_ID = (
 DROP_PASSES = 4
 L9_OBJECTS = 500
 L9_MAX_SECONDS = 10.0
+# The reads of L9 that a deploy makes: modules by key (plan, read-back, the sweeps of the runner)
+# and the list of objects (plan). The read of every module is made by export and baseline only
+L9_DEPLOY_READS = ("capture_modules(keys)", "list_user_objects")
 SOAK_INTERVAL_S = 300
 
 type Connect = Callable[[], Session]
@@ -222,6 +234,23 @@ class CachedTokenProvider:
         return self._token
 
 
+def live_credential(environ: Mapping[str, str] | None = None) -> Credential:
+    """The sign-in of a live script: what the variable AZSQLCD_AUTH names, as the tool reads it.
+    The token of the Azure CLI is cached: every call of az starts a process."""
+    credential = db.credential_from_environment(os.environ if environ is None else environ)
+    if isinstance(credential, SqlLogin) or db.auth_kind(credential) != db.AUTH_ENTRA:
+        return credential
+    return CachedTokenProvider(credential)
+
+
+def token_minutes_left(credential: Credential | None) -> int | None:
+    """Whole minutes of life of the token of the sign-in. None: a SQL login, which has no token,
+    or a connect function that a test gave."""
+    if credential is None or isinstance(credential, SqlLogin):
+        return None
+    return int((credential.get().expires_on - time.time()) // 60)
+
+
 def load_driver() -> Any:
     """The driver module, for open_session(). Only the live scripts and tests/live load it here."""
     try:
@@ -236,7 +265,7 @@ def recording_connect(log: list[dict[str, Any]]) -> db.DriverConnect:
     """A connect attempt that also writes its duration, and the full text of its error, to log."""
     driver = load_driver()
 
-    def connect_once(keywords: Mapping[str, str], token_struct: bytes) -> Session:
+    def connect_once(keywords: Mapping[str, str], token_struct: bytes | None) -> Session:
         started = time.monotonic()
         try:
             opened = db.open_session(driver, keywords, token_struct)
@@ -250,8 +279,8 @@ def recording_connect(log: list[dict[str, Any]]) -> db.DriverConnect:
     return connect_once
 
 
-def live_connect(server: str, database: str, provider: TokenProvider) -> Session:
-    """One session as the tool opens it: session.connect, token of the Azure CLI login."""
+def live_connect(server: str, database: str, provider: Credential) -> Session:
+    """One session as the tool opens it: session.connect, with the sign-in of the script."""
     return db.connect(server, database, provider, APP_NAME)
 
 
@@ -276,7 +305,7 @@ def wait_until(check: Callable[[], bool], seconds: float) -> bool:
 def _background_main(pipe: Any, server: str, database: str) -> None:
     """Body of the helper process: one session that runs the batches which the parent sends."""
     try:
-        opened = live_connect(server, database, AzureCliTokenProvider())
+        opened = live_connect(server, database, live_credential())  # the variables of the parent
         opened.execute(SESSION_OPTIONS)
         (spid,) = catalog.one_row(opened, SPID)
     except Exception as error:  # the parent must hear of every failure, whatever it is
@@ -345,7 +374,9 @@ def error_facts(error: SqlError) -> dict[str, Any]:
         "number": error.number,
         "sqlstate": error.sqlstate,
         "text": error.raw_message,  # full text: a disposable database holds nothing private
-        "redacted": error.message,
+        # as the tool stores a text with no batch (azsqlcd.run.error_text); error.message of a
+        # session can keep a name that its batch wrote
+        "redacted": redact(error.raw_message),
     }
 
 
@@ -515,9 +546,10 @@ class Options:
 class ItemResult:
     id: str
     title: str
-    result: str  # pass | fail | inconclusive | manual
+    result: str  # pass | fail | inconclusive | manual | not applicable
     observed: dict[str, Any]
     decides: str
+    note: str = ""  # one line for the operator that is printed for every result, a pass too
 
 
 @dataclass
@@ -541,7 +573,7 @@ class Ctx:
     options: Options
     connect: Connect
     main: Session  # the session of the owner: setup, checks from outside, KILL
-    provider: TokenProvider | None = None  # None: the connect function was given by a test
+    provider: Credential | None = None  # None: the connect function was given by a test
     first_connect: list[dict[str, Any]] = field(default_factory=list)
     fixtures: Fixtures = field(default_factory=Fixtures)
     _sessions: list[Session] = field(default_factory=list)
@@ -586,8 +618,8 @@ def key(kind: str, name: str) -> str:
     return names.object_key(kind, SPIKE_SCHEMA, name)
 
 
-def done(item_id: str, result: str, observed: dict[str, Any], decides: str) -> ItemResult:
-    return ItemResult(item_id, TITLES[item_id], result, observed, decides)
+def done(item_id: str, result: str, observed: dict[str, Any], decides: str, note: str = "") -> ItemResult:
+    return ItemResult(item_id, TITLES[item_id], result, observed, decides, note)
 
 
 def item_json(result: ItemResult, hide: Mapping[str, str]) -> dict[str, Any]:
@@ -598,7 +630,7 @@ def item_json(result: ItemResult, hide: Mapping[str, str]) -> dict[str, Any]:
         "result": result.result,
         "observed": plain(result.observed, hide),
         "decides": result.decides,
-    }
+    } | ({"note": plain(result.note, hide)} if result.note else {})
 
 
 def take_lock(session: Session, wait_ms: int) -> Any:
@@ -683,9 +715,7 @@ def l1_token_connect(ctx: Ctx) -> ItemResult:
         "SELECT CAST(1 AS bit), CAST(1 AS tinyint), CAST(1 AS bigint), CAST(1.5 AS decimal(5, 2)), "
         "SYSUTCDATETIME(), CAST(N'x' AS nchar(2)), CAST(0x01 AS varbinary(4)), NEWID(), CAST(NULL AS int);",
     )
-    minutes = None
-    if ctx.provider is not None:
-        minutes = int((ctx.provider.get().expires_on - time.time()) // 60)
+    minutes = token_minutes_left(ctx.provider)  # None for a SQL login: it has no token
     observed = {
         "spid": spid,
         "language_before_any_set": language,
@@ -1383,6 +1413,13 @@ def l9_catalog_in_transaction(ctx: Ctx) -> ItemResult:
         "AND [name] LIKE N'l9[_]%';",
     )
     numbered = key("PROCEDURE", "l9_p")[:-1]  # PROCEDURE:[azsqlcd_spike].[l9_p
+    every = seconds.pop("capture_modules(all)")
+    note = f"the read of every module, used by export and baseline, took {every:.1f} s"
+    if every > L9_MAX_SECONDS:
+        note += (
+            f": more than the limit of {L9_MAX_SECONDS:.0f} s for a read of the deploy path. A deploy "
+            "reads modules by key only, so this time does not decide the item"
+        )
     observed = {
         "modules_read_by_key": len(by_key),
         "modules_read_without_keys": sum(1 for found in everything if found.startswith(numbered)),
@@ -1394,7 +1431,9 @@ def l9_catalog_in_transaction(ctx: Ctx) -> ItemResult:
         "trigger_exists_after_drop_of_its_table": trigger_after_drop,
         "guard_after_the_reads": still_open,
         "objects_left_after_rollback": left,
-        "seconds": seconds,
+        "seconds_of_the_deploy_path": {name: seconds[name] for name in L9_DEPLOY_READS},
+        "seconds_of_the_read_of_every_module": every,
+        "read_of_every_module": note,
     }
     seen = (
         observed["modules_read_by_key"] == L9_OBJECTS
@@ -1406,15 +1445,20 @@ def l9_catalog_in_transaction(ctx: Ctx) -> ItemResult:
         and still_open == [1, 1]
         and left == 0
     )
-    fast = all(value <= L9_MAX_SECONDS for value in seconds.values())
+    fast = all(seconds[name] <= L9_MAX_SECONDS for name in L9_DEPLOY_READS)
     return done(
         "L9",
         FAIL if not seen else PASS if fast else INCONCLUSIVE,
         observed,
         "pass: read-back, the A12 sweep and the A18 check can run inside the transaction of the unit "
-        f"of work. inconclusive: the reads are right and one took more than {L9_MAX_SECONDS:.0f} s; the "
-        "owner decides if that time under the schema locks is acceptable. fail: the catalog does not "
-        "show the DDL of the open transaction, so the read-back design does not hold.",
+        f"of work: the reads are right, and every read of the deploy path (modules by key, the list of "
+        f"objects) took at most {L9_MAX_SECONDS:.0f} s. The read of every module is made by export and "
+        "baseline only, never by a deploy: it is timed and reported apart, and its time does not decide "
+        f"the item. inconclusive: the reads are right and a read of the deploy path took more than "
+        f"{L9_MAX_SECONDS:.0f} s; the owner decides if that time under the schema locks is acceptable. "
+        "fail: the catalog does not show the DDL of the open transaction, so the read-back design does "
+        "not hold.",
+        note,
     )
 
 
@@ -1659,6 +1703,12 @@ def l12_serverless_resume(ctx: Ctx) -> ItemResult:
     return done("L12", PASS, observed, decides)
 
 
+def _token_provider(credential: Credential) -> TokenProvider:
+    if isinstance(credential, SqlLogin):
+        raise RuntimeError("a SQL login gives no token")
+    return credential
+
+
 class _FixedToken:
     def __init__(self, token: AccessToken) -> None:
         self._token = token
@@ -1675,6 +1725,9 @@ def l13_token_soak(ctx: Ctx) -> ItemResult:
         "of the failure matrix never happens, and min_token_minutes only has to cover the connect."
     )
     past = ctx.options.soak_past_expiry_minutes
+    if isinstance(ctx.provider, SqlLogin):
+        reason = "SQL authentication has no access token: a session of a SQL login does not expire with one"
+        return done("L13", NOT_APPLICABLE, {"reason": reason}, decides)
     if past <= 0 or ctx.provider is None:
         steps = [
             "az login, then at once: uv run --extra db python scripts/live_spike.py --server S "
@@ -1685,7 +1738,8 @@ def l13_token_soak(ctx: Ctx) -> ItemResult:
             "starts right after azure/login.",
         ]
         return done("L13", MANUAL, {"steps": steps}, decides)
-    token = AzureCliTokenProvider().get()  # not cached: the session must hold exactly this token
+    # not cached: the session must hold exactly this token
+    token = _token_provider(db.credential_from_environment(os.environ)).get()
     held = ctx.track(live_connect(ctx.options.server, ctx.options.database, _FixedToken(token)))
     at_connect = round((token.expires_on - time.time()) / 60, 1)
     end = token.expires_on + past * 60
@@ -2133,7 +2187,8 @@ def x1_error_texts(ctx: Ctx) -> ItemResult:
     holder.execute(ROLLBACK)
     deadlocked = _deadlock(ctx, table)
     found[1205] = deadlocked[0] if deadlocked else None
-    if ctx.provider is not None:
+    # A fact of token logins. A SQL login gets another text for a database that does not exist.
+    if ctx.provider is not None and not isinstance(ctx.provider, SqlLogin):
         # a database that does not exist: one connect attempt, no retry
         keywords = db.connection_keywords(ctx.options.server, SPIKE_SCHEMA + "_no_such_database", APP_NAME)
         try:
@@ -3023,10 +3078,10 @@ def run(options: Options, connect: Connect | None = None) -> int:
     refuse_unconfirmed(options.database, options.confirm)  # before any connection
     hide = private_names(options.server, options.database)
     spike_out = options.out / "spike"
-    provider: TokenProvider | None = None
+    provider: Credential | None = None
     log: list[dict[str, Any]] = []
     if connect is None:
-        cached = provider = CachedTokenProvider(AzureCliTokenProvider())
+        cached = provider = live_credential()
         driver_connect = recording_connect(log)
 
         def connect_live() -> Session:
@@ -3098,6 +3153,8 @@ def run(options: Options, connect: Connect | None = None) -> int:
     print()
     print_table([("item", "result", "title"), *((r.id, r.result, r.title) for r in results)])
     for result in results:
+        if result.note:
+            print(f"\n{result.id} note: {result.note}")
         if result.result != PASS:
             print(f"\n{result.id} {result.result}: {result.decides}")
     print(f"\ndriver: {totals['driver_decision']}")

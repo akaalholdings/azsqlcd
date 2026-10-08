@@ -280,7 +280,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `errors.py` | `Exit`, `ToolError`, the constructors `refused`, `failed`, `unknown`, `retry_safe`, `locked` | - |
 | `lex.py` | tokenizer, GO splitter, module header, directives | - |
 | `names.py` | identifier quoting, object keys, file layout of a database repository | - |
-| `sqlerrors.py` | error number from message text, error classes, redaction, `SqlError` | - |
+| `sqlerrors.py` | error number from message text, error classes, redaction, `SqlError`, `SignInFilter` (hides the login and the password of SQL authentication) | lex |
 | `model.py` | typed model of table-class objects, operations, canonical JSON, `fold` | lex, names |
 | `parse.py` | DDL parser: object files and migration statements; normal form NF001 to NF006 | lex, model, names |
 | `emit.py` | model to canonical CREATE text, operation to SQL, the NF000 token check | lex, model, names, parse |
@@ -291,7 +291,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `modules.py` | module files: normal form, checksum, dependency order, header rewrites | errors, lex, names |
 | `release.py` | build from git, manifest, digest, in-memory bundle read, tool digest, the one git entry point | chain, errors |
 | `lint.py` | findings with codes, batch classifier, allow lines, secret rule | chain, config, errors, lex, modules, names |
-| `session.py` | the only importer of the driver; `Session`, `connect`, token providers | errors, sqlerrors |
+| `session.py` | the only importer of the driver; `Session`, `connect`; the sign-in: `Credential` (a token provider or a `SqlLogin`), `AzureCliTokenProvider`, `ManagedIdentityTokenProvider`, `credential_from_environment`, `auth_kind` | errors, sqlerrors |
 | `state.py` | setup script; reads and write statements of schema `azsqlcd` | config, errors, names, session, sqlerrors |
 | `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts | errors, names, session, sqlerrors, state |
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, errors, lex, model, names, session, state |
@@ -322,11 +322,14 @@ Offline commands (standard library only, no network, no database):
 | `verify --base SHA [--root DIR]` | Findings of lint, chain rules, module rules, model validation and proof. The summary states that lint is not a safety proof | 0 / 22 `VERIFY_FAILED` |
 | `gen [--base REF] (--name NAME [--rename KIND:OLD=NEW]... \| --resum) [--root DIR]` | `--base` defaults to `origin/main`. `--name` writes `migrations/NNNN__NAME.sql` and the chain line, or prints `no migration: <reason>`; it needs `table_model = true`. `--resum` renumbers and re-hashes the new migrations | 0 / 22 |
 | `build --commit SHA --out DIR [--root DIR]` | `DIR/bundle.tar`, `DIR/manifest.json`. Runs lint over the files of the commit first. Outputs: `release` (`r<seq>`), `digest` | 0 / 22 |
-| `targets --bundle DIR --digest D --env E` | Outputs: `matrix` (JSON rows of the targets), `timeout` (the larger of `job_timeout_minutes` and 2 x the largest `expected-minutes` + 30) | 0 / 22 |
+| `targets --bundle DIR --digest D --env E` | Outputs: `matrix` (JSON rows of the targets; each row has the key `auth`, `oidc` or `managed-identity`), `timeout` (the larger of `job_timeout_minutes` and 2 x the largest `expected-minutes` + 30) | 0 / 22 |
 | `setup-sql --env E --target T [--root DIR]` | Prints the administrator script | 0 / 22 |
 
 Database commands (need the `db` extra). All take `--bundle DIR --digest D --env E --target T
-[--show-error-text]`; `export` takes `--root DIR` in place of `--bundle` and `--digest`.
+[--show-error-text]`; `export` takes `--root DIR` in place of `--bundle` and `--digest`. Each one
+signs in as the variable `AZSQLCD_AUTH` says (`entra`, `managed-identity` or `sql`; A32 below). A
+sign-in that cannot be used is refused before the release is read (22 `AUTH_INVALID`,
+22 `SQL_AUTH_MISSING`).
 
 | Command | Writes and prints | Exit |
 |---|---|---|
@@ -575,6 +578,78 @@ code is now, where it differs from the text above:
 - `lex.tokenize` keeps the tokens of the last 16 texts.
 - New reason code: `EXPORT_INCOMPLETE` (22). New finding code: `PRF006`. New allow and finding
   codes of the temporal work: `TEMPORAL_OFF`, `UNMASK`. Each has its row in `docs/runbook.md`.
+
+### Sign-in modes and the fixes of the first pilot
+
+- A32. Three sign-in modes. This overrides Part 2 (k), "`AzureCliCredential` only ... no SQL
+  password". A database command signs in as the variable `AZSQLCD_AUTH` says, exact and in lower
+  case: `entra` (also when the variable is not set or empty; the Azure CLI session, as before),
+  `managed-identity` (`azure.identity.ManagedIdentityCredential`, the same token scope;
+  `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` names a user-assigned identity and must be a GUID), or
+  `sql` (a `SqlLogin` from `AZSQLCD_SQL_USER` and `AZSQLCD_SQL_PASSWORD`; the same connection
+  keywords plus `UID` and `PWD`, every value in braces). Rules of `sql`: the password comes from
+  the environment only; it is refused in GitHub Actions (`session.in_github_actions`:
+  `GITHUB_ACTIONS` is `true` or `1` in any letter case, `GITHUB_RUN_ID` is set, or the command
+  has `--ci github`; 22 `AUTH_INVALID`, no override), in `credential_from_environment`, in
+  `cli` for a `SqlLogin` that a caller gave, and in `session.connect`. This guards against a
+  mistake; the author of a workflow can remove the variables. A control character in either
+  value and a password of fewer than 8 characters are refused
+  before any connect; no token is asked for and no token life is checked (`token_minutes_left`
+  is null); the login and the password are taken out of every driver text in `session.py` before
+  redaction, and out of every string of the triage log when the sign-in is `sql`
+  (`sqlerrors.SignInFilter`: the password wherever it stands, the login as a whole word, both
+  also in braces with `}` doubled; a driver text that names `UID=` or `PWD=` is cut there); the
+  driver exception is not chained; a failed login is 24 `CONNECT_FAILED` with the number and the class
+  and without the driver message. The kind of sign-in, never a login or a client id, is in the
+  plan output (`sign-in: <kind>`), in the summary (row `Sign-in`), in `plan.json` (a note, so
+  outside `plan_sha256`), in `report.json` (key `auth`) and in the `config` event of the triage
+  log. The state tables are unchanged. No code compares the identity of the session with an
+  identity of `azsqlcd.toml`, in any mode. `setup-sql` makes users for the client ids of
+  `[identities]` only: none for a SQL login. `cli.main` reads the environment only when the
+  caller gave no credential.
+- A33. The sign-in of an environment in the workflows. `[env.<name>] auth` of `azsqlcd.toml` is
+  `"oidc"` (the default) or `"managed-identity"`; another value is `CONFIG_INVALID`. `targets`
+  puts it into every matrix row. `stage.yml`, `drift.yml`, `onboard.yml` and `resolve.yml` set,
+  at job level, `AZSQLCD_AUTH` (`managed-identity`, else `entra`) and
+  `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` (the plan or the deploy client id of the row, else
+  empty), and run `azure/login` only when the row is not `managed-identity`. A row with no
+  `auth` key behaves as `oidc`. `id-token: write` stays. The setting is for the workflows only:
+  a command on a workstation follows `AZSQLCD_AUTH`. With a managed identity the identity is
+  bound to the runner machine, not to the workflow run (`docs/setup.md`, section 2).
+- `plan.json` has the key `syntax_check`: `ran`, `skipped` or null (the plan has no unit; in a
+  file also: a tool that did not write the key). It is not in `plan_sha256`: the plan job
+  parses the texts, the deploy job computes the plan again under the lock with no second
+  session, and both must give one hash. `Plan.from_json` reads a file without the key; another
+  value is 22 `PLAN_INVALID`. `PLAN_FORMAT` stays 1. `compute_plan` has the argument
+  `approved_plan`; `runner.deploy` passes the expected plan. The key decides a note of the
+  report only: no note when the approved plan says `ran`; "was skipped: the plan job had no
+  second session, and the deploy of an approved plan does not run the check" for `skipped`; "is
+  not proven: the approved plan does not record that the plan job ran it, and the deploy of an
+  approved plan does not run the check" for a file without the key. A plan job or an inline
+  plan with no second session keeps "was skipped: this run has no second session".
+- `azsqlcd.toml`: `[project] module_chunk` is optional (default 100). The message for a missing
+  required key names the key, its table and one example line.
+- New reason codes: `AUTH_INVALID` (22), `SQL_AUTH_MISSING` (22). New finding code: `PAR001`
+  (error; unbalanced parentheses of a batch or a module; no allow line). Each has its row in
+  `docs/runbook.md`.
+- `sqlerrors.redact` keeps the names of nine messages of names only, when the whole text is that
+  one message. Names of the catalog (1913, 2714, 3726, 5074) always stay. A name as the statement
+  wrote it (207, 208, 2705, 3701, 4902) stays only when the batch that raised the error holds
+  each part of it as an identifier (`sqlerrors.names_written`, `SqlError.for_batch`, called by
+  `session.DriverSession.execute`): dynamic SQL that builds a statement from data puts a row
+  value there. `state.set_run_status` redacts with no batch, so `azsqlcd.run.error_text` never
+  keeps such a name.
+- `report.json` of a deploy has the key `syntax_check` (`runner.SYNTAX_IN_THIS_RUN`,
+  `runner.SYNTAX_OF_PLAN_FILE`, `skipped` or null): where the fact of the syntax check comes
+  from. `plan.json` states it in a key that `plan_sha256` does not cover.
+- `lint` does not report `PAR001` for a migration whose chain line says `withdrawn`: the file is
+  merged and can never change, and the pull request of its withdrawal must pass.
+- `release.git` adds `--git-dir=<root>` when the root itself is a bare repository, `GIT_DIR` is
+  not set and no folder at or above the root holds `.git`.
+- The message of 22 `CATCHUP_REQUIRED` gives two cases (promote the earlier release, or withdraw
+  its migration). It names the replacement in the pull request of the withdrawal as the way, and
+  the condition of the other one (no database applied the migration, and `table_model = true`).
+  The detail keys are unchanged.
 
 ---
 

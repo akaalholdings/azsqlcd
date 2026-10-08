@@ -75,6 +75,145 @@ role; all rights are database rights (section 6).
    needs 9 for each tool tag, so the credentials of two tags fit and those of three do not.
 5. No credential exists for a pull request subject or a branch subject. Never add one.
 
+### Three ways to sign in
+
+A database command (`plan`, `deploy`, `drift`, `export`, `baseline`, `resolve`) signs in as the
+variable `AZSQLCD_AUTH` says. The value is exact and in lower case. Not set or empty means `entra`.
+Any other value is exit 22 `AUTH_INVALID`, before the release is read. All three use the same
+connection settings (`Encrypt=yes`, `TrustServerCertificate=no`), the same fence and the same
+state tables. The plan output, the step summary, `plan.json` (note `sign-in: <kind>`),
+`report.json` (key `auth`) and the triage log name the kind of sign-in. They never name a login or
+a client id.
+
+Status: only `entra` ran against a database. `managed-identity` and `sql` are proven by unit tests
+only (`docs/known-gaps.md`, section 13).
+
+| `AZSQLCD_AUTH` | Where the identity comes from | Where it can be used | What the tool checks |
+|---|---|---|---|
+| not set, or `entra` | The Azure CLI session: `az login` on a workstation, the step `azure/login` with OIDC in a workflow | Workstation and workflow | A token can be had (24 `TOKEN_UNAVAILABLE`). Its life: `min_token_minutes` for a command that writes, 2 minutes for a read-only command (24 `TOKEN_TOO_SHORT`) |
+| `managed-identity` | The managed identity of the machine, asked at its identity endpoint. No Azure CLI is used. `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` names a user-assigned identity; not set means the system-assigned identity | A machine in Azure that has the identity: a self-hosted runner, or a virtual machine that a person works on. A GitHub-hosted runner has none | `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID`, when set, is a GUID (22 `AUTH_INVALID`). A token can be had (24 `TOKEN_UNAVAILABLE`). The same token life as `entra` |
+| `sql` | SQL authentication: the login in `AZSQLCD_SQL_USER`, the password in `AZSQLCD_SQL_PASSWORD` | Workstation only. Refused in GitHub Actions, with no override | Both variables are set (22 `SQL_AUTH_MISSING`). Neither holds a control character, the password has at least 8 characters, and the command does not run in GitHub Actions (22 `AUTH_INVALID`). No token exists, so no token life is checked |
+
+#### Entra through the Azure CLI (the default)
+
+- Workstation: `az login`, then run the command. Sections 2 to 6 describe this sign-in for the
+  workflows.
+- Workflow: the step `azure/login` signs the Azure CLI in with OIDC, with the plan or the deploy
+  client id of the environment. This is `auth = "oidc"` in `azsqlcd.toml`, the default. The
+  workflows then set `AZSQLCD_AUTH=entra` for the job.
+
+#### Managed identity
+
+Setting, by pull request, for each environment that uses it:
+
+```toml
+[env.dev]
+auth = "managed-identity"   # default: "oidc". Any other value: CONFIG_INVALID
+```
+
+What the reusable workflows (`stage.yml`, `drift.yml`, `onboard.yml`, `resolve.yml`) then do for
+that environment:
+
+- The step `azure/login` does not run.
+- The job gets `AZSQLCD_AUTH=managed-identity`, and `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` with the
+  client id that `azure/login` got before: the plan client id in a plan, drift, export or
+  baseline-report job, the deploy client id in a deploy, baseline or resolve job.
+- The tool asks the managed identity of the runner machine for the token.
+
+What you must do:
+
+1. The identities of `[identities]` in `azsqlcd.toml` are then the client ids of user-assigned
+   managed identities. Section 2 creates such identities already; the same six can be used.
+2. Assign each identity to the runner machines that run its jobs (step 4 below says which).
+3. `azsqlcd setup-sql` makes the database users in the same way (`WITH SID = <client id>,
+   TYPE = E`). Section 6 does not change.
+4. Runners: a GitHub-hosted runner has no managed identity. This sign-in needs self-hosted runners
+   in Azure (section 5).
+5. Federated credentials are not needed. `scripts/setup_repo.py --print-azure` prints them for
+   OIDC only: skip sections 2 and 3 of its output for an environment with a managed identity.
+   Section 2, step 4 (the subject with `job_workflow_ref`) then protects nothing for that
+   environment.
+
+**The trust boundary changes.** Read this before you choose the setting.
+
+- With OIDC the identity is bound to the workflow run. Entra gives a token only to a job whose
+  subject matches the federated credential: the environment, and with section 2, step 4 also
+  `job_workflow_ref`.
+- With a managed identity the identity is bound to the runner machine. Every job that can run on
+  that runner can ask for the token of every identity of that runner. The subject of the job is
+  not checked by anyone.
+- The approval of a GitHub environment still gates the deploy job of the tool. It does not bind
+  the identity: another job on the same runner needs no approval to use it.
+- The reusable workflows have one `runs-on` input for the plan jobs and the deploy jobs of a
+  stage. With the template as it is, both identities of an environment sit on the same runners.
+
+So:
+
+1. Separate runner groups for the plan identities and for the deploy identities, and for
+   non-production and production. A runner holds only the identities of its group. The plan jobs
+   and the deploy jobs of one stage share one `runs-on` value, so this split needs a change of
+   the workflows; it is not built (`docs/known-gaps.md`, section 13). Until then a runner of a
+   stage holds the plan identity and the deploy identity of that stage.
+2. Give a runner group only to the database repositories that need it. Where the GitHub plan
+   allows it, limit the group also to the reusable workflows of the tool at a tag (section 5,
+   step 3, "Workflow access"). With a managed identity this limit is the only thing that keeps
+   other workflow code away from the deploy identity.
+3. Prefer runners that are used for one job and then destroyed (section 5, step 1).
+4. Do not set `AZSQLCD_AUTH` as a machine variable of a runner. The workflows set it for each job.
+
+#### SQL authentication on a workstation
+
+For a workstation that cannot use an Entra sign-in. Not for a pipeline: with `AZSQLCD_AUTH=sql`
+the tool stops with 22 `AUTH_INVALID` when the job shows that it runs in GitHub Actions. It reads
+three things: the variable `GITHUB_ACTIONS` is `true` or `1` (any letter case, spaces around it
+dropped), the variable `GITHUB_RUN_ID` is set, or the command has `--ci github`. The tool has no
+option that switches the refusal off. The refusal guards against a mistake. It is not a control
+against the author of a workflow: a step that removes both variables and leaves out `--ci github`
+is not refused. Branch protection and the review of workflow files are the control.
+
+- The login is read from `AZSQLCD_SQL_USER`, the password from `AZSQLCD_SQL_PASSWORD`. The
+  password is read from the environment only. No argument takes it, `azsqlcd.toml` refuses a key
+  for it, and no file holds it.
+- The tool writes neither value. They are taken out of every message, of `plan.json`, of
+  `report.json` and of the triage log (`<hidden>`): the password wherever it stands, the login
+  where it stands as a whole word, both also in the form of a connection string (in braces, `}`
+  doubled). A driver text that names `UID=` or `PWD=` is cut at that keyword. A failed login
+  prints the error number and the class, not the text of the driver (24 `CONNECT_FAILED`).
+- The password has at least 8 characters, as Azure SQL Database asks. A shorter value is refused
+  (22 `AUTH_INVALID`): it is a mistake, for example the wrong variable.
+- A name of the triage log that is equal to the login (a schema, a folder) is written as
+  `<hidden>` too. Choose a login that is not the name of a schema, a database or an environment.
+- The token-life checks do not apply. The plan prints
+  `token minutes left: not applicable (SQL authentication has no access token)`.
+- `setup-sql` creates no user for a SQL login. A DBA creates the user of the login and gives it
+  the rights that the script gives to the plan user or the deploy user (section 6, step 2).
+- The engine stores the login name in `azsqlcd.run.principal_name` of each run row. The tool
+  never reads that column back.
+
+Set the password for one session. Do not type it on a command line: the shell history keeps
+command lines. Read it from a prompt.
+
+PowerShell (the variables live in this process only):
+
+```powershell
+$env:AZSQLCD_AUTH = "sql"
+$env:AZSQLCD_SQL_USER = "deploy_login"
+$secure = Read-Host -Prompt "Password of deploy_login" -AsSecureString
+$env:AZSQLCD_SQL_PASSWORD = [System.Net.NetworkCredential]::new("", $secure).Password
+Remove-Variable secure
+```
+
+bash (the variables live in this shell and its child processes):
+
+```bash
+export AZSQLCD_AUTH=sql AZSQLCD_SQL_USER=deploy_login
+read -r -s -p "Password of deploy_login: " AZSQLCD_SQL_PASSWORD && export AZSQLCD_SQL_PASSWORD
+```
+
+When the work is done, close the shell, or remove the variable:
+`Remove-Item Env:AZSQLCD_SQL_PASSWORD` (PowerShell), `unset AZSQLCD_SQL_PASSWORD` (bash). A
+password with a control character (a tab or a line break included) is refused.
+
 ### User account instead of an organisation
 
 This document assumes an organisation. When the owner of the repositories is a GitHub user
@@ -94,10 +233,12 @@ account, three things differ:
 3. Edit `azsqlcd.toml`: project name, tenant id, client ids, one target for each environment.
    Use the failover-group listener name as `server` when the database is in a failover group.
    Rules that the tool checks (`CONFIG_INVALID`):
-   - Every key is required except `gated`, `[unmanaged]`, `[ack]`, and in `[project]`
+   - Every key is required except `gated`, `auth` (default `"oidc"`; section 2, "Three ways to
+     sign in"), `[unmanaged]`, `[ack]`, and in `[project]` `module_chunk` (default 100),
      `data_batches` (default `false`) and `server_suffixes` (default: the four Azure SQL Database
      suffixes). A target server that ends with none of the suffixes is `CONFIG_INVALID`. An
-     unknown key is an error.
+     unknown key is an error. The message for a missing required key names the key, its table
+     and one example line.
    - No key name may hold `key`, `secret` or `password`, in any letter case. This includes the
      names under `[identities]`: `monkey_deploy` is refused. The file holds no secrets.
    - An environment name is one of dev, sandbox, test, preprod, prod, disposable.
@@ -198,7 +339,9 @@ Only this script creates the state schema (A2). `deploy` and `baseline` stop wit
    client id the script makes the deploy user only. The deploy user gets `db_ddladmin`, SELECT,
    INSERT and UPDATE on schema `azsqlcd` (no DELETE), and no `db_securityadmin`. The plan user gets
    read rights only. Both get VIEW DEFINITION, VIEW DATABASE STATE and SELECT on
-   `sys.sql_expression_dependencies`.
+   `sys.sql_expression_dependencies`. With `auth = "managed-identity"` the script is the same:
+   the client ids are those of the managed identities. For a SQL login (`AZSQLCD_AUTH=sql` on a
+   workstation) the script makes no user: a DBA creates it by hand.
 3. The script stops with an error in three cases. The database has another name than the target,
    or the server is not Azure SQL Database: nothing is changed. The database holds the state of
    another project or of another state version: no user is made and no right is granted. The name
@@ -394,6 +537,33 @@ Steps:
 4. `azsqlcd lint`, `azsqlcd verify --base "$(git merge-base origin/main HEAD)"`, merge.
 5. The plan of the new release lists `REPLACEMENT_EDGE` as a destructive item. A database that
    never ran the old migration runs only the replacement.
+
+Later releases wait behind a failed release. A release applies only the migrations that it
+added, so a database that did not take release r3 refuses r4 and r5 with 22 `CATCHUP_REQUIRED`
+("promote r3 first"). When the migration of r3 fails in that database (21 `BATCH_FAILED`, rolled
+back, no step row), r3 can never be promoted there, and r4 and r5 wait, also when they change
+other tables. The way out, as the scenario test of the tool walks it:
+
+1. One pull request withdraws the migration of r3: the word `withdrawn` on its line of
+   `migrations/migrations.sum`. With a replacement (the steps above), or with no replacement.
+   With no replacement, put the table files back to the model without the migration; else
+   `verify` refuses the pull request (`WDR004`). With `table_model = false` a withdrawal with no
+   replacement is refused (`CHN006`).
+2. The merge creates r6. Promote r6. Its plan holds the migrations of r4 and r5 and the note
+   `catch-up in one release: ...`. The deploy sends them in one transaction, in chain order. The
+   withdrawn migration is never sent to this database and gets no step row.
+3. After a withdrawal with no replacement, the corrected change comes in a later pull request as
+   a normal migration from `azsqlcd gen`, with no `replaces=` line. `verify` refuses a
+   `replaces=` line for a migration that an earlier pull request withdrew (`WDR005`). That
+   release (r7) runs only its own migration; the migrations of r4 and r5 do not run again.
+
+Withdraw with no replacement only when no database applied the migration. A database that did
+apply it keeps the change, and the tool does not report that until the next change of that table
+stops with 21 `READBACK_MISMATCH`, or the corrected migration fails there with 21 `BATCH_FAILED`
+because the change exists already (`docs/known-gaps.md`, N2-F5). The pipeline runs dev before
+test, so a migration that failed in test was usually applied in dev: add the replacement in the
+pull request of the withdrawal. The message of `CATCHUP_REQUIRED` says the same. The later migrations must not need the withdrawn one:
+`docs/known-gaps.md`, section 13.
 
 ## 8. Operation
 

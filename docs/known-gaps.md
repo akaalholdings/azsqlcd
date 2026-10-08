@@ -37,6 +37,7 @@ each build task.
 10. Hardening audits and the later fix waves (2026-10-07): open findings and limits.
 11. Live command-line runs and the second review (2026-10-07, afternoon).
 12. GitHub Actions proof (2026-10-07).
+13. Sign-in modes and the fixes of the first pilot: what is closed, what is not proven.
 
 Ids: L1 to L17, L5b and X1 to X10 are spike items of `scripts/live_spike.py`. "Acc" names a
 scenario of `scripts/live_acceptance.py`. G1 to G7 are the GitHub checklist. All are in
@@ -373,7 +374,7 @@ an operator or a developer sees. Until the owner says otherwise, the row is how 
 | A9, first converge | Chunks only when no migration and no drop is pending and every module to deploy has a managed row with no source. One module with no row makes the release one transaction | `plan.py` `pending_work` |
 | A12, dependants | The sweep, the refresh, the blocker scan and table drift exist only with `table_model = true`; with `false` the plan prints a note and makes none of these checks. The dependants come from `sys.sql_expression_dependencies` only. The refresh set holds direct dependants only: a view on a view is not refreshed | `plan.py` `compute_plan`; `runner.py` `_sweep_dependants`; `tables.py` `refresh_set` |
 | A14, NF000 | The table of accepted differences is: spelling, terminator, option order, element order, batch order. Tokens are compared case-folded, then the exact letters of each bracketed name are checked; a bare word inside an expression is not checked for case. See "Canonical form" below | `emit.py` `token_roundtrip_differences`, `NORMAL_FORM_EQUIVALENTS` |
-| A25, redaction | Best effort: a value that holds a quote followed by a space can leak a fragment, and THROW text without quotes passes unchanged. `--show-error-text` is refused by `--env prod` and with `--rebind-environment`, before a session opens; `meta.environment` is not read for it. `PARSEONLY_FAILED` stores only the redacted text, so the flag cannot show the full syntax error. `PRF002` prints generated SQL, with DEFAULT expression text from the repository files, in the verify summary | `sqlerrors.py` `redact`; `cli.py` `main`; `plan.py` `_parse_only`; `gen.py` `_prove` |
+| A25, redaction | Best effort: a value that holds a quote followed by a space can leak a fragment, and THROW text without quotes passes unchanged. Engine messages that hold only names can keep their names, and only when the whole text is that one message: four name objects that exist in the database and always keep them (1913, 2714, 3726, 5074); five print a name as the statement wrote it (207, 208, 2705, 3701, 4902) and keep it only when the batch that was sent holds the name as an identifier. Section 13 says what is proven of their templates and what stays open. `--show-error-text` is refused by `--env prod` and with `--rebind-environment`, before a session opens; `meta.environment` is not read for it. `PARSEONLY_FAILED` stores only the redacted text, so the flag cannot show the full syntax error. `PRF002` prints generated SQL, with DEFAULT expression text from the repository files, in the verify summary | `sqlerrors.py` `redact`; `cli.py` `main`; `plan.py` `_parse_only`; `gen.py` `_prove` |
 | A25, `SECRET_LITERAL` in export | A module with such a literal is quarantined (also when the literal is inside a string or a comment, which lint accepts in a file). A table-class file with such a literal stops the whole export, exit 22: a table cannot be left out without the objects that need it | `onboard.py` `_secret_literal`, `export` |
 | A1, exit codes | A wrong argument, a missing plan flag of `deploy`, a `--clear-run` value that is not a number, and `--ci github` without its two variables are exit 2 (the tool did not start), not 22. A lock timeout or a deadlock in a read-only command is 22 `READ_FAILED`, although it is safe to start again. `baseline` and `resolve` can also end 21, 23, 24 and 25; the command table of Part 1 lists 0 / 22 | `cli.py` `parse`, `main`, `_read_failure`; `runner.py` `state_run` |
 | A2, setup script | On a database that is bound to another environment the script creates the two users and their grants first and raises at its end; the meta row stays. The refresh flow of A16 needs this. Risk: the script, run in the wrong database of the same project and the same database name, creates deploy users there before it raises. When plan and deploy have one client id the script makes one user | `state.py` `setup_sql` |
@@ -413,7 +414,7 @@ an operator or a developer sees. Until the owner says otherwise, the row is how 
 | `MODULE_DUPLICATE` covers module files only | A table file and a view file with one name are not found by lint; the model or the engine refuses later | `lint.py` `_module_findings` |
 | `lint` checks every migration, merged ones included | Section 4, "A new lint rule" | `lint.py` `lint_repo` |
 | The chain reader is stricter than the listed grammar: a number that does not rise, `replaces=` that names no earlier withdrawn line, a second replacement of one line. A `baseline` line may appear when the base chain has no migration | `CHAIN_INVALID`, `CHN001` | `chain.py` `parse_sum`, `check_immutable` |
-| `azsqlcd.toml`: every key is required except `gated`, `[unmanaged]` and `[ack]`. `gated` defaults to true for test, preprod and prod. A key name that holds `key`, `secret` or `password` (any case) is refused, also an identity name such as `monkey_deploy` | `CONFIG_INVALID` | `config.py` `load_config`, `_reject_secret_keys` |
+| `azsqlcd.toml`: every key is required except `gated`, `auth` (default `oidc`), `[unmanaged]`, `[ack]`, and in `[project]` `module_chunk` (default 100), `data_batches` and `server_suffixes`. `gated` defaults to true for test, preprod and prod. A setting that decides what a deploy may do (`table_model`, `min_token_minutes`, `drift`, the lock limits, the identities) has no default. A key name that holds `key`, `secret` or `password` (any case) is refused, also an identity name such as `monkey_deploy` | `CONFIG_INVALID` | `config.py` `load_config`, `_reject_secret_keys` |
 
 ### Modules
 
@@ -1126,7 +1127,7 @@ fixture pairs for its state.
 | Id | Severity | Finding | Way out today |
 |---|---|---|---|
 | N1-F4, N5-06 | minor | One plan reads the whole recorded state four to five times; a first converge asks `has_index` once for each view | None needed; cost only |
-| N2-F1 | major | A release that failed on a module cannot be fixed by a later pull request that only changes the module: `CATCHUP_REQUIRED` sends the operator back to the release that fails. Owner decision on A7 needed. Since wave 3 the `DEPENDANT_BROKEN` message says what to do | Withdraw the migration and add its statements again as a replacement (`allow REPLACEMENT_EDGE`), with the module change in the same pull request |
+| N2-F1 | major | A release that failed on a module cannot be fixed by a later pull request that only changes the module: `CATCHUP_REQUIRED` sends the operator back to the release that fails. Owner decision on A7 needed. Since wave 3 the `DEPENDANT_BROKEN` message says what to do. The `CATCHUP_REQUIRED` message now gives both cases, and a scenario test walks the way out on the fake engine (section 13) | Withdraw the migration and add its statements again as a replacement (`allow REPLACEMENT_EDGE`), with the module change in the same pull request |
 | N2-F5 | minor | A migration withdrawn with no replacement: `drift` does not report the database that ran it | Compare that database with the table files by hand |
 | N3-F2 | major | No rule and no guidance for the owner of a schema that a migration creates: `CREATE SCHEMA` by the deploy principal makes that principal the owner. Owner decision needed (ownership chains, a later change of identity); spike L14 does not cover both `CREATE SCHEMA` forms | Write `CREATE SCHEMA [x] AUTHORIZATION [dbo]` by hand if the deploy principal may do that, or let an administrator create the schema |
 | N3-F3 | minor | The first `gen` in a repository with no `origin/main` fails with a raw git message | `git fetch origin main`, or give `--base` |
@@ -1206,7 +1207,9 @@ workflow of a database repository, and no line of `docs/porting.md`, section C.
   `.DS_Store`): local exit 22, CI passes.
 - N4-15, N4-09 for `gh`: `scripts/setup_repo.py` decodes `gh` output with the code page and
   starts `gh` by bare name.
-- N4-17: 27 test call sites use the default encoding; five symbolic-link tests need a privilege.
+- N4-17: 27 test call sites use the default encoding. The tests that make a symbolic link now
+  skip, with the reason, when Windows refuses the link for a missing privilege (seen only with a
+  patched `Path.symlink_to`, on no Windows machine: section 13).
 - N4-18: `cryptography` has no win_arm64 wheel in `uv.lock`.
 - N4-20: the commands of `README.md` and `docs/quickstart.md` are POSIX shell. On Windows use Git
   Bash. A case-only rename of a file needs `git mv`.
@@ -1465,3 +1468,167 @@ Not proven on GitHub:
 The owner account is a GitHub user account, not an organisation. Runner groups do not exist
 there, and a team for CODEOWNERS does not exist there. The Actions access level of the tool
 repository is `user` (`docs/setup.md`, "User account instead of an organisation").
+
+## 13. Sign-in modes and the fixes of the first pilot
+
+This work added the sign-in modes `managed-identity` and `sql`, the setting `auth` of an
+environment, and fixes for the findings of a first pilot. Source: the reports of the engineers,
+checked against the code. Nothing of this section ran against a database, a machine with a
+managed identity, GitHub Actions or a Windows machine.
+
+### What this work closes
+
+- The tool signed in with the Azure CLI only. Now `AZSQLCD_AUTH` chooses `entra`,
+  `managed-identity` or `sql` (`docs/setup.md`, section 2, "Three ways to sign in").
+- `report.json` of `deploy --expect-plan-file` warned that the syntax check was skipped when the
+  plan job had run it. `plan.json` now has the key `syntax_check`, and the deploy warns only when
+  the plan job did not run the check or the file does not say.
+- The message of `CATCHUP_REQUIRED` named only "promote r<k> first", which cannot pass when r<k>
+  fails. It now gives the second case (withdraw the migration).
+- A module or a batch whose parentheses do not balance passed `lint`, `verify` and `build`. Lint
+  now reports `PAR001`.
+- A build in a bare repository failed under the git setting `safe.bareRepository=explicit`.
+- Engine messages of names only were printed as `<redacted>` and told the reader nothing.
+
+### What the review of this work closed
+
+Two reviewers reproduced eight findings. Each has a regression test.
+
+- A SQL password with `}` was shown when a driver error text held the connection string: the
+  string holds the password in braces with `}` doubled, and only the raw value was removed. Now
+  the login and the password are removed in three forms (raw, `}` doubled, in braces), and a
+  driver text of a SQL session ends at a connection keyword of the sign-in (`UID=`, `PWD=`,
+  `password=`, `user id=`), so a string that is cut inside a value shows no part of it.
+- `PAR001` stopped `lint`, `verify` and `build` for a repository that held a merged migration
+  with the finding, also for the pull request of its withdrawal. A migration whose chain line
+  says `withdrawn` is no longer reported.
+- A `SqlLogin` that a caller handed to `cli.main` or to `session.connect` opened a session in a
+  workflow. The refusal is now in all three places, and it reads `GITHUB_ACTIONS` without letter
+  case, and `GITHUB_RUN_ID`.
+- The triage log replaced the values of the SQL variables also when the sign-in was not `sql`,
+  and replaced a short login inside other words. Now: only with the sign-in `sql`; the login as
+  a whole word; a password of fewer than 8 characters is refused.
+- `TOKEN_UNAVAILABLE` could show a token, or a client id without dashes, from the error text of
+  the identity library. Both are replaced, for both token sign-ins, and that error is no longer
+  chained.
+- The `CATCHUP_REQUIRED` message offered "a new migration in a later pull request" with no
+  condition. It now names the replacement in the pull request of the withdrawal, and the
+  condition of the other way.
+- A row value could stand in the name place of 207, 208, 2705, 3701 and 4902 (dynamic SQL that
+  builds a statement from data) and reach stderr, `report.json`, the summary, the triage log and
+  `azsqlcd.run`. Such a name now stays only when the batch that was sent holds it as an
+  identifier. Names with a C1 control character or a character that changes the direction of a
+  line are not kept.
+- A plan file whose key `syntax_check` was changed to `ran` gave a deploy with no word about the
+  check. `report.json` now has the key `syntax_check`, which says where the fact comes from.
+- `[project] module_chunk` was required. The message for a missing key did not say what to add.
+- Spike item L9 was `inconclusive` for a slow read that no deploy makes.
+
+### Not proven: SQL authentication
+
+- No connection with SQL authentication was made. Only the Python layer of the driver
+  (mssql-python 1.15.0: its parser and builder of the connection string, in a child process)
+  read 29 hostile login and password strings back as one value each. What the ODBC driver does
+  with the string is not proven.
+- The text and the SQLSTATE of a failed SQL login from the real driver were not seen. The tool
+  hides the driver message when the number is 18456, the SQLSTATE is 28000, or the text holds
+  "login failed", "invalid authorization specification" or "password". Any other connect text is
+  printed redacted, with the login and the password removed, and cut at a connection keyword of
+  the sign-in.
+- The installed driver (mssql-python 1.15.0) was not seen to put the connection string into an
+  error text. The removal of the braced form and the cut at `UID=` / `PWD=` are tested with a
+  fake driver that does.
+- The login and the password are removed by their text, in three forms (raw, `}` doubled, in
+  braces). Another form is not found: a value that a driver writes URL-encoded, in base64 or
+  with other escapes. A part of a value is found only behind a connection keyword. A session
+  object that an embedding program gives to `cli.main` (`session_factory`) does not pass
+  `session.py`: its error texts are not cleaned at the source. The triage log still removes the
+  values.
+- Open: a name that is equal to the SQL login. The login is hidden where it stands as a whole
+  word, in driver texts and in the triage log (also in `argv`). So a schema, a database, an
+  environment or a folder with the name of the login is written as `<hidden>`, and a reader who
+  knows the names of the repository can tell what the login is. Exact case: login `sales`, and
+  the log holds `CREATE TABLE [<hidden>].[Order]`. A login that is a word of an engine message
+  (`Lock`) is hidden in that message in the same way. Not built: leave the login when it equals
+  a name of the configuration. Until then, choose a login that is no such name.
+- The password rule (at least 8 characters) is the documented policy of Azure SQL Database. It
+  was not checked against a server. A login with a shorter password cannot be used with the tool.
+- The refusal of SQL authentication in GitHub Actions reads `GITHUB_ACTIONS`, `GITHUB_RUN_ID`
+  and `--ci github`. A workflow step that removes both variables and passes no `--ci github` is
+  not refused: the tool cannot tell such a job from a workstation. Another CI system (`CI=true`
+  alone) is not refused.
+- The engine stores the login name in `azsqlcd.run.principal_name`. `setup-sql` creates no user
+  for a SQL login.
+
+### Not proven: managed identity
+
+- No machine with a managed identity ran the tool. On a machine with none, the real
+  `azure-identity` 1.26.0 failed as designed (exit 24 `TOKEN_UNAVAILABLE`). Not proven: a token
+  for the database scope from a managed identity, a user-assigned client id, and the database
+  user of `setup-sql` (`SID` = client id) for a managed identity.
+- Nothing ran on GitHub. The job variables, the `if` on `azure/login`, the upload condition of
+  `onboard.yml` and the pass of the job environment into the action are tested by reading the
+  YAML, by evaluating the expressions in a test, and by running the action script with the real
+  tool under bash.
+- The trust boundary (`docs/setup.md`, section 2): every job on a runner can ask for the token of
+  every identity of that runner. The approval of a GitHub environment does not guard the
+  identity. The tool cannot solve this.
+- The reusable workflows have one `runs-on` input for the plan jobs and the deploy jobs of a
+  stage. Separate runners for the plan identity and the deploy identity of one stage are not
+  built.
+- The `azure-identity` library writes its own warning lines on stderr when a token fails. Such a
+  line can name the client id. The message, the files and the log of the tool do not.
+- The `TOKEN_TOO_SHORT` message speaks of the Azure CLI and `az login` also under
+  `managed-identity`.
+
+### Not proven: the other fixes
+
+- The way out of a failed release (withdraw, one catch-up, the corrected migration later) is
+  proven on the fake engine only, for a migration that no database applied. If a database
+  applied the migration, a withdrawal with no replacement leaves the change there (N2-F5), and
+  the corrected migration then fails in that database (21 `BATCH_FAILED`, rolled back). The
+  mixed case (dev applied the migration, test failed it, a later release is merged) is proven on
+  the fake engine for the replacement in the pull request of the withdrawal: both databases end
+  with one model. The message of `CATCHUP_REQUIRED` names that way.
+- Is a later migration independent of the withdrawn one? `verify` checks it only with
+  `table_model = true`: the proof replays the chain without the withdrawn migration. With
+  `table_model = false` nothing checks it before the deploy: the engine decides, and the release
+  rolls back (exit 21) when a later migration needs the change of the withdrawn one.
+- A skipped release with a non-transactional migration still has no path in a catch-up
+  (`NONTX_NOT_ALONE`, section 4).
+- `syntax_check` of `plan.json` is not in `plan_sha256`. A changed plan file can say `ran`. The
+  effect is a missing warning; no gate reads the key. `report.json` of the deploy then says
+  `ran in the plan job (read from plan.json; not in plan_sha256)`: the reader sees that the run
+  did not parse the texts itself. Not built: a deploy of an approved plan that parses the texts
+  on a second session before it takes the lock. An older tool cannot read a `plan.json` of this
+  tool (`PLAN_INVALID`); not tested with an old tool.
+- The kept names of engine messages rest on message templates. Four (207, 208, 2714, 5074) were
+  compared with texts that a live driver returned (`tests/fixtures/live`). Five (1913, 2705,
+  3701, 3726, 4902) come from the product documentation and were not checked against an engine.
+  A message of another form stays redacted.
+- Names of the catalog (1913, 2714, 3726, 5074) stay whatever was sent. The engine prints there
+  the name of an object or a column that exists. When dynamic SQL builds a statement from a row
+  value, and that value is the name of an object that exists (`SELECT ... INTO [<value>]` gives
+  2714), the message shows that name. It is a name of the catalog; that a row holds it is not
+  told by the message. Not run against an engine.
+- A name as the statement wrote it (207, 208, 2705, 3701, 4902) is redacted where the batch does
+  not hold it, also where it is no row value: the column that a refreshed view uses
+  (`sp_refreshsqlmodule`), a read of the dependants (`sys.dm_sql_referenced_entities`), a name
+  inside a string of `EXEC`. The reader gets the step and the error number, and the full text
+  with `--show-error-text` outside prod. The engine half of the dynamic SQL case (207 with a
+  value under `QUOTED_IDENTIFIER ON`) was not run: no database was allowed in the review.
+- The test sessions (`tests/support`) raise an engine error with no batch, so a scenario test
+  shows `<redacted>` for 207 and 208 where the real session shows a name that the batch wrote.
+  The real session is tested over a fake driver (`tests/unit/test_auth.py`).
+- `PAR001` and a merged migration: a repository that holds a merged migration with unbalanced
+  parentheses, not yet withdrawn, gets the finding from `lint`, `verify` and `build` of every
+  commit until the withdrawal is merged. A build of an older commit of such a repository is
+  refused too. The rule skips only `PAR001` of a withdrawn migration; no other finding.
+- Windows: the fix for `safe.bareRepository=explicit` was tested with the git setting given
+  through the process environment, and the skip of the symbolic-link tests with a patched
+  `Path.symlink_to`. Neither ran on a Windows machine with those restrictions. Two tests of
+  `test_release.py` (shallow clone, two builds) failed on a pilot workstation for a cause that
+  is not known; they pass under the hardened setting here, and the test helpers now show the
+  error text of git.
+- Spike item L9 with its two groups of reads ran with a scripted catalog and clock, not live.
+  `list_user_objects` is counted as a read of the deploy path; the pilot gave no time for it.

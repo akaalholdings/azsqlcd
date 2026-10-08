@@ -1540,3 +1540,66 @@ def test_a_low_priority_wait_is_the_clause_of_its_online_option():
     in another place of the statement is not the wait of this build."""
     apart = "CREATE INDEX [ix] ON [s].[t] ([a]) WITH (ONLINE = ON, WAIT_AT_LOW_PRIORITY (MAX_DURATION = 1))"
     assert codes(facts(RAW_NONTX + apart, mode="nontx")) == ["NTX004"]
+
+
+# ------------------------------------------------------------------ pilot: parentheses that do not balance
+# The file of the pilot: a stray '[k])' line gives one ')' more than '('. Only the engine refused it.
+ONE_TOO_MANY = "CREATE TABLE [s].[t] (\n [a] int NOT NULL,\n [q] numeric(23,5) NULL\n [k])\n)"
+NEVER_CLOSED = "CREATE TABLE [s].[t] (\n [a] int NOT NULL,\n [q] numeric(23,5) NULL\n"
+RAW_TABLE = "-- azsqlcd:raw TABLE:[s].[t] reason: outside the model\n"
+
+
+def unbalanced(found: BatchFacts) -> list[tuple[str, int]]:
+    return [(f.severity, f.line) for f in found.findings if f.code == "PAR001"]
+
+
+@pytest.mark.parametrize("mode", ["tx", "nontx"])
+@pytest.mark.parametrize("prefix", ["", RAW_TABLE, "-- azsqlcd:data\n"], ids=["model", "raw", "data"])
+def test_a_closing_parenthesis_that_closes_nothing_is_an_error_in_every_kind_of_batch(prefix, mode):
+    """No T-SQL batch is valid with parentheses that do not balance, so the kind does not matter."""
+    lines_above = 2 + prefix.count("\n")
+    found = facts(prefix + ONE_TOO_MANY, mode=mode)
+    assert unbalanced(found) == [("error", lines_above + 5)]
+    (finding,) = [f for f in found.findings if f.code == "PAR001"]
+    assert f"line {lines_above + 5}" in finding.message and "closes nothing" in finding.message
+
+
+@pytest.mark.parametrize("mode", ["tx", "nontx"])
+@pytest.mark.parametrize("prefix", ["", RAW_TABLE, "-- azsqlcd:data\n"], ids=["model", "raw", "data"])
+def test_an_opening_parenthesis_that_is_never_closed_is_an_error_in_every_kind_of_batch(prefix, mode):
+    lines_above = 2 + prefix.count("\n")
+    found = facts(prefix + NEVER_CLOSED, mode=mode)
+    assert unbalanced(found) == [("error", lines_above + 1)]
+    (finding,) = [f for f in found.findings if f.code == "PAR001"]
+    assert f"line {lines_above + 1}" in finding.message and "never closed" in finding.message
+
+
+def test_the_finding_names_the_first_parenthesis_that_cannot_have_a_partner():
+    # ')' before any '(': the count is equal at the end and the batch is still invalid
+    found = raw("SELECT 1 ) + ( 2;")
+    assert unbalanced(found) == [("error", 4)]
+    assert "closes nothing" in found.findings[-1].message
+    # two '(' stay open: the finding names the first of them and says how many
+    found = raw("UPDATE [s].[t]\nSET [a] = (1 + (2\nWHERE [b] = (3);")
+    assert unbalanced(found) == [("error", 5)]
+    assert "2 '(' are never closed" in next(f.message for f in found.findings if f.code == "PAR001")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE [s].[t] SET [a] = N'(' WHERE [b] = ')))'",
+        "UPDATE [s].[t] SET [a] = 1 WHERE [b] = 2 -- ) not a parenthesis (\n AND [c] = 3 /* (( */",
+        "UPDATE [s].[t] SET [a (] = 1 WHERE [b)]]] = 2",
+        'UPDATE [s].[t] SET "a)" = 1 WHERE "(" = 2',
+        "UPDATE [s].[t] SET [a] = ((1 + (2)) * (3)) WHERE [b] IN (SELECT (4))",
+    ],
+)
+def test_a_parenthesis_in_a_string_a_comment_or_a_quoted_name_is_not_counted(sql):
+    for found in (data(sql), raw(sql)):
+        assert unbalanced(found) == []
+
+
+def test_the_parenthesis_finding_does_not_take_away_another_finding_of_the_batch():
+    found = data("COMMIT;\nDELETE FROM [s].[t] WHERE [a] = (1;")
+    assert sorted(codes(found)) == ["FORBIDDEN_TOKEN", "PAR001"]

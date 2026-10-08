@@ -11,13 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from azsqlcd.chain import file_sha256
+from azsqlcd import lex
+from azsqlcd.chain import MigrationBatch, file_sha256, parse_migration
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.lint import (
     ALLOW_CODES,
     CODES,
     DEFERRED_ALLOW_CODES,
     Finding,
+    classify_batch,
     lint_change,
     lint_repo,
     secret_findings,
@@ -1269,3 +1271,171 @@ def test_nf000_for_a_clause_in_another_place_is_one_finding_that_says_the_order(
     assert "the file does not" not in moved and "the canonical form does not" not in moved
     assert found[1].message == "line 6: the file has WITH CHECK; the canonical form does not"
     assert found[2].message == "line 7: the canonical form has ( 1 , 1 ); the file does not"
+
+
+# ------------------------------------------------------------------ pilot: parentheses that do not balance
+@pytest.mark.parametrize(
+    ("path", "text", "line", "what"),
+    [
+        (
+            "schema/views/sales.vw_Open.sql",
+            "CREATE OR ALTER VIEW [sales].[vw_Open]\nAS\nSELECT (1 + 2)) AS [One];\n",
+            3,
+            "closes nothing",
+        ),
+        (
+            "schema/procedures/sales.usp_Close.sql",
+            "CREATE OR ALTER PROCEDURE [sales].[usp_Close] (@Id int)\nAS\nBEGIN\n"
+            "    UPDATE [sales].[Order] SET [Total] = ([Total] * (1 + 0.2\n    WHERE [Id] = @Id;\nEND\n",
+            4,
+            "2 '(' are never closed",
+        ),
+        (
+            "schema/functions/sales.fn_Tax.sql",
+            FN_TAX.decode().replace("RETURN @Total * 0.2;", "RETURN (@Total * 0.2;"),
+            5,
+            "never closed",
+        ),
+        (
+            "schema/triggers/sales.tr_Order.sql",
+            "CREATE OR ALTER TRIGGER [sales].[tr_Order] ON [sales].[Order] AFTER INSERT\nAS\n"
+            "SELECT COUNT(*)) FROM inserted;\n",
+            3,
+            "closes nothing",
+        ),
+    ],
+)
+def test_a_module_file_whose_parentheses_do_not_balance_is_an_error_at_the_line(path, text, line, what):
+    """Without the rule the file passes lint, verify and build, and the plan refuses it at the
+    syntax check, with a database."""
+    (finding,) = lint_repo(with_config({path: text.encode()}))
+    assert (finding.code, finding.severity, finding.path, finding.line) == ("PAR001", "error", path, line)
+    assert f"line {line}" in finding.message and what in finding.message
+
+
+def test_a_parenthesis_in_a_string_a_comment_or_a_quoted_name_of_a_module_is_not_counted():
+    text = (
+        "CREATE OR ALTER VIEW [sales].[vw_Open]\nAS\n-- one ')' here\n"
+        "SELECT N'((' AS [Open (], ')' AS \"Close)\" /* ( */;\n"
+    )
+    assert lint_repo(with_config({"schema/views/sales.vw_Open.sql": text.encode()})) == []
+
+
+# ------------------------------------------------------------------ PAR001 and a merged migration
+RAW_RATE = (
+    "-- azsqlcd:raw TABLE:[sales].[Rate] reason: outside the model\n"
+    "-- azsqlcd:allow RAW TABLE:[sales].[Rate] reason: reviewed by the DBA team\n"
+)
+
+
+def raw_migration(stem: str, body: str, more: str = "") -> bytes:
+    return f"-- azsqlcd:migration {stem}\n-- azsqlcd:mode tx\n{RAW_RATE}{more}{body}\n".encode()
+
+
+# merged by a tool that had no PAR001: it passed lint and build, and the engine refused it
+NEVER_CLOSED = raw_migration(
+    "0001__rate", "CREATE TABLE [sales].[Rate] ([Id] int NOT NULL, [Rate] numeric(23, 5 NULL);"
+)
+RATE_V2 = raw_migration(
+    "0002__rate_v2",
+    "CREATE TABLE [sales].[Rate] ([Id] int NOT NULL, [Rate] numeric(23, 5) NULL);",
+    "-- azsqlcd:allow REPLACEMENT_EDGE 0001__rate.sql reason: the first file had a syntax error\n",
+)
+RATE_NOTE = raw_migration("0003__rate_note", "ALTER TABLE [sales].[Rate] ADD [Note] nvarchar(10) NULL;")
+
+
+def raw_repo(*lines: str, **migrations: bytes) -> dict[str, bytes]:
+    files = {f"migrations/{stem}.sql": data for stem, data in migrations.items()}
+    files["migrations/migrations.sum"] = ("azsqlcd-sum 1\n" + "".join(f"{line}\n" for line in lines)).encode()
+    return with_config(files)
+
+
+def test_a_merged_migration_whose_parentheses_do_not_balance_stops_nothing_once_it_is_withdrawn():
+    """A merged migration never changes (CHN004), so its finding can never be corrected in the
+    file. The way out is to withdraw and replace it: the pull request that does so, and every
+    later one, must pass. A withdrawn migration is sent to no database that did not run it."""
+    bad, good, later = (file_sha256(data) for data in (NEVER_CLOSED, RATE_V2, RATE_NOTE))
+    merged = raw_repo(f"0001__rate.sql sha256:{bad} tx", **{"0001__rate": NEVER_CLOSED})
+    withdrawn = raw_repo(
+        f"0001__rate.sql sha256:{bad} tx withdrawn",
+        f"0002__rate_v2.sql sha256:{good} tx replaces=0001__rate.sql",
+        **{"0001__rate": NEVER_CLOSED, "0002__rate_v2": RATE_V2},
+    )
+    after = raw_repo(
+        f"0001__rate.sql sha256:{bad} tx withdrawn",
+        f"0002__rate_v2.sql sha256:{good} tx replaces=0001__rate.sql",
+        f"0003__rate_note.sql sha256:{later} tx",
+        **{"0001__rate": NEVER_CLOSED, "0002__rate_v2": RATE_V2, "0003__rate_note": RATE_NOTE},
+    )
+
+    # while the line is live the finding stays: a new database would be sent the batch
+    (finding,) = lint_repo(merged)
+    assert (finding.code, finding.path, finding.line) == ("PAR001", "migrations/0001__rate.sql", 5)
+    assert lint_repo(withdrawn) + lint_change(merged, withdrawn) == []  # the pull request of the withdrawal
+    assert lint_repo(after) + lint_change(withdrawn, after) == []  # a later pull request
+
+
+def test_a_withdrawn_migration_keeps_every_other_finding_and_a_live_one_keeps_par001():
+    # only PAR001 is dropped, and only for the withdrawn file: the replacement is checked in full
+    bad = file_sha256(NEVER_CLOSED)
+    twice = NEVER_CLOSED.replace(b"0001__rate", b"0002__rate_v2")
+    found = lint_repo(
+        raw_repo(
+            f"0001__rate.sql sha256:{bad} tx withdrawn",
+            f"0002__rate_v2.sql sha256:{file_sha256(twice)} tx replaces=0001__rate.sql",
+            **{"0001__rate": NEVER_CLOSED, "0002__rate_v2": twice},
+        )
+    )
+    assert [(f.code, f.path) for f in found if f.code == "PAR001"] == [
+        ("PAR001", "migrations/0002__rate_v2.sql")
+    ]
+
+
+# The files that break PAR001 on purpose: the two lint cases of the rule, and the files of ddl/bad
+# (DDL that the parser must refuse) whose defect is a parenthesis. Every other SQL file below is
+# valid for this rule.
+UNBALANCED_LINT_CASES = {
+    "parenthesis_that_closes_nothing_in_raw_batch",
+    "parenthesis_never_closed_in_model_batch_and_module",
+}
+UNBALANCED_BAD_DDL = {
+    "syntax_unbalanced_check.sql",
+    "syntax_unclosed_default_expression.sql",
+    "syntax_unclosed_index_filter.sql",
+}
+
+
+def test_the_parenthesis_rule_fires_on_no_sql_file_of_the_fixtures_the_example_and_the_template():
+    """The rule must not stop a file that is valid today. A migration is read batch by batch, as
+    lint reads it. Any other SQL file (a module, a table file, one side of a pair) is read as the
+    batches that GO makes of it, each as a raw batch: the same rule on the same tokens."""
+    top = Path(__file__).resolve().parents[2]
+    roots = [top / "tests" / "fixtures", top / "examples", top / "templates"]
+    paths = sorted(p for root in roots for p in root.rglob("*.sql"))
+    checked = 0
+    fired: set[str] = set()
+    for path in paths:
+        try:
+            text = path.read_bytes().decode("utf-8").removeprefix(lex.BOM)
+            lex.tokenize(text)
+        except (UnicodeDecodeError, lex.LexError):
+            continue  # a fixture that no rule can read: FILE_INVALID, MODULE_INVALID
+        batches: list[tuple[MigrationBatch, str]] = []
+        if path.parent.name == "migrations":
+            try:
+                migration = parse_migration(text, path.name)
+            except ToolError:
+                continue  # MIGRATION_INVALID has the file already
+            batches = [(batch, migration.mode) for batch in migration.batches]
+        else:
+            for part in lex.split_batches(text):
+                if lex.significant(lex.tokenize(part.text)):
+                    batch = MigrationBatch("raw", part.text, part.first_line, (), raw_object="TABLE:[s].[t]")
+                    batches.append((batch, "tx"))
+        checked += bool(batches)
+        if any(f.code == "PAR001" for batch, mode in batches for f in classify_batch(batch, mode).findings):
+            fired.add(path.relative_to(top).as_posix())
+    on_purpose = {p.relative_to(top).as_posix() for p in paths if UNBALANCED_LINT_CASES.intersection(p.parts)}
+    on_purpose |= {f"tests/fixtures/ddl/bad/{name}" for name in UNBALANCED_BAD_DDL}
+    assert fired == on_purpose
+    assert checked > 900, checked  # the corpus is read, not skipped

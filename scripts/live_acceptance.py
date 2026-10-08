@@ -8,7 +8,9 @@ Read docs/live-testing.md first.
         --confirm-disposable-database D [--out DIR]                       (one line)
 
 The guards are those of scripts/live_spike.py (confirmed name, DB_NAME(), no "prod" in the name,
-EngineEdition 5, no azsqlcd.meta row or environment 'disposable').
+EngineEdition 5, no azsqlcd.meta row or environment 'disposable'). The sign-in is that of the tool:
+the variable AZSQLCD_AUTH (see scripts/live_spike.py). With `sql` the check of the token life is
+reported as "not applicable", not as a pass: a SQL login has no access token.
 
 What it does:
   1. Drops the objects of schema [azsqlcd_accept] and the four tables of schema [azsqlcd]: every
@@ -57,7 +59,7 @@ from azsqlcd.errors import ToolError
 from azsqlcd.plan import Plan
 from azsqlcd.release import Bundle
 from azsqlcd.runner import Report, RunError
-from azsqlcd.session import AccessToken, AzureCliTokenProvider, Session, TokenProvider
+from azsqlcd.session import AccessToken, Credential, Session, SqlLogin, TokenProvider
 from azsqlcd.sqlerrors import SqlError
 from azsqlcd.state import rows
 
@@ -74,6 +76,7 @@ APPLOCK_WAIT_S = 2
 REPORT_NAME = "acceptance_report.json"
 
 PASS, FAIL, NOT_RUN = "pass", "fail", "not run"
+NOT_APPLICABLE = "not applicable"  # a check of an access token, for a sign-in that has none
 
 ITEM = names.qualified(SCHEMA, "Item")
 VIEW_KEY = names.object_key("VIEW", SCHEMA, "vw_Item")
@@ -353,7 +356,7 @@ class Outcome:
 class Check:
     name: str
     covers: str  # the row of the failure matrix, or the amendment, that the check is for
-    result: str  # pass | fail | not run
+    result: str  # pass | fail | not run | not applicable
     expected: str
     seen: str
     detail: str = ""
@@ -372,7 +375,7 @@ class Acceptance:
     bundles: list[Bundle]
     trees: list[dict[str, str]]
     connect: live.Connect  # a session as the driver gives it; the runner sets its own options
-    provider: TokenProvider
+    provider: Credential
     inspector: Session  # the session of the owner: reads from outside a run, KILL, changes "by hand"
     tool_digest: str
     checks: list[Check] = field(default_factory=list)
@@ -384,7 +387,7 @@ class Acceptance:
         *,
         expect_plan: Plan | None = None,
         factory: live.Connect | None = None,
-        provider: TokenProvider | None = None,
+        provider: Credential | None = None,
     ) -> Outcome:
         """runner.deploy of release r<number>. Without expect_plan: --inline-plan."""
         audit = runner.Audit(
@@ -595,6 +598,21 @@ def setup_state(a: Acceptance) -> None:
     )
 
 
+def token_life_check(a: Acceptance) -> None:
+    """A deploy with a token that has too little life must stop before the connect. A SQL login
+    has no token: the check is recorded as not applicable, never as a pass."""
+    name, covers = (
+        "a token with too little life stops before the connect",
+        "Token cannot be minted, or has too little life",
+    )
+    if isinstance(a.provider, SqlLogin):
+        why = "SQL authentication has no access token: the token life is not checked and cannot stop a run"
+        a.record(Check(name, covers, NOT_APPLICABLE, "24 TOKEN_TOO_SHORT", "", why))
+        return
+    short = a.deploy(1, provider=ShortLivedToken(a.provider))
+    a.expect(name, covers, short, 24, "TOKEN_TOO_SHORT", lambda: {"no run row": a.run_count() == 0})
+
+
 def first_release(a: Acceptance) -> None:
     planned, first_plan = a.plan(1)
     a.expect(
@@ -612,15 +630,7 @@ def first_release(a: Acceptance) -> None:
         },
     )
     assert first_plan is not None
-    short = a.deploy(1, provider=ShortLivedToken(a.provider))
-    a.expect(
-        "a token with too little life stops before the connect",
-        "Token cannot be minted, or has too little life",
-        short,
-        24,
-        "TOKEN_TOO_SHORT",
-        lambda: {"no run row": a.run_count() == 0},
-    )
+    token_life_check(a)
     applied = a.deploy(1, expect_plan=first_plan)
     a.expect(
         "a deploy with the expected plan applies the migration and the modules",
@@ -1235,6 +1245,17 @@ def run_scenarios(a: Acceptance) -> None:
             a.record(Check(title, "", FAIL, "", "", f"stopped by {type(error).__name__}: {error}"))
 
 
+def totals_of(checks: Sequence[Check]) -> dict[str, int]:
+    """The count of checks for each result. A check that is not applicable is counted apart."""
+    results = (PASS, FAIL, NOT_RUN, NOT_APPLICABLE)
+    return {result: sum(1 for check in checks if check.result == result) for result in results}
+
+
+def exit_code_of(totals: Mapping[str, int]) -> int:
+    """0 when no check failed and every check ran. A check that is not applicable is neither."""
+    return 0 if totals[FAIL] == 0 and totals[NOT_RUN] == 0 else 1
+
+
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Live acceptance of azsqlcd on a disposable Azure SQL Database. See docs/live-testing.md."
@@ -1248,7 +1269,8 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace, connect: live.Connect | None = None) -> int:
     live.refuse_unconfirmed(args.database, args.confirm)  # before any connection
-    provider = live.CachedTokenProvider(AzureCliTokenProvider())
+    # a test gives the sessions: the variables of the machine are then not read
+    provider = live.live_credential() if connect is None else live.live_credential({})
     if connect is None:
         connect = partial(db.connect, args.server, args.database, provider, live.APP_NAME)
     inspector = connect()
@@ -1280,9 +1302,7 @@ def run(args: argparse.Namespace, connect: live.Connect | None = None) -> int:
     finally:
         inspector.close()
     checks = acceptance.checks
-    totals = {
-        result: sum(1 for check in checks if check.result == result) for result in (PASS, FAIL, NOT_RUN)
-    }
+    totals = totals_of(checks)
     report = {
         "tool_version": __version__,
         "tool_digest": acceptance.tool_digest,
@@ -1295,9 +1315,10 @@ def run(args: argparse.Namespace, connect: live.Connect | None = None) -> int:
     live.print_table(
         [("result", "exit and reason seen", "check"), *((c.result, c.seen, c.name) for c in checks)]
     )
-    print(f"\n{totals[PASS]} pass, {totals[FAIL]} fail, {totals[NOT_RUN]} not run.")
+    not_applicable = f", {totals[NOT_APPLICABLE]} not applicable" if totals[NOT_APPLICABLE] else ""
+    print(f"\n{totals[PASS]} pass, {totals[FAIL]} fail, {totals[NOT_RUN]} not run{not_applicable}.")
     print(f"report: {args.out / REPORT_NAME}")
-    return 0 if totals[FAIL] == 0 and totals[NOT_RUN] == 0 else 1
+    return exit_code_of(totals)
 
 
 def main(argv: Sequence[str] | None = None, *, connect: live.Connect | None = None) -> int:

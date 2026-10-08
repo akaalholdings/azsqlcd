@@ -13,6 +13,7 @@ from azsqlcd import chain, diff, emit, gen, lint, release, replay
 from azsqlcd.errors import Exit, ToolError
 from fixtures.gen import repo as R
 from fixtures.pairs import loader
+from support.links import symlink_or_skip
 
 FN_TAX = "schema/functions/dbo.fn_Tax.sql"
 VW_ORDERS = "schema/views/sales.vw_Orders.sql"
@@ -242,7 +243,7 @@ def test_the_working_tree_is_read_like_a_revision_of_git(tmp_path: Path):
 def test_a_symbolic_link_in_the_working_tree_is_refused(tmp_path: Path):
     # git would store the link, not the file: the check would read other bytes than the release holds
     repo = R.new_repo(tmp_path / "r", {**R.SALES, R.ORDER: R.order()})
-    (repo / "schema/tables/sales.Link.sql").symlink_to(repo / R.ORDER)
+    symlink_or_skip(repo / "schema/tables/sales.Link.sql", repo / R.ORDER)
     error = refusal(lambda: gen.read_working_tree(repo))
     assert error.reason_code == "TREE_INVALID"
     assert error.detail["path"] == "schema/tables/sales.Link.sql"
@@ -253,7 +254,7 @@ def test_a_root_of_the_working_tree_that_is_a_symbolic_link_is_refused(tmp_path:
     # os.walk follows a root that is a link; git stores the link and a release holds no file under it
     repo = R.new_repo(tmp_path / "r", {**R.SALES, R.ORDER: R.order(), "onboarding/dev/note.md": "x\n"})
     (repo / name).rename(repo / "elsewhere")
-    (repo / name).symlink_to("elsewhere")
+    symlink_or_skip(repo / name, "elsewhere")
     error = refusal(lambda: gen.read_working_tree(repo))
     assert (error.reason_code, error.detail["path"]) == ("TREE_INVALID", name)
     # verify gives the refusal as its one finding and reads nothing through the link
@@ -768,7 +769,7 @@ def collided(tmp_path: Path) -> tuple[Path, str, str]:
         {**R.with_migrations(theirs), OTHER: R.table("Other", "[a] int NOT NULL", "[b] int NULL")},
     )
     R.git(repo, "checkout", "-q", "work")
-    with pytest.raises(Exception, match="returned non-zero exit status 1"):
+    with pytest.raises(AssertionError, match=r"git 'merge' failed \(exit 1\)"):
         R.git(repo, "merge", "-q", "main")  # both sides added line 2 of migrations.sum
     return repo, R.sum_text(theirs), R.sum_text(mine).splitlines()[1] + "\n"
 

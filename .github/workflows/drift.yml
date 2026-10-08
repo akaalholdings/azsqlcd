@@ -79,12 +79,19 @@ jobs:
     # Every database command of the job writes its triage log here (docs/triage.md).
     env:
       AZSQLCD_LOG_DIR: azsqlcd-logs
+      # How the tool signs in. `auth = "managed-identity"` of the environment in azsqlcd.toml:
+      # the step azure/login does not run, and the tool asks the managed identity of the runner
+      # for the token of the plan identity. Else: the Azure CLI session of azure/login (OIDC).
+      AZSQLCD_AUTH: ${{ matrix.target.auth == 'managed-identity' && 'managed-identity' || 'entra' }}
+      AZSQLCD_MANAGED_IDENTITY_CLIENT_ID: >-
+        ${{ matrix.target.auth == 'managed-identity' && matrix.target.plan_client_id || '' }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: drift-bundle-${{ inputs.environment }}
           path: release
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      - if: ${{ matrix.target.auth != 'managed-identity' }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ matrix.target.plan_client_id }}
           tenant-id: ${{ matrix.target.tenant_id }}

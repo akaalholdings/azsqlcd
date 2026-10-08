@@ -54,6 +54,9 @@ runs:
         version: '0.10.4'
         enable-cache: false
 
+    # The variables of the calling job reach the tool through the environment of this step:
+    # AZSQLCD_LOG_DIR (the triage log), AZSQLCD_AUTH and AZSQLCD_MANAGED_IDENTITY_CLIENT_ID (the
+    # sign-in; the reusable workflows set them from the matrix row of the target).
     - id: run
       shell: bash
       env:

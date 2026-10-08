@@ -90,6 +90,7 @@ CODES: dict[str, str] = {
     "NNL001": WARNING,
     "NTX005": ERROR,
     "NTX006": ERROR,
+    "PAR001": ERROR,  # a migration batch and a module file
     # files of one revision
     "SECRET_LITERAL": ERROR,
     "UNKNOWN_PATH": ERROR,
@@ -422,6 +423,32 @@ def _set_options(sig: list[Tok], i: int) -> tuple[list[str], str]:
     return options, _word(sig[j]) if j < len(sig) else ""
 
 
+def _unbalanced(sig: list[Tok]) -> tuple[int, str] | None:
+    """(index in sig, what is wrong) of the first parenthesis that can have no partner; None when
+    the parentheses balance. sig holds tokens, so a parenthesis in a string, a comment or a quoted
+    name is not counted. Text whose parentheses do not balance is never valid T-SQL."""
+    opened: list[int] = []
+    for i, t in enumerate(sig):
+        if _is_op(t, "("):
+            opened.append(i)
+        elif _is_op(t, ")"):
+            if not opened:
+                return i, "this ')' closes nothing: no '(' is open before it"
+            opened.pop()
+    if not opened:
+        return None
+    if len(opened) == 1:
+        return opened[0], "this '(' is never closed"
+    return opened[0], f"{len(opened)} '(' are never closed; this is the first of them"
+
+
+def _parenthesis_message(line: int, what: str, where: str) -> str:
+    return (
+        f"line {line}: {what}. The parentheses of {where} do not balance, so the engine would refuse "
+        "it (a parenthesis in a string, a comment or a quoted name is not counted)"
+    )
+
+
 # ------------------------------------------------------------------ batch classifier
 class _Classifier:
     """The significant tokens of one batch and what the rules find in them."""
@@ -493,6 +520,13 @@ class _Classifier:
             self.items.append(Item(code, obj, self.line(i)))
 
     # -------------------------------------------------------------- every batch
+    def parentheses(self) -> None:
+        """PAR001: only the engine would refuse the batch, and only when the deploy sends it."""
+        found = _unbalanced(self.sig)
+        if found is not None:
+            i, what = found
+            self.report("PAR001", i, _parenthesis_message(self.line(i), what, "the batch"))
+
     def phrases(self, table: _Phrases, code: str, why: str) -> None:
         for i in range(len(self.sig)):
             after = table.get(self.word(i))
@@ -1262,6 +1296,7 @@ def classify_batch(
     if batch.kind not in ("model", "data", "raw"):
         raise ValueError(f"unknown batch kind {batch.kind!r}")
     c = _Classifier(batch, path)
+    c.parentheses()  # first: no other rule takes the token of this finding
     c.forbidden()
     statement = ""
     creates: tuple[str, ...] = ()
@@ -1597,9 +1632,15 @@ def _data_line(batch: chain.MigrationBatch) -> int:
     return batch.first_line - 1 + line
 
 
-def _migration_findings(path: str, migration: chain.Migration, data_batches: bool) -> list[Finding]:
+def _migration_findings(
+    path: str, migration: chain.Migration, data_batches: bool, withdrawn: bool = False
+) -> list[Finding]:
     """data_batches: [project] data_batches of azsqlcd.toml. When it is false, a data batch is one
-    DATA000 finding and no other rule reads the batch."""
+    DATA000 finding and no other rule reads the batch.
+
+    withdrawn: the chain line of the migration says `withdrawn`. Then PAR001 is not reported: the
+    file is merged and can never change (CHN004), no database that did not run it is sent it, and
+    the finding would stop the pull request of the withdrawal and every later one."""
     out: list[Finding] = []
     if migration.mode == "nontx" and migration.expected_minutes is None:
         out.append(
@@ -1630,7 +1671,7 @@ def _migration_findings(path: str, migration: chain.Migration, data_batches: boo
             out.append(_finding("DATA000", path, _data_line(batch), _DATA_OFF))
             continue
         facts = classify_batch(batch, migration.mode, created, path=path)
-        out += facts.findings
+        out += [f for f in facts.findings if not (withdrawn and f.code == "PAR001")]
         out += _allow_findings(path, batch, facts)
         created.update(facts.creates_tables)
     return out
@@ -1643,6 +1684,11 @@ def _module_text_findings(m: modules.ModuleFile, taken: Collection[tuple[str, st
     """
     out: list[Finding] = []
     sig = lex.significant(lex.tokens(m.text))
+    unbalanced = _unbalanced(sig)
+    if unbalanced is not None:
+        line = sig[unbalanced[0]].line
+        message = _parenthesis_message(line, unbalanced[1], "the module")
+        out.append(_finding("PAR001", m.path, line, message))
     for i, t in enumerate(sig):
         w = _word(t)
         if w == "PARSEONLY":
@@ -1801,8 +1847,10 @@ def lint_repo(
         out += secret_findings(path, files[path])
     out += _path_findings(files, table_file_check)
     out += _chain_findings(files, parsed)
+    withdrawn = {entry.file for entry in parsed.chain.entries if entry.withdrawn} if parsed.chain else set()
     for migration in parsed.migrations.values():
-        out += _migration_findings(f"migrations/{migration.file}", migration, data_batches)
+        path = f"migrations/{migration.file}"
+        out += _migration_findings(path, migration, data_batches, migration.file in withdrawn)
     out += _module_findings(parsed.modules)
     out += _tombstone_findings(files, parsed)
     return _sorted(out)

@@ -23,7 +23,7 @@ one file, `azsqlcd-<UTC time>-<command>.jsonl`, for example `azsqlcd-20261007T14
 The offline commands write none. A non-zero exit prints the line `log: <path>` on stderr:
 
 ```
-BATCH_FAILED: step 0007__add_status.sql#1 failed: [OTHER 207] Invalid column name <redacted>.. ...
+BATCH_FAILED: step 0007__add_status.sql#1 failed: [OTHER 207] [Microsoft][SQL Server]Invalid column name 'Status'.. ...
 log: report/logs/azsqlcd-20261007T140311Z-deploy.jsonl
 azsqlcd deploy: exit 21
 ```
@@ -100,10 +100,11 @@ of writing) and `kind`. One example of each kind:
 {"ts": "2026-10-07T14:03:11.120Z", "seq": 1, "kind": "run", "command": "deploy", "argv": ["deploy", "--bundle", "release", "--digest", "3f657d51...", "--env", "dev", "--target", "sales-dev", "--inline-plan", "--out", "report", "--triggering-actor", "<set>", "--ci", "github"], "tool_version": "0.1.0", "tool_digest": "c96a705c...", "python": "3.12.12", "platform": {"system": "Linux", "release": "6.8.0", "machine": "x86_64"}, "packages": {"mssql-python": "1.15.0", "azure-identity": "1.26.0"}, "ci": {"GITHUB_RUN_ID": "991", "GITHUB_JOB": "deploy"}}
 ```
 
-`config`: the target, when the command has read it. None of these values is a secret.
+`config`: the target, when the command has read it, and `auth`: the kind of sign-in (`entra`,
+`managed-identity` or `sql`), never a login or a client id. None of these values is a secret.
 
 ```json
-{"ts": "2026-10-07T14:03:11.130Z", "seq": 2, "kind": "config", "project": "sales", "environment": "dev", "target": "sales-dev", "server": "sql-sales-dev.database.windows.net", "database": "sales", "table_model": false}
+{"ts": "2026-10-07T14:03:11.130Z", "seq": 2, "kind": "config", "project": "sales", "environment": "dev", "target": "sales-dev", "server": "sql-sales-dev.database.windows.net", "database": "sales", "table_model": false, "auth": "entra"}
 ```
 
 `connect`: one session was opened, or could not be opened (`"ok": false` with `error`). Sessions
@@ -131,7 +132,7 @@ row; from the third on the name is `session-3`, `session-4`.
 
 ```json
 {"ts": "2026-10-07T14:03:12.530Z", "seq": 7, "kind": "batch", "session": "main", "n": 4, "tag": "lock", "head": "DECLARE", "then": ["EXEC [sys].[sp_getapplock]", "SELECT"], "sha256": "3fb39a4c...", "chars": 178, "ms": 12.9, "result_sets": [1]}
-{"ts": "2026-10-07T14:03:13.871Z", "seq": 33, "kind": "batch", "session": "main", "n": 23, "tag": null, "head": "ALTER TABLE [sales].[Order]", "sha256": "4380df30...", "chars": 93, "ms": 41.0, "error": {"number": 207, "sqlstate": null, "class": "OTHER", "message": "Invalid column name <redacted>."}}
+{"ts": "2026-10-07T14:03:13.871Z", "seq": 33, "kind": "batch", "session": "main", "n": 23, "tag": null, "head": "ALTER TABLE [sales].[Order]", "sha256": "4380df30...", "chars": 93, "ms": 41.0, "error": {"number": 207, "sqlstate": null, "class": "OTHER", "message": "[Microsoft][SQL Server]Invalid column name 'Status'."}}
 ```
 
 Other heads: `CREATE OR ALTER PROCEDURE [sales].[usp_x]`, `CREATE INDEX [IX_a] ON [sales].[Order]`,
@@ -151,13 +152,13 @@ the tool has `reason_code`, `exit_code` and the key names of its detail. An erro
 type has its type and stack only: its message is never written.
 
 ```json
-{"ts": "2026-10-07T14:03:13.995Z", "seq": 39, "kind": "exception", "type": "RunError", "reason_code": "BATCH_FAILED", "exit_code": 21, "detail_keys": ["error_class", "error_number", "step"], "stack": [["cli.py", 1223, "main"], ["runner.py", 1378, "deploy"], ["runner.py", 309, "_command"]], "causes": [{"type": "SqlError", "number": 207, "sqlstate": null, "class": "OTHER", "message": "Invalid column name <redacted>.", "stack": [["runner.py", 600, "_send"]]}]}
+{"ts": "2026-10-07T14:03:13.995Z", "seq": 39, "kind": "exception", "type": "RunError", "reason_code": "BATCH_FAILED", "exit_code": 21, "detail_keys": ["error_class", "error_number", "step"], "stack": [["cli.py", 1223, "main"], ["runner.py", 1378, "deploy"], ["runner.py", 309, "_command"]], "causes": [{"type": "SqlError", "number": 207, "sqlstate": null, "class": "OTHER", "message": "[Microsoft][SQL Server]Invalid column name 'Status'.", "stack": [["runner.py", 600, "_send"]]}]}
 ```
 
 `end`: the last event: the exit code, the reason code and the message that stderr got.
 
 ```json
-{"ts": "2026-10-07T14:03:14.002Z", "seq": 40, "kind": "end", "exit_code": 21, "reason_code": "BATCH_FAILED", "message": "step 0007__add_status.sql#1 failed: [OTHER 207] Invalid column name <redacted>.. The unit of work was rolled back; nothing of it remains"}
+{"ts": "2026-10-07T14:03:14.002Z", "seq": 40, "kind": "end", "exit_code": 21, "reason_code": "BATCH_FAILED", "message": "step 0007__add_status.sql#1 failed: [OTHER 207] [Microsoft][SQL Server]Invalid column name 'Status'.. The unit of work was rolled back; nothing of it remains"}
 ```
 
 A log with no `end` event is of a process that was stopped: job cancelled, runner lost, or killed.
@@ -171,7 +172,20 @@ back has no event. Each event is flushed to the file when it is written.
 - The text of an object definition. A module is its head: `CREATE OR ALTER PROCEDURE [s].[n]`.
 - A value from the database: a result set is a row count.
 - The full engine message. The log holds the redacted message (every quoted and parenthesised
-  value is `<redacted>`), also when the command ran with `--show-error-text`.
+  value is `<redacted>`), also when the command ran with `--show-error-text`. One exception:
+  engine messages that hold only names of objects and columns. Four name objects that exist in
+  the database and keep the names (1913, 2714, 3726, 5074), for example
+  `[Microsoft][SQL Server]The index 'IX_Order_Cust' is dependent on column 'CustId'.`. Five print
+  a name as the statement wrote it (207, 208, 2705, 3701, 4902), for example
+  `[Microsoft][SQL Server]Invalid column name 'Status'.`. They keep the name only when the batch
+  that was sent holds it as an identifier; a statement that dynamic SQL built from data can put
+  a row value there, and then the part is `<redacted>`.
+- The login and the password of SQL authentication, when the sign-in is `sql`
+  (`AZSQLCD_AUTH=sql`). The value of `AZSQLCD_SQL_PASSWORD` is replaced by `<hidden>` wherever
+  it stands, and the value of `AZSQLCD_SQL_USER` where it stands as a whole word, in every string
+  of the log, before a long string is cut. Both are also hidden in the form that a connection
+  string holds them (in braces, with `}` doubled). With another sign-in the two variables are
+  not read and nothing is replaced.
 - The access token, a password, a connection string. The recorder refuses a field named `text`,
   `sql`, `batch`, `definition`, `token`, `password`, `secret` or `connection_string`.
 - The value of `--reason`, `--approved-by`, `--triggering-actor`, `--ci-run-url`,
@@ -191,6 +205,10 @@ Open the `.jsonl` file in a text editor before you send it. It is plain text.
 - Names of migration files and steps, in the message of `end` and in `report.json`.
 - The sha256 of each batch. A hash of a short batch with a guessable value can be tested against
   guesses by someone who has the rest of the text.
+- With SQL authentication, `<hidden>` in a place where you expect a name: an object name, a
+  folder of a path or a word that is equal to the login is hidden too, also in `argv`. A reader
+  of the log can then tell that the login is that name. A longer word that only holds the login
+  (`deploy_login_old` for the login `deploy_login`) is not changed.
 - Text of an engine message outside quotes and parentheses. The message of a `THROW` in your own
   script passes as written: the redaction is not a secret scanner.
 
@@ -205,13 +223,14 @@ log: azsqlcd-20261007T140311Z-deploy.jsonl
 command: azsqlcd deploy  (tool 0.1.0, digest c96a705cbd93, python 3.12.12)
 argv: deploy --bundle release --digest 3f657d51... --env dev --target sales-dev --inline-plan --out report --ci github
 target: sales-dev (dev), database sales on sql-sales-dev.database.windows.net, project sales, table_model false
+sign-in: entra
 time: 2026-10-07T14:03:11.120Z to 2026-10-07T14:03:14.002Z (2.9 s), 40 event(s)
 batches: main 27 (311 ms), parse 5 (48 ms)
 last batch: main #27: UPDATE [azsqlcd].[run] (tag none, sha256 51c1c3de1e5f, 321 chars, 9.1 ms)
   later statements of that batch: IF ... THROW
-error in batch main #23 (ALTER TABLE [sales].[Order]): [OTHER 207] Invalid column name <redacted>.
+error in batch main #23 (ALTER TABLE [sales].[Order]): [OTHER 207] [Microsoft][SQL Server]Invalid column name 'Status'.
 exception: RunError BATCH_FAILED at runner.py:309 in _command
-end: exit 21 BATCH_FAILED: step 0007__add_status.sql#1 failed: [OTHER 207] Invalid column name <redacted>.. The unit of work was rolled back; nothing of it remains
+end: exit 21 BATCH_FAILED: step 0007__add_status.sql#1 failed: [OTHER 207] [Microsoft][SQL Server]Invalid column name 'Status'.. The unit of work was rolled back; nothing of it remains
 ```
 
 How to read it:

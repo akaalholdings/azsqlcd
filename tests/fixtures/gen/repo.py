@@ -24,7 +24,11 @@ type Files = dict[str, str | bytes | None]  # path -> content; None removes the 
 
 
 def git(repo: Path, *args: str) -> str:
-    done = subprocess.run(["git", *args], cwd=repo, env=GIT_ENV, capture_output=True, check=True)
+    done = subprocess.run(["git", *args], cwd=repo, env=GIT_ENV, capture_output=True, check=False)
+    # the text of git is the only thing that says why: CalledProcessError does not show it
+    if done.returncode != 0:
+        error = done.stderr.decode("utf-8", "replace").strip()
+        raise AssertionError(f"git {args[0]!r} failed (exit {done.returncode}) in {repo}: {error}")
     return done.stdout.decode().strip()
 
 
@@ -58,6 +62,7 @@ def new_repo(path: Path, files: Files) -> Path:
         ("user.name", "Test"),
         ("user.email", "test@example.invalid"),
         ("core.autocrlf", "false"),
+        ("core.longpaths", "true"),  # Windows: a temporary directory and a fixture path pass 260 characters
         ("commit.gpgsign", "false"),
     ):
         git(path, "config", key, value)

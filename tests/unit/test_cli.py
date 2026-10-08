@@ -165,6 +165,22 @@ def log_dir(tmp_path, monkeypatch) -> Path:
     return folder
 
 
+SIGN_IN_VARIABLES = (
+    "AZSQLCD_AUTH",
+    "AZSQLCD_MANAGED_IDENTITY_CLIENT_ID",
+    "AZSQLCD_SQL_USER",
+    "AZSQLCD_SQL_PASSWORD",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_sign_in_of_the_machine(monkeypatch) -> None:
+    """A workstation can have the sign-in variables of the tool set. No test reads them: a login
+    with the name of an object of a test would be hidden in the log that the test reads."""
+    for name in SIGN_IN_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
 def on_disk(folder: Path, b: Bundle) -> list[str]:
     """Write the release as `build` does; the arguments that name it."""
     release.write(release.Release(b.manifest, b.files), folder / "release")
@@ -543,7 +559,14 @@ SECRET_VALUE = "the-value-of-a-row"
             "CONNECTION_LOST",
         ),
         (SqlError(f"Link failure near '{SECRET_VALUE}'", cls=ErrorClass.SESSION_LOST), 24, "CONNECTION_LOST"),
-        (SqlError(f"Invalid object name '{SECRET_VALUE}'.", number=208), 22, "READ_FAILED"),
+        # a message that prints a value. The names of a message of names only (207, 208) are shown
+        (
+            SqlError(
+                f"Conversion failed when converting the varchar value '{SECRET_VALUE}' to data type int."
+            ),
+            22,
+            "READ_FAILED",
+        ),
         (sql_error(f"Lock request time out period exceeded. ('{SECRET_VALUE}')"), 22, "READ_FAILED"),
         (SqlError(f"The log for '{SECRET_VALUE}' is full.", cls=ErrorClass.GOVERNANCE), 22, "READ_FAILED"),
     ],
@@ -637,6 +660,7 @@ def test_targets_writes_the_matrix_and_the_timeout(tmp_path, ci):
             "deploy_client_id": "33333333-3333-3333-3333-333333333333",
             "tenant_id": "11111111-1111-1111-1111-111111111111",
             "gated": True,
+            "auth": "oidc",
         }
     ]
     assert "\n" not in outputs["matrix"]
@@ -715,10 +739,16 @@ BATCH = "ALTER TABLE [sales].[Order] ADD [batch_marker] int NULL;"
 DEFINITION = "SELECT 'definition-marker';"
 
 
+ENGINE_MESSAGE = "Conversion failed when converting the varchar value 'engine_marker' to data type int."
+ENGINE_REDACTED = "Conversion failed when converting the varchar value <redacted> to data type int."
+
+
 def a_failing_deploy(tmp_path: Path, *more: str) -> tuple[list[str], Db]:
     b = bundle(mig(M1, BATCH), modules=[proc("usp_new", DEFINITION)])
     db = Db(b, recorded())
-    db.fail_on(BATCH, sql_error("Invalid column name 'engine_marker'.", number=207))
+    # an engine message that prints a row value: redacted. The names of a message of names only
+    # (207 Invalid column name, 208 Invalid object name) are shown since the first pilot.
+    db.fail_on(BATCH, sql_error(ENGINE_MESSAGE, number=245))
     argv = ["deploy", *on_disk(tmp_path, b), *target(), "--inline-plan", "--out", str(tmp_path / "report")]
     return [*argv, "--ci", "github", *more], db
 
@@ -734,11 +764,34 @@ def test_no_token_batch_text_or_definition_text_reaches_what_a_failing_deploy_pr
     everything = printed.out + printed.err + ci.text() + written
     for never in (TOKEN, "batch_marker", "definition-marker", "engine_marker", "Server="):
         assert never not in everything
+    assert f"BATCH_FAILED: step 0001__a.sql#1 failed: [OTHER 245] {ENGINE_REDACTED}" in printed.err
+    # in Markdown a raw <redacted> is an HTML tag that GitHub does not show: the summary escapes it
+    assert ENGINE_REDACTED.replace("<redacted>", "&lt;redacted&gt;") in ci.summary.read_text(encoding="utf-8")
+
+
+def test_a_value_in_the_name_place_of_an_engine_message_reaches_no_output(tmp_path, ci, capsys, log_dir):
+    """Dynamic SQL that builds a statement from data puts a row value where the engine prints a
+    name: SET c = "<value>" under QUOTED_IDENTIFIER ON gives Invalid column name '<value>'. The
+    value must be in none of the five places where an engine message lands."""
+    argv, db = a_failing_deploy(tmp_path)
+    db.fail_on(BATCH, sql_error("Invalid column name 'S3CR3TVALUE'.", number=207))
+    del db._rules[-2]  # the rule of a_failing_deploy: this message takes its place
+
+    code, _ = call(argv, db, parse_only_session())
+
+    printed = capsys.readouterr()
+    assert code == 21
     assert (
         "BATCH_FAILED: step 0001__a.sql#1 failed: [OTHER 207] Invalid column name <redacted>." in printed.err
     )
-    # in Markdown a raw <redacted> is an HTML tag that GitHub does not show: the summary escapes it
+    report = (tmp_path / "report" / "report.json").read_text()
+    [log] = log_dir.glob("azsqlcd-*-deploy.jsonl")
+    (status,) = db.sent("UPDATE [azsqlcd].[run] SET [status] = N'failed'")  # azsqlcd.run.error_text
+    assert "Invalid column name <redacted>." in report and "Invalid column name <redacted>." in status
     assert "Invalid column name &lt;redacted&gt;." in ci.summary.read_text(encoding="utf-8")
+    assert "Invalid column name <redacted>." in log.read_text(encoding="utf-8")
+    everything = printed.out + printed.err + ci.text() + report + log.read_text(encoding="utf-8") + status
+    assert "S3CR3TVALUE" not in everything
 
 
 def test_show_error_text_prints_the_engine_message_in_full_on_stderr_only(tmp_path, ci, capsys):
@@ -747,7 +800,7 @@ def test_show_error_text_prints_the_engine_message_in_full_on_stderr_only(tmp_pa
     code, _ = call(argv, db, parse_only_session())
 
     printed = capsys.readouterr()
-    assert code == 21 and "(--show-error-text): Invalid column name 'engine_marker'." in printed.err
+    assert code == 21 and f"(--show-error-text): {ENGINE_MESSAGE}" in printed.err
     written = "".join(path.read_text() for path in (tmp_path / "report").iterdir())
     assert "engine_marker" not in printed.out + ci.text() + written
     assert TOKEN not in printed.err and "batch_marker" not in printed.err
@@ -967,6 +1020,33 @@ def test_deploy_with_the_plan_of_the_plan_job_records_who_approved_and_writes_no
         assert value in run_insert
     assert sorted(path.name for path in (tmp_path / "report").iterdir()) == ["report.json"]
     assert "2026-10-07T09:00:00.000" in ci.text()  # started_utc: the restore reference
+
+
+def test_report_json_of_a_deploy_of_an_approved_plan_does_not_warn_of_a_syntax_check_that_ran(tmp_path, ci):
+    # pilot finding: the plan job parsed every batch, and report.json of the deploy said "the syntax
+    # check (SET PARSEONLY ON) was skipped: this run has no second session"
+    argv, plan_db = a_plan(tmp_path)
+    assert call(argv, plan_db, parse_only_session())[0] == 0
+    plan_file = tmp_path / "plan" / "plan.json"
+    assert json.loads(plan_file.read_text())["syntax_check"] == "ran"
+    b = release.read_bundle(tmp_path / "release", argv[argv.index("--digest") + 1])
+    deploy = ["deploy", *argv[1:5], *target(), "--expect-plan-file", str(plan_file)]
+    deploy += ["--out", str(tmp_path / "report"), "--approved-by", "dba-1", "--approved-utc"]
+    deploy += ["2026-10-07T09:00:00Z"]
+
+    code, sessions = call(deploy, Db(Bundle(b.manifest, {}), recorded()))
+
+    report = json.loads((tmp_path / "report" / "report.json").read_text())
+    assert (code, len(sessions.opened), report["steps_applied"]) == (0, 1, [f"{M1}#1"])
+    assert [note for note in report["warnings"] if "syntax check" in note] == []
+
+    # a plan file that does not record the check (an older tool wrote it): the deploy runs and warns
+    doc = json.loads(plan_file.read_text())
+    del doc["syntax_check"]
+    plan_file.write_text(json.dumps(doc))
+    code, _ = call(deploy, Db(Bundle(b.manifest, {}), recorded()))
+    report = json.loads((tmp_path / "report" / "report.json").read_text())
+    assert code == 0 and len([note for note in report["warnings"] if "is not proven" in note]) == 1
 
 
 def test_a_plan_file_that_was_changed_or_that_is_absent_is_refused_and_no_session_opens(tmp_path, ci):
@@ -1901,11 +1981,12 @@ def test_a_failing_deploy_leaves_a_log_that_names_the_last_batch_and_holds_no_ba
         "server": wanted.server,
         "database": wanted.database,
         "table_model": False,
+        "auth": "entra",  # the token provider of the test: the kind only
     }
     batches = [event for event in events if event["kind"] == "batch"]
     assert {event["session"] for event in batches} == {"main", "parse"}
     last_failed = [event for event in batches if "error" in event][-1]
-    assert last_failed["session"] == "main" and last_failed["error"]["number"] == 207
+    assert last_failed["session"] == "main" and last_failed["error"]["number"] == 245
     assert last_failed["head"].startswith("ALTER TABLE") and "[sales].[Order]" in last_failed["head"]
     assert last_failed["sha256"] == hashlib.sha256(db.sent(BATCH)[-1].encode()).hexdigest()
     assert (events[-1]["exit_code"], events[-1]["reason_code"]) == (21, "BATCH_FAILED")

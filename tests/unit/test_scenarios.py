@@ -1627,3 +1627,214 @@ def test_the_tool_tells_that_a_database_holds_the_change_of_a_migration_that_was
     assert (planned.code, done.code) == (0, 0) and dev.model != withdrawal.model
     # is: a plan with no note, a deploy that records the release, and 'no drift'
     assert drift.code == 30 or region.file in planned.out + done.out
+
+
+# ------------------------------------------------------------------ the way out of a failed release
+WAY_OUT = 'docs/setup.md, section "Withdraw and replace a merged migration"'
+
+
+def batch_steps(plan_file: Path) -> list[str]:
+    """The ids of the batch steps of plan.json, in the order a deploy sends them."""
+    units = json.loads(plan_file.read_text())["units"]
+    return [step["id"] for unit in units for step in unit["steps"] if step["kind"] == "batch"]
+
+
+@pytest.mark.parametrize("env", ["dev", "test"])
+def test_a_release_that_fails_is_withdrawn_and_the_later_releases_run_in_one_catch_up_without_it(pipe, env):
+    """A failed deployment must not block an unrelated one. Pilot: the deploy of r3 failed on its
+    migration and was rolled back; r4 and r5 added migrations on other tables, and their plans said
+    "promote r3 first", which can never pass. The way out is one pull request that withdraws the
+    migration: its release carries the migrations of r4 and r5, the withdrawn one never runs here,
+    and the corrected change follows as a migration of its own (a line with replaces= is for the
+    pull request of the withdrawal only: WDR005)."""
+    first = release_1(pipe)
+    db = pipe.database(env)
+    assert pipe.promote(first, env).code == 0
+
+    # r3: its batch fails in this database; the transaction is rolled back and nothing is recorded
+    pipe.write_objects(CUSTOMER_REGION)
+    region = pipe.release("the region of a customer", "customer_region")
+    db.fail_on(region.batches[0], sql_error(NOT_EMPTY, number=4901))
+    before = catalog(db)
+    failed = pipe.promote(region, env)
+    assert (failed.code, failed.reason) == (21, "BATCH_FAILED")
+    assert failed.report["failed_step"] == f"{region.file}#1" and catalog(db) == before
+    assert runs(db) == [("deploy", "ok", first.seq), ("deploy", "failed", region.seq)]
+
+    # r4 and r5: two changes of other tables are merged on top of the release that failed
+    pipe.write_objects(ORDER_NOTE)
+    note = pipe.release("order notes", "order_note")
+    pipe.write_objects(AUDIT)
+    audited = pipe.release("an audit table", "audit")
+    assert [built.seq for built in (first, region, note, audited)] == [2, 3, 4, 5]
+    held = frozen(db)
+    for built in (note, audited):
+        refused, _ = pipe.plan(built, env)
+        assert (refused.code, refused.reason) == (22, "CATCHUP_REQUIRED")
+        # both cases are in the message: the release that can still run, and the one that cannot
+        assert f"promote r{region.seq} first" in refused.err
+        assert "withdraw the migration by pull request" in refused.err and WAY_OUT in refused.err
+    assert frozen(db) == held
+
+    # r6: one pull request withdraws the migration; the table file is again as it was before it
+    pipe.write_objects(CUSTOMER)
+    lines = pipe.read(chain.SUM_PATH).splitlines()
+    at = next(index for index, line in enumerate(lines) if line.startswith(region.file + " "))
+    lines[at] += " withdrawn"
+    pipe.write(chain.SUM_PATH, "\n".join(lines) + "\n")
+    withdrawal = pipe.merge("withdraw the region migration")
+    planned, plan_file = pipe.plan(withdrawal, env)
+    assert planned.code == 0, planned.err
+    doc = json.loads(plan_file.read_text())
+    assert (withdrawal.seq, doc["outcome"]) == (6, "work")
+    assert batch_steps(plan_file) == [f"{note.file}#1", f"{audited.file}#1"]
+    (catch_up,) = [text for text in doc["notes"] if text.startswith("catch-up in one release")]
+    assert f"{note.file}, {audited.file} came with earlier releases and run with r6" in catch_up
+    assert f"never applied the withdrawn {region.file}" in catch_up
+    sent, batches = len(db.ddl), len(db.batches)
+    done = pipe.deploy(withdrawal, env, plan_file if env in GATED else None)
+    assert done.code == 0, done.err
+    # one transaction, the two migrations in chain order, and never the withdrawn one
+    assert committed(db, batches) == [[*note.batches, *audited.batches, REFRESH_VIEW]]
+    assert region.batches[0] not in db.ddl[sent:]
+    assert migrations(db) == [(first.file, "ok"), (note.file, "ok"), (audited.file, "ok")]
+    assert not [step for step in db.rows("step") if step["migration_id"] == region.file]
+    assert db.model == withdrawal.model and runs(db)[-1] == ("deploy", "ok", withdrawal.seq)
+    assert pipe.drift(withdrawal, env).code == 0
+    if env in GATED:  # the plan job parsed the texts: the deploy does not warn of a skipped check
+        assert [text for text in done.report["warnings"] if "syntax check" in text] == []
+
+    # r7: the corrected change, as a migration of its own (verify refuses a replaces= line for a
+    # migration that an earlier pull request withdrew: WDR005, tests/unit/test_verify_proof.py).
+    # It runs alone: the two migrations of the catch-up do not run again
+    pipe.write_objects(CUSTOMER_REGION)
+    corrected = pipe.gen("customer_region_filled")
+    statement = region.batches[0][region.batches[0].index("ALTER TABLE") :]
+    assert statement + "\nGO\n" in corrected.read_text()
+    corrected.write_text(corrected.read_text().replace(statement + "\nGO\n", REGION_FILLED))
+    pipe.resum()
+    filled = pipe.merge("the region of a customer, with a value for the rows that exist", corrected)
+    sent = len(db.ddl)
+    done = pipe.promote(filled, env)
+    assert (filled.seq, done.code) == (7, 0), done.err
+    assert db.ddl[sent:] == filled.batches and len(filled.batches) == 2
+    assert migrations(db) == [
+        (first.file, "ok"),
+        (note.file, "ok"),
+        (audited.file, "ok"),
+        (filled.file, "ok"),
+    ]
+    assert db.model == filled.model and runs(db)[-1] == ("deploy", "ok", filled.seq)
+    assert pipe.drift(filled, env).code == 0
+
+
+def test_a_release_that_one_database_applied_and_another_failed_is_replaced_in_the_withdrawal(pipe):
+    """The pipeline runs dev before test, so this is the common case: dev applied r3, test failed
+    it, and r4 is merged. The refusal of r4 on test must name the way that works for both: the
+    replacement in the pull request of the withdrawal. (A withdrawal alone and the corrected
+    migration later fails on dev, which holds the column already.)"""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    dev, test = pipe.dbs["dev"], pipe.dbs["test"]
+    pipe.write_objects(CUSTOMER_REGION)
+    region = pipe.release("the region of a customer", "customer_region")
+    assert pipe.promote(region, "dev").code == 0
+    test.fail_on(region.batches[0], sql_error(NOT_EMPTY, number=4901))
+    assert pipe.promote(region, "test").code == 21
+    pipe.write_objects(ORDER_NOTE)
+    note = pipe.release("order notes", "order_note")
+    assert pipe.promote(note, "dev").code == 0
+
+    refused, _ = pipe.plan(note, "test")
+    assert (refused.code, refused.reason) == (22, "CATCHUP_REQUIRED")
+    told = refused.err
+    assert "The corrected change is a replacement in the pull request of the withdrawal" in told
+    assert (
+        f"works only when no database applied the migration of r{region.seq} and table_model = true" in told
+    )
+    assert "or a new migration in a later pull request" not in told  # no second way without its condition
+
+    # the way that the message names first
+    replacement = pipe.replace_migration(
+        region.file, "customer_region_filled", "the rows that exist get an empty region", REGION_FILLED
+    )
+    filled = pipe.merge("withdraw and replace the region migration", replacement)
+    sent = len(dev.ddl)
+    done = pipe.promote(filled, "dev")  # dev holds the change: the release is recorded, nothing is sent
+    assert done.code == 0 and dev.ddl[sent:] == [], done.err
+    assert done.report["syntax_check"] is None  # no unit of work: no text to parse
+    sent = len(test.ddl)
+    done = pipe.promote(filled, "test")  # one catch-up: the replacement and the migration of r4
+    assert done.code == 0, done.err
+    # a gated environment: the texts were parsed in the plan job, and the report says where it reads that
+    assert done.report["syntax_check"] == "ran in the plan job (read from plan.json; not in plan_sha256)"
+    assert sorted(set(test.ddl[sent:]) & {*note.batches, *filled.batches}) == sorted(
+        [*note.batches, *filled.batches]
+    )
+    assert region.batches[0] not in test.ddl[sent:]
+    for env in ("dev", "test"):
+        db = pipe.dbs[env]
+        assert db.model == filled.model and runs(db)[-1] == ("deploy", "ok", filled.seq)
+        assert pipe.drift(filled, env).code == 0
+    assert texts(dev) == texts(test)
+
+
+RAW_RATE = (
+    "-- azsqlcd:raw TABLE:[sales].[Rate] reason: outside the model\n"
+    "-- azsqlcd:allow RAW TABLE:[sales].[Rate] reason: reviewed by the DBA team\n"
+)
+
+
+def test_a_merged_migration_that_no_engine_takes_is_withdrawn_and_the_repository_builds_again(pipe):
+    """A migration with a '(' that is never closed was merged by a tool that had no PAR001. The
+    engine refuses it, and its file can never change. With this tool the repository must have a
+    way on: the pull request that withdraws and replaces it passes lint and verify, main builds,
+    and a later pull request on the same table passes too."""
+    pipe.write("azsqlcd.toml", toml(table_model=False))
+    head = "-- azsqlcd:migration 0001__rate\n-- azsqlcd:mode tx\n" + RAW_RATE
+    pipe.write(
+        "migrations/0001__rate.sql",
+        head + "CREATE TABLE [sales].[Rate] ([Id] int NOT NULL, [Rate] numeric(23, 5 NULL);\nGO\n",
+    )
+    pipe.write(chain.SUM_PATH, pipe.read(chain.SUM_PATH) + f"0001__rate.sql sha256:{'0' * 64} tx\n")
+    pipe.resum()
+    pipe.push("merged by the tool of before: lint had no PAR001")
+
+    # as long as the line is live, the tool says what is wrong, and a correction of the file is refused
+    stopped = pipe.offline("lint")
+    assert (stopped.code, stopped.reason) == (22, "LINT_FAILED") and "PAR001" in stopped.out
+
+    # the pull request of the withdrawal (A31): the old line gets `withdrawn`, the new one replaces=
+    pipe.write(
+        "migrations/0002__rate_v2.sql",
+        "-- azsqlcd:migration 0002__rate_v2\n-- azsqlcd:mode tx\n"
+        + RAW_RATE
+        + "-- azsqlcd:allow REPLACEMENT_EDGE 0001__rate.sql reason: the first file had a syntax error\n"
+        + "CREATE TABLE [sales].[Rate] ([Id] int NOT NULL, [Rate] numeric(23, 5) NULL);\nGO\n",
+    )
+    pipe.write(
+        chain.SUM_PATH,
+        pipe.read(chain.SUM_PATH).rstrip("\n")
+        + f" withdrawn\n0002__rate_v2.sql sha256:{'0' * 64} tx replaces=0001__rate.sql\n",
+    )
+    pipe.resum()
+    lint, verify = pipe.checks()
+    assert (lint.code, verify.code) == (0, 0), lint.out + lint.err + verify.out + verify.err
+    assert "nvarchar" not in pipe.read("migrations/0001__rate.sql")  # the merged file is what it was
+    assert "numeric(23, 5 NULL" in pipe.read("migrations/0001__rate.sql")
+    pipe.push("the withdrawal and the replacement")
+    built = pipe.build()  # asserts exit 0
+    assert sorted(built.bundle.manifest.chain_added_in) == ["0001__rate.sql", "0002__rate_v2.sql"]
+
+    pipe.write(
+        "migrations/0003__rate_note.sql",
+        "-- azsqlcd:migration 0003__rate_note\n-- azsqlcd:mode tx\n"
+        + RAW_RATE
+        + "ALTER TABLE [sales].[Rate] ADD [Note] nvarchar(10) NULL;\nGO\n",
+    )
+    pipe.write(chain.SUM_PATH, pipe.read(chain.SUM_PATH) + f"0003__rate_note.sql sha256:{'0' * 64} tx\n")
+    pipe.resum()
+    lint, verify = pipe.checks()
+    assert (lint.code, verify.code) == (0, 0), lint.out + lint.err + verify.out + verify.err
+    pipe.push("a later pull request")
+    pipe.build()

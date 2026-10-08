@@ -2,7 +2,12 @@
 
 The file holds no secrets. Every key is known and checked: an unknown key is an error, so a typing
 mistake cannot fall back to a default without a message. Error messages name the key path and
-never print a value.
+never print a value. A required key that is missing is named with its table and one example line.
+
+Keys with a default: project.module_chunk (100: what the template has; it sizes only the
+transactions of a first converge), project.server_suffixes, project.data_batches, env.<name>.gated
+and env.<name>.auth. A setting that decides what a deploy may do (table_model, min_token_minutes,
+drift, the lock limits, the identities) has no default.
 """
 
 from __future__ import annotations
@@ -35,6 +40,35 @@ DEFAULT_SERVER_SUFFIXES = (
 )
 _SUFFIX = re.compile(r"\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _INT32_MAX = 2**31 - 1
+# Modules per transaction on a first converge (plan.pending_work). The value of the template.
+DEFAULT_MODULE_CHUNK = 100
+# How the jobs of a workflow get the token of the plan and of the deploy identity of an environment.
+AUTH_OIDC, AUTH_MANAGED_IDENTITY = "oidc", "managed-identity"
+
+_EXAMPLE_TARGETS = (
+    'targets = [{ id = "example-dev", server = "sql-example-dev.database.windows.net", '
+    'database = "example" }]'
+)
+# One line of the template for each required key: what the message of a missing key shows.
+_EXAMPLES = {
+    "project": "[project]",
+    "identities": "[identities]",
+    "env": "[env.dev]",
+    "name": 'name = "example"',
+    "tenant_id": 'tenant_id = "00000000-0000-0000-0000-000000000000"',
+    "table_model": "table_model = false",
+    "min_token_minutes": "min_token_minutes = 20",
+    "plan_identity": 'plan_identity = "nonprod_plan"',
+    "deploy_identity": 'deploy_identity = "nonprod_deploy"',
+    "drift": 'drift = "report"',
+    "lock_timeout_ms": "lock_timeout_ms = 30000",
+    "applock_wait_s": "applock_wait_s = 600",
+    "job_timeout_minutes": "job_timeout_minutes = 120",
+    "targets": _EXAMPLE_TARGETS,
+    "id": _EXAMPLE_TARGETS,
+    "server": _EXAMPLE_TARGETS,
+    "database": _EXAMPLE_TARGETS,
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +102,10 @@ class Environment:
     job_timeout_minutes: int
     gated: bool
     targets: tuple[Target, ...]
+    # oidc: a workflow job signs the Azure CLI in with OIDC (azure/login). managed-identity: the tool
+    # asks the managed identity of the runner for the token. For the workflows only: a command on a
+    # workstation signs in as the variable AZSQLCD_AUTH says.
+    auth: str = AUTH_OIDC
 
 
 @dataclass(frozen=True)
@@ -100,8 +138,17 @@ def _table(
             raise _fail(prefix + key, "unknown key")
     for key in required:
         if key not in table:
-            raise _fail(prefix + key, "is missing")
+            raise _fail(prefix + key, _missing(path, key))
     return table
+
+
+def _missing(path: str, key: str) -> str:
+    """What to add for a required key that a table does not hold: the key, its table, one example."""
+    example = _EXAMPLES[key]
+    if not path:
+        return f"is missing. The file needs the table [{key}], for example the line: {example}"
+    where = f"the target {path}" if path.endswith("]") else f"the table [{path}]"
+    return f"is missing. Add the key {key} to {where}, for example: {example}"
 
 
 def _str(table: dict[str, Any], key: str, path: str) -> str:
@@ -181,12 +228,15 @@ def _environment(
         "job_timeout_minutes",
         "targets",
     )
-    table = _table(raw, path, required, ("gated",))
+    table = _table(raw, path, required, ("gated", "auth"))
     for key in ("plan_identity", "deploy_identity"):
         if _str(table, key, path) not in identities:
             raise _fail(f"{path}.{key}", "names an identity that is not in [identities]")
     if _str(table, "drift", path) not in ("report", "block"):
         raise _fail(f"{path}.drift", "must be 'report' or 'block'")
+    auth = table.get("auth", AUTH_OIDC)
+    if auth not in (AUTH_OIDC, AUTH_MANAGED_IDENTITY):
+        raise _fail(f"{path}.auth", f"must be '{AUTH_OIDC}' or '{AUTH_MANAGED_IDENTITY}'")
     raw_targets = table["targets"]
     if not isinstance(raw_targets, list) or not raw_targets:
         raise _fail(f"{path}.targets", "must be a list with at least one target")
@@ -221,6 +271,7 @@ def _environment(
         job_timeout_minutes=_int(table, "job_timeout_minutes", path, 1),
         gated=_bool(table, "gated", path) if "gated" in table else name in _GATED_BY_DEFAULT,
         targets=tuple(targets),
+        auth=auth,
     )
 
 
@@ -237,8 +288,8 @@ def load_config(text: str) -> Config:
     p = _table(
         doc["project"],
         "project",
-        ("name", "tenant_id", "table_model", "module_chunk", "min_token_minutes"),
-        ("server_suffixes", "data_batches"),
+        ("name", "tenant_id", "table_model", "min_token_minutes"),
+        ("module_chunk", "server_suffixes", "data_batches"),
     )
     suffixes = DEFAULT_SERVER_SUFFIXES
     if "server_suffixes" in p:
@@ -253,7 +304,7 @@ def load_config(text: str) -> Config:
         name=_printable(p, "name", "project"),
         tenant_id=_guid(p, "tenant_id", "project"),
         table_model=_bool(p, "table_model", "project"),
-        module_chunk=_int(p, "module_chunk", "project", 1),
+        module_chunk=_int(p, "module_chunk", "project", 1) if "module_chunk" in p else DEFAULT_MODULE_CHUNK,
         min_token_minutes=_int(p, "min_token_minutes", "project", 0),
         server_suffixes=suffixes,
         data_batches=_bool(p, "data_batches", "project") if "data_batches" in p else False,
@@ -314,7 +365,8 @@ def resolve_target(config: Config, env: str, target_id: str) -> tuple[Environmen
 
 
 def targets_matrix(config: Config, env: str) -> list[dict[str, str | bool]]:
-    """One row per target of the environment, for the workflow matrix. Client ids are resolved."""
+    """One row per target of the environment, for the workflow matrix. Client ids are resolved.
+    auth: how the jobs of the row sign in (oidc or managed-identity), with the same identities."""
     environment = config.env.get(env)
     if environment is None:
         raise refused("ENV_NOT_CONFIGURED", f"azsqlcd.toml has no [env.{env}]", environment=env)
@@ -327,6 +379,7 @@ def targets_matrix(config: Config, env: str) -> list[dict[str, str | bool]]:
             "deploy_client_id": config.identities[environment.deploy_identity],
             "tenant_id": config.project.tenant_id,
             "gated": environment.gated,
+            "auth": environment.auth,
         }
         for target in environment.targets
     ]

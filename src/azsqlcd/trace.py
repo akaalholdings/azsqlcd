@@ -9,7 +9,11 @@ no object definition, no data value, no token and no connection string (A1, A25)
   - an exception of an unknown type is recorded as its type and the place in the source, never
     its message;
   - the recorder refuses a field with a name such as `sql` or `token` (FORBIDDEN_FIELDS), so the
-    rule does not depend on the care of a caller.
+    rule does not depend on the care of a caller;
+  - with SQL authentication, the login and the password (the values of SECRET_VARIABLES) are
+    taken out of every string that is written, whatever the caller, the driver or the engine put
+    there: the password wherever it stands, the login where it stands as a whole word
+    (sqlerrors.SignInFilter).
 
 A log must not change what a command does: a file that cannot be written, and a batch that cannot
 be read, never raise to the caller. Standard library only. This module imports errors, lex and
@@ -34,7 +38,7 @@ from typing import Any
 
 from azsqlcd import __version__, lex
 from azsqlcd.errors import ToolError
-from azsqlcd.sqlerrors import SqlError
+from azsqlcd.sqlerrors import HIDDEN, SignInFilter, SqlError
 
 MAX_STRING = 500
 MAX_ITEMS = 200
@@ -58,7 +62,15 @@ CI_VARIABLES = (
     "RUNNER_OS",
     "RUNNER_NAME",
 )
-CONFIG_KEYS = ("project", "environment", "target", "server", "database", "table_model")
+# auth: the kind of sign-in (entra, managed-identity, sql); never a login or a client id
+CONFIG_KEYS = ("project", "environment", "target", "server", "database", "table_model", "auth")
+# The variables of SQL authentication (session.py reads them). Their values never reach a log.
+# They are read only when the sign-in is SQL authentication: on a machine that signs in another
+# way the tool does not use them, and a name of the log that equals one of them stays.
+SECRET_VARIABLES = ("AZSQLCD_SQL_PASSWORD", "AZSQLCD_SQL_USER")
+SIGN_IN_VARIABLE, SIGN_IN_SQL = "AZSQLCD_AUTH", "sql"
+HIDDEN_VALUE = HIDDEN
+_NOTHING_HIDDEN = SignInFilter()
 SESSION_NAMES = ("main", "parse")  # by the order in which a command opens its sessions
 REPORT_FILES = ("plan.json", "report.json", "manifest.json")
 VERSIONS_FILE = "versions.txt"
@@ -70,26 +82,32 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 
 
 # ------------------------------------------------------------------ the recorder
-def _clean(value: Any, depth: int = 0) -> Any:
-    """A value that is safe to write: JSON scalars, and lists and dicts of them. A string is cut.
-    Any other object is written as its type name, never as its text: str() of an unknown object
-    can hold anything."""
+def _clean(value: Any, depth: int = 0, secrets: SignInFilter = _NOTHING_HIDDEN) -> Any:
+    """A value that is safe to write: JSON scalars, and lists and dicts of them. A string is cut,
+    after the secrets (the login and the password of SQL authentication) are taken out of it. Any
+    other object is written as its type name, never as its text: str() of an unknown object can
+    hold anything."""
     if value is None or isinstance(value, bool | int):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, str):
-        return value[:MAX_STRING]
+        return _shown(value, secrets)
     if isinstance(value, os.PathLike):
-        return str(os.fspath(value))[:MAX_STRING]
+        return _shown(str(os.fspath(value)), secrets)
     if depth >= 6:
         return "<nested>"
     if isinstance(value, Mapping):
         _check_names(value)
-        return {str(key)[:MAX_STRING]: _clean(item, depth + 1) for key, item in value.items()}
+        return {_shown(str(key), secrets): _clean(item, depth + 1, secrets) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        return [_clean(item, depth + 1) for item in value[:MAX_ITEMS]]
+        return [_clean(item, depth + 1, secrets) for item in value[:MAX_ITEMS]]
     return f"<{type(value).__name__}>"
+
+
+def _shown(text: str, secrets: SignInFilter) -> str:
+    # before the cut: a part of a secret at the end of a string is not hidden
+    return secrets.hide(text)[:MAX_STRING]
 
 
 def _check_names(fields: Mapping[Any, Any]) -> None:
@@ -109,8 +127,19 @@ class Trace:
     is kept and close() returns it.
     """
 
-    def __init__(self, path: str | os.PathLike[str] | None, *, now: Callable[[], datetime] | None = None):
+    def __init__(
+        self,
+        path: str | os.PathLike[str] | None,
+        *,
+        now: Callable[[], datetime] | None = None,
+        environ: Mapping[str, str] | None = None,
+    ):
         self.path = None if path is None else Path(path)
+        env = os.environ if environ is None else environ
+        password, login = (env.get(name, "") for name in SECRET_VARIABLES)
+        self._secrets = (
+            SignInFilter(login, password) if env.get(SIGN_IN_VARIABLE) == SIGN_IN_SQL else _NOTHING_HIDDEN
+        )
         self.sessions_opened = 0  # open_traced names a session by this count
         self.config: dict[str, Any] | None = None  # the last config event, so it is written once
         self._now = now or (lambda: datetime.now(UTC))
@@ -123,6 +152,11 @@ class Trace:
                 self._file = open(self.path, "a", encoding="utf-8", newline="\n")  # noqa: SIM115
             except Exception as error:
                 self._error = error
+
+    def hide_sign_in(self, login: str, password: str) -> None:
+        """Hide this login and this password from now on: the SQL login of a caller that did not
+        come from the environment."""
+        self._secrets = SignInFilter(login, password)
 
     @property
     def enabled(self) -> bool:
@@ -144,7 +178,8 @@ class Trace:
             if name in RESERVED_FIELDS:
                 raise ValueError(f"the triage log sets the field {name!r} itself")
         _check_names(fields)
-        cleaned = {name: _clean(value) for name, value in fields.items()}  # raises for a nested name
+        # raises for a nested name
+        cleaned = {name: _clean(value, secrets=self._secrets) for name, value in fields.items()}
         if self._file is None:
             return
         self._seq += 1
@@ -859,6 +894,8 @@ def summarize(log_path: str | os.PathLike[str]) -> str:
         lines.append(
             "target: not known (the command names none, or it stopped before it read the configuration)"
         )
+    if isinstance(config, dict) and config.get("auth") is not None:
+        lines.append(f"sign-in: {_flat(config['auth'])}")
     ci = run.get("ci")
     if isinstance(ci, dict) and ci:
         lines.append("ci: " + ", ".join(f"{_flat(key)}={_flat(value)}" for key, value in ci.items()))

@@ -15,12 +15,29 @@ from typing import Any
 
 import pytest
 
-from azsqlcd import lex, trace
+from azsqlcd import lex, session, trace
 from azsqlcd.errors import Exit, ToolError, refused
 from azsqlcd.sqlerrors import ErrorClass, SqlError, sql_error
+from support.links import symlink_or_skip
 
 FAKE_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.ZmFrZS1wYXlsb2Fk.c2lnbmF0dXJl"
 CONNECTION_STRING = "Server=tcp:corp-sql.database.windows.net;Password=Hunter2-Zebra!"
+
+
+SIGN_IN_VARIABLES = (
+    "AZSQLCD_AUTH",
+    "AZSQLCD_MANAGED_IDENTITY_CLIENT_ID",
+    "AZSQLCD_SQL_USER",
+    "AZSQLCD_SQL_PASSWORD",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_sign_in_of_the_machine(monkeypatch) -> None:
+    """A workstation can have the sign-in variables of the tool set. No test reads them: a login
+    with the name of an object of a test would be hidden in the log that the test reads."""
+    for name in SIGN_IN_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
 
 
 class FakeSession:
@@ -458,6 +475,7 @@ def test_the_run_event_has_the_versions_the_platform_and_the_ci_facts_that_exist
         "server": "corp-dev.database.windows.net",
         "database": "sales",
         "table_model": True,
+        "auth": "entra",
         "tenant_id": "must-not-pass",
     }
     trace.header(log, command="plan", argv=["plan", "--env", "dev", "--reason", "r"], tool_version="0.1.0",
@@ -487,6 +505,171 @@ def test_the_run_event_has_the_versions_the_platform_and_the_ci_facts_that_exist
     assert FAKE_TOKEN not in written and "Hunter2" not in written and "must-not-pass" not in written
 
 
+# ------------------------------------------------------------------ the SQL login of the environment
+# no quote and no parenthesis: redact() would cut the value there, and a part is not the value. The
+# session module takes both values out of a driver text before it is redacted (test_auth.py).
+SQL_USER, SQL_PASSWORD = "deploy_login_Zq7", "Pw-9x;}{=K3y\\marker"
+# the values are hidden when the sign-in is SQL authentication: only then does the tool read them
+SQL_SIGN_IN = {"AZSQLCD_AUTH": "sql", "AZSQLCD_SQL_USER": SQL_USER, "AZSQLCD_SQL_PASSWORD": SQL_PASSWORD}
+
+
+def test_the_variables_whose_values_are_hidden_are_the_ones_of_sql_authentication():
+    assert trace.SECRET_VARIABLES == (session.SQL_PASSWORD_VARIABLE, session.SQL_USER_VARIABLE)
+    assert trace.SECRET_VARIABLES == ("AZSQLCD_SQL_PASSWORD", "AZSQLCD_SQL_USER")
+
+
+def test_the_login_and_the_password_of_the_environment_reach_no_event_of_the_log(tmp_path):
+    """Run header, config event, batch events, exception events and the end message: a caller, a
+    driver or an engine message that holds one of the two values cannot put it into the file."""
+    path = tmp_path / "logs" / "log.jsonl"
+    environ = SQL_SIGN_IN | {"GITHUB_JOB": SQL_USER}
+    log = trace.Trace(path, environ=environ)
+    both = f"{SQL_USER} and {SQL_PASSWORD}"
+    trace.header(log, command="plan", argv=["plan", "--env", SQL_USER, "--out", SQL_PASSWORD, SQL_USER],
+                 tool_version="0.1.0", tool_digest="a" * 64, environ=environ)  # fmt: skip
+    trace.config_event(
+        log, project=SQL_USER, environment="dev", target=both, server="s", database=SQL_PASSWORD
+    )
+    failing = f"ALTER TABLE [{SQL_USER}].[Order] ADD [c] int NULL;"
+    answers = {failing: SqlError(f"Cannot find the user {SQL_USER}, password {SQL_PASSWORD}.", number=15151)}
+    db = trace.open_traced(log, lambda: FakeSession(answers))
+    db.execute(f"CREATE TABLE [{SQL_USER}].[t] ([c] int NULL);")
+    with pytest.raises(SqlError):
+        db.execute(failing)
+    with pytest.raises(ToolError):
+        trace.open_traced(log, lambda: (_ for _ in ()).throw(refused(SQL_USER, both, **{SQL_USER: 1})))
+    trace.exception_event(log, raised(refused("CONNECT_FAILED", both, **{SQL_PASSWORD: both})))
+    trace.exception_event(log, raised(SqlError(f"Login failed for {both}", number=18456)))
+    log.event("note", nested={"list": [both, {"inner": both}], SQL_USER: SQL_PASSWORD})
+    trace.end(log, exit_code=24, reason_code="CONNECT_FAILED", message=f"no connection: {both}")
+    assert log.close() is None
+
+    written = path.read_text(encoding="utf-8")
+    events = events_of(path)
+    assert SQL_USER not in written and SQL_PASSWORD not in written
+    assert json.dumps(SQL_PASSWORD)[1:-1] not in written  # nor in its JSON form
+    assert [event["kind"] for event in events] == [
+        "run", "config", "connect", "batch", "batch", "connect", "exception", "exception", "note", "end",
+    ]  # fmt: skip
+    assert events[0]["argv"] == ["plan", "--env", "<hidden>", "--out", "<hidden>", "<arg>"]
+    assert events[3]["head"] == "CREATE TABLE [<hidden>].[t]"
+    assert events[4]["error"]["message"] == "Cannot find the user <hidden>, password <hidden>."
+    assert events[-1]["message"] == "no connection: <hidden> and <hidden>"
+    assert trace.HIDDEN_VALUE == "<hidden>"
+    summary = trace.summarize(path)
+    assert SQL_USER not in summary and SQL_PASSWORD not in summary
+
+
+def test_a_value_is_hidden_before_a_long_string_is_cut(tmp_path):
+    # cut first, the start of a password at the end of the 500 characters would stay
+    log = trace.Trace(tmp_path / "log.jsonl", environ=SQL_SIGN_IN)
+    log.event("note", said="x" * (trace.MAX_STRING - 5) + SQL_PASSWORD + " and more")
+    log.close()
+    said = events_of(tmp_path / "log.jsonl")[0]["said"]
+    assert said == ("x" * (trace.MAX_STRING - 5) + "<hidden> and more")[: trace.MAX_STRING]
+    assert SQL_PASSWORD[:5] not in said
+
+
+def test_a_log_hides_nothing_when_the_variables_are_not_set_or_are_empty(tmp_path):
+    path = tmp_path / "log.jsonl"
+    log = trace.Trace(path, environ={"AZSQLCD_SQL_USER": "", "AZSQLCD_AUTH": "sql"})
+    log.event("note", said="a plain value")
+    log.close()
+    assert events_of(path)[0]["said"] == "a plain value"
+
+
+def test_the_recorder_reads_the_variables_of_the_process_when_none_are_given(tmp_path, monkeypatch):
+    for name, value in SQL_SIGN_IN.items():
+        monkeypatch.setenv(name, value)
+    log, path = a_trace(tmp_path)
+    log.event("note", said=f"with {SQL_PASSWORD}")
+    log.close()
+    assert events_of(path)[0]["said"] == "with <hidden>"
+
+
+def said(tmp_path, environ: dict[str, str], text: str, **more) -> str:
+    path = tmp_path / "said.jsonl"
+    log = trace.Trace(path, environ=environ)
+    log.event("note", said=text, **more)
+    log.close()
+    return path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("auth", [None, "", "entra", "managed-identity", "SQL"])
+def test_a_log_hides_nothing_when_the_sign_in_is_not_sql_authentication(tmp_path, auth):
+    """The variables of a SQL login can be set on a machine that signs in another way. The tool
+    does not read them then, and a name of the log that equals one of them is not replaced."""
+    environ = {"AZSQLCD_SQL_USER": "sales", "AZSQLCD_SQL_PASSWORD": "Order"}
+    if auth is not None:
+        environ["AZSQLCD_AUTH"] = auth
+    text = "the table sales.Order on sales-dev"
+    assert json.loads(said(tmp_path, environ, text, items=[{"sales": "Order"}])) | {"ts": 0} == {
+        "ts": 0, "seq": 1, "kind": "note", "said": text, "items": [{"sales": "Order"}],
+    }  # fmt: skip
+    assert trace.SIGN_IN_VARIABLE == session.AUTH_VARIABLE and trace.SIGN_IN_SQL == session.AUTH_SQL
+
+
+@pytest.mark.parametrize(
+    ("login", "text", "written"),
+    [
+        ("a", "Login failed for user a (a)", "Login failed for user <hidden> (<hidden>)"),
+        ("u", "Login failed for user", "Login failed for user"),
+        ("sale", "sales.Order of wholesale, by sale.", "sales.Order of wholesale, by <hidden>."),
+        ("deploy_login", "deploy_login_old and my_deploy_login and [deploy_login]",
+         "deploy_login_old and my_deploy_login and [<hidden>]"),
+        ("svc-deploy/01", "as svc-deploy/01, not svc-deploy/012", "as <hidden>, not svc-deploy/012"),
+        ("[x]", "the login [x]y", "the login <hidden>y"),  # no word at its ends: hidden wherever it stands
+    ],
+)  # fmt: skip
+def test_a_login_is_hidden_as_a_whole_word_and_never_inside_another_word(tmp_path, login, text, written):
+    """A login is short. Replaced inside other words it shows itself by its places and damages the
+    log: 'Login f<hidden>iled'."""
+    environ = SQL_SIGN_IN | {"AZSQLCD_SQL_USER": login}
+    assert json.loads(said(tmp_path, environ, text))["said"] == written
+
+
+def test_the_password_is_hidden_wherever_it_stands_also_inside_a_word(tmp_path):
+    text = f"x{SQL_PASSWORD}y and PWD={{{SQL_PASSWORD.replace('}', '}}')}}}"
+    assert json.loads(said(tmp_path, SQL_SIGN_IN, text))["said"] == "x<hidden>y and PWD=<hidden>"
+
+
+def test_a_value_is_hidden_in_the_form_that_a_connection_string_holds(tmp_path):
+    """open_session sends PWD={...} with } doubled. That form is not the value of the variable."""
+    doubled = SQL_PASSWORD.replace("}", "}}")
+    assert doubled != SQL_PASSWORD
+    written = said(
+        tmp_path, SQL_SIGN_IN | {"AZSQLCD_SQL_USER": "dep}loy"}, f"UID={{dep}}}}loy}};PWD={{{doubled}}}"
+    )
+    assert json.loads(written)["said"] == "UID=<hidden>;PWD=<hidden>"
+    assert "K3y" not in written and "loy" not in written
+
+
+def test_a_caller_can_name_the_login_and_the_password_to_hide(tmp_path):
+    # cli.main with a credential that the caller gives: the environment does not hold the values
+    path = tmp_path / "log.jsonl"
+    log = trace.Trace(path, environ={})
+    log.hide_sign_in(SQL_USER, SQL_PASSWORD)
+    log.event("note", said=f"{SQL_USER} / {SQL_PASSWORD}")
+    log.close()
+    assert events_of(path)[0]["said"] == "<hidden> / <hidden>"
+
+
+def test_the_config_event_and_the_summary_name_the_kind_of_sign_in(tmp_path):
+    log, path = a_trace(tmp_path)
+    trace.header(log, command="plan", argv=["plan"], tool_version="0.1.0", tool_digest="d" * 64)
+    trace.config_event(log, project="sales", environment="dev", target="sales-dev", server="s", database="d",
+                       table_model=False, auth="managed-identity")  # fmt: skip
+    log.close()
+    assert events_of(path)[1]["auth"] == "managed-identity"
+    assert "sign-in: managed-identity" in trace.summarize(path).splitlines()
+    # a log of a version that did not record it: no line
+    old, old_path = trace.Trace(tmp_path / "old.jsonl"), tmp_path / "old.jsonl"
+    trace.header(old, command="plan", argv=["plan"], tool_version="0.1.0", tool_digest="d" * 64)
+    trace.config_event(old, project="sales", environment="dev", target="sales-dev", server="s", database="d")
+    old.close()
+    assert "sign-in" not in trace.summarize(old_path)
+
+
 # ------------------------------------------------------------------ exceptions and the end
 def raised(error: BaseException) -> BaseException:
     try:
@@ -508,7 +691,8 @@ def test_an_unknown_exception_is_its_type_and_its_place_and_never_its_message(tm
 
 def test_a_tool_error_is_its_reason_code_and_exit_code_with_the_engine_error_behind_it(tmp_path):
     log, path = a_trace(tmp_path)
-    engine = sql_error("Invalid object name 'sales.Hidden'.")
+    # a message that prints a value; the names of a message of names only (207, 208) are shown
+    engine = sql_error("Conversion failed when converting the varchar value 'sales.Hidden' to data type int.")
     error = ToolError(
         Exit.FAILED_ROLLED_BACK,
         "BATCH_FAILED",
@@ -525,10 +709,10 @@ def test_a_tool_error_is_its_reason_code_and_exit_code_with_the_engine_error_beh
     assert tool["detail_keys"] == ["rename_constraints_sql", "step"]  # the names, never the values
     assert tool["causes"][0] == tool["causes"][0] | {
         "type": "SqlError",
-        "number": 208,
-        "message": "Invalid object name <redacted>.",
+        "number": 245,
+        "message": "Conversion failed when converting the varchar value <redacted> to data type int.",
     }
-    assert (sql["type"], sql["number"], sql["class"]) == ("SqlError", 208, "OTHER")
+    assert (sql["type"], sql["number"], sql["class"]) == ("SqlError", 245, "OTHER")
     assert ended == ended | {
         "kind": "end",
         "exit_code": 21,
@@ -673,7 +857,7 @@ def test_the_bundle_refuses_a_large_file_and_a_path_that_is_not_a_regular_file(t
     with open(large, "wb") as file:
         file.truncate(trace.MAX_BUNDLE_FILE_BYTES + 1)
     link = tmp_path / "link.json"
-    link.symlink_to(out / "plan.json")
+    symlink_or_skip(link, out / "plan.json")
     for bad, why in ((large, "over 5 MB"), (tmp_path, "not a regular file"), (link, "not a regular file"),
                      (tmp_path / "missing.json", "not a regular file")):  # fmt: skip
         with pytest.raises(trace.BundleRefused, match=why):

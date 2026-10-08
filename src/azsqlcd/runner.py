@@ -43,7 +43,7 @@ from azsqlcd.model import fold
 from azsqlcd.modules import ModuleFile
 from azsqlcd.plan import ALREADY_PAST, NOOP, Plan, Step, Unit
 from azsqlcd.release import Bundle
-from azsqlcd.session import Session, TokenProvider, require_token_life
+from azsqlcd.session import Credential, Session, SqlLogin, auth_kind, require_token_life
 from azsqlcd.sqlerrors import ErrorClass, SqlError
 from azsqlcd.state import State
 
@@ -120,6 +120,13 @@ class Audit:
     ci_run_url: str | None = None
 
 
+# Report.syntax_check. A deploy of an approved plan does not parse the texts again: that the plan
+# job did is a statement of plan.json, in a key that plan_sha256 does not cover (plan.Plan). The
+# report says so, so that a plan file whose key was changed does not give a report that is silent.
+SYNTAX_IN_THIS_RUN = "ran in this run"
+SYNTAX_OF_PLAN_FILE = "ran in the plan job (read from plan.json; not in plan_sha256)"
+
+
 @dataclass(frozen=True)
 class Report:
     """The result of one deploy or resolve run. report.json is to_json()."""
@@ -142,6 +149,13 @@ class Report:
     modules_dropped: tuple[str, ...] = ()
     failed_step: str | None = None
     warnings: tuple[str, ...] = ()  # the notes of the plan
+    # the kind of sign-in: entra | managed-identity | sql; never a login or a client id. None: the
+    # caller gave the session of the run, and the command line names the kind
+    auth: str | None = None
+    # The syntax check (SET PARSEONLY ON) of the texts of this run, and where the fact comes from:
+    # SYNTAX_IN_THIS_RUN, SYNTAX_OF_PLAN_FILE, "skipped" (a note of warnings says why), or None
+    # (no unit of work, so no text to parse; or no plan was computed)
+    syntax_check: str | None = None
     # the plan that was computed under the lock, for plan.json of --inline-plan; not in to_json()
     plan: Plan | None = field(default=None, repr=False, compare=False)
 
@@ -183,7 +197,7 @@ class _Job:
     env: str
     target_id: str
     session_factory: SessionFactory | None  # None: the caller gave the session of the run
-    token_provider: TokenProvider | None
+    token_provider: Credential | None
     audit: Audit
     tool_version: str
     tool_digest: str
@@ -200,6 +214,7 @@ class _Run:
     spid: int | None = None
     recorded: State | None = None
     plan: Plan | None = None
+    syntax_check: str | None = None  # Report.syntax_check
     run_id: int | None = None
     started_utc: str | None = None
     transaction_id: int | None = None
@@ -288,6 +303,8 @@ def _report(run: _Run, error: ToolError | None) -> Report:
         modules_dropped=tuple(run.modules_dropped),
         failed_step=run.step if error else None,
         warnings=run.plan.notes if run.plan else (),
+        auth=None if job.token_provider is None else auth_kind(job.token_provider),
+        syntax_check=run.syntax_check,
         plan=run.plan,
     )
 
@@ -466,9 +483,11 @@ def _open(run: _Run) -> catalog.FenceFacts:
     environment, target = resolve_target(job.config, job.env, job.target_id)
     if run.session is None:
         now = job.now()
-        token = _have(job.token_provider).get()
-        require_token_life(token, job.config.project.min_token_minutes, now)
-        run.token_minutes_left = int((token.expires_on - now) // 60)
+        credential = _have(job.token_provider)
+        if not isinstance(credential, SqlLogin):  # a SQL login has no token: no life to check
+            token = credential.get()
+            require_token_life(token, job.config.project.min_token_minutes, now)
+            run.token_minutes_left = int((token.expires_on - now) // 60)
         run.session = _have(job.session_factory)()
     session = run.db
     set_session_options(session, environment.lock_timeout_ms)
@@ -1342,7 +1361,7 @@ def deploy(
     expect_plan: Plan | None,
     inline_plan: bool,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,
@@ -1356,7 +1375,9 @@ def deploy(
     plan computed under the lock) and inline_plan (A26; only where the environment is not gated).
     session_factory opens the session of the run. With inline_plan it is called a second time, for
     the session of the syntax check (SET PARSEONLY ON), which the planner closes before anything
-    is executed. Every other end raises RunError, a ToolError that carries the Report:
+    is executed. With expect_plan the check is the one of the plan job: the Report warns when that
+    plan does not record that it ran. Every other end raises RunError, a ToolError that carries
+    the Report:
       21 BATCH_FAILED, GOVERNANCE_LIMIT, READBACK_MISMATCH, UNTOUCHED_CHANGED, DEPENDANT_BROKEN
          (the sweep of dependants, and a refresh step that fails), DRIFT_TOUCHED, UNBIND_HEADER,
          INDEXED_VIEW, SESSION_OPTIONS (in a unit of work; rolled back and proven)
@@ -1409,12 +1430,17 @@ def deploy(
             tool_version=tool_version,
             tool_digest=tool_digest,
             repo_url=repo_url,
-            # the plan job ran the syntax check for an expected plan; an inline plan has no plan job
+            # An inline plan has no plan job: the check runs here. For an expected plan it ran in
+            # the plan job, when that plan records it; the planner warns when it does not
             open_second_session=session_factory if inline_plan else None,
             token_minutes_left=run.token_minutes_left,
             table_hooks=table_hooks,
             lock_held=True,
+            approved_plan=expect_plan,
         )
+        run.syntax_check = computed.syntax_check
+        if computed.syntax_check == plan.SYNTAX_RAN:
+            run.syntax_check = SYNTAX_IN_THIS_RUN if inline_plan else SYNTAX_OF_PLAN_FILE
         if expect_plan is not None and expect_plan.plan_sha256 != computed.plan_sha256:
             raise refused(
                 "STALE_PLAN",
@@ -1490,7 +1516,7 @@ def state_run(
     tool_digest: str,
     session: Session | None = None,
     session_factory: SessionFactory | None = None,
-    token_provider: TokenProvider | None = None,
+    token_provider: Credential | None = None,
     audit: Audit | None = None,
     precheck: Callable[[], None] | None = None,
     reconcile: bool = False,
@@ -1684,7 +1710,7 @@ def mark_applied(
     confirm_database: str,
     reason: str,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,
@@ -1838,7 +1864,7 @@ def mark_not_applied(
     confirm_database: str,
     reason: str,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,
@@ -1910,7 +1936,7 @@ def accept_drift(
     confirm_database: str,
     reason: str,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,
@@ -1975,7 +2001,7 @@ def adopt_module(
     confirm_database: str,
     reason: str,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,
@@ -2038,7 +2064,7 @@ def clear_run(
     confirm_database: str,
     reason: str,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,
@@ -2088,7 +2114,7 @@ def rebind_environment(
     confirm_database: str,
     reason: str,
     session_factory: SessionFactory,
-    token_provider: TokenProvider,
+    token_provider: Credential,
     audit: Audit,
     tool_version: str,
     tool_digest: str,

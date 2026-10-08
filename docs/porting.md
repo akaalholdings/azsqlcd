@@ -255,7 +255,10 @@ shell, run the bash line of the quickstart in Git Bash.
    (assumption of the design). For a database command use the clone.
 
 4. Sign in to Azure. The offline commands need no login. A database command that you run on
-   this machine, and the scripts of section E, use the login of the Azure CLI.
+   this machine, and the scripts of section E, use the login of the Azure CLI. This is the
+   default sign-in. A machine with a managed identity, or a workstation with a SQL login, sets
+   the variable `AZSQLCD_AUTH`: `docs/setup.md`, section 2, "Three ways to sign in" (those two
+   sign-ins have unit tests only).
 
    ```powershell
    az login

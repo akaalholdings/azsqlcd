@@ -63,15 +63,37 @@ class Bundle:
 def git(args: list[str], cwd: StrPath, *, stdin: bytes = b"") -> bytes:
     """Run git (no shell) and return its stdout. The only place in the tool that starts git."""
     # replace refs could put other content behind an object name
-    command = [_git_program(cwd), "--no-replace-objects", *args]
+    command = [_git_program(cwd), "--no-replace-objects", *_named_git_dir(cwd), *args]
     try:
         done = subprocess.run(command, cwd=cwd, input=stdin, capture_output=True, check=False)
     except OSError as e:
         raise refused("GIT_FAILED", f"git could not be started: {e}") from None
     if done.returncode != 0:
-        error = done.stderr.decode("utf-8", "replace").strip()[-500:]
+        error = done.stderr.decode("utf-8", "replace").strip()
+        if len(error) > 500:  # the cause is the first line; hint lines can follow it
+            error = f"{error.splitlines()[0][:200]} [...] {error[-300:]}"
         raise refused("GIT_FAILED", f"git {args[0]} failed (exit {done.returncode}): {error}", args=args)
     return done.stdout
+
+
+def _named_git_dir(cwd: StrPath) -> list[str]:
+    """['--git-dir=<cwd>'] when cwd itself is a bare repository with no working tree around it;
+    [] for every other folder, where git finds the repository as it always did.
+
+    With safe.bareRepository=explicit (a hardening that git recommends) git refuses a bare
+    repository that it finds by itself. The folder that the caller gave is the repository that the
+    caller named, so the tool names it to git. A bare repository below a working tree is the case
+    that the setting exists for (it can be content of a checkout): it is never named here, and git
+    decides. GIT_DIR in the environment is a name already, and git reads it first.
+    """
+    folder = Path(cwd).resolve()
+    # the three entries by which git knows a git directory; .git in the folder comes first in git
+    bare = (folder / "HEAD").is_file() and (folder / "objects").is_dir() and (folder / "refs").is_dir()
+    if not bare or "GIT_DIR" in os.environ:
+        return []
+    if any(os.path.lexists(above / ".git") for above in (folder, *folder.parents)):
+        return []
+    return [f"--git-dir={folder}"]
 
 
 def _git_program(cwd: StrPath) -> str:

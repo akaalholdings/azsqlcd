@@ -101,7 +101,7 @@
     "number": 2714,
     "sqlstate": null,
     "text": "[Microsoft][SQL Server]There is already an object named 'x1_t' in the database.",
-    "redacted": "[Microsoft][SQL Server]There is already an object named <redacted> in the database."
+    "redacted": "[Microsoft][SQL Server]There is already an object named 'x1_t' in the database."
   },
   "2627": {
     "expected_number": 2627,
