@@ -165,8 +165,17 @@ The blueprint estimates 4 owner hours for step P0 (the spike) and 8 for step P1 
 ## 4. Spike items
 
 Each item writes `tests/fixtures/live/spike/<id>.json` with `result`, `observed` and `decides`.
-`result` is `pass`, `fail`, `inconclusive` (the probe did not finish, or needs a second run) or
-`manual`. L1 to L17 are the items of the blueprint. L5b and X1 to X10 were added by the build:
+An item file can also hold the key `note`: one line for the operator, printed as `<id> note: ...`
+for every result, a pass too. `result` is `pass`, `fail`, `inconclusive` (the probe did not
+finish, or needs a second run), `manual` or `not applicable` (an item about access tokens, for a
+sign-in that has none).
+
+Sign-in: the three live scripts (`live_spike.py`, `live_acceptance.py`, `live_tables.py`) sign in
+as the variable `AZSQLCD_AUTH` says (`docs/setup.md`, section 2, "Three ways to sign in"). With
+`AZSQLCD_AUTH=sql` there is no access token: L1 records no token life, X1 skips its token connect
+to a database that does not exist, L13 is `not applicable`, and the acceptance check "a token
+with too little life" is `not applicable`. The acceptance totals count `not applicable` apart: it
+is not a pass and not a failure. No live script ran with `managed-identity` or `sql`. L1 to L17 are the items of the blueprint. L5b and X1 to X10 were added by the build:
 28 items. X6 to X10 were added after the live run of 2026-10-07 and have not run on a database.
 
 | Id | What it proves | When it fails | What it unlocks |
@@ -180,11 +189,11 @@ Each item writes `tests/fixtures/live/spike/<id>.json` with `result`, `observed`
 | L6 | A second session with the applock reads the commit counter of a killed session with a locking read, right in every repetition (`--repetitions`, default 20). While the writer lives, the read waits | Set `RECONCILE_BY_LOCKING_READ = False`. Every lost connection in a transaction is then exit 23 | `runner.RECONCILE_BY_LOCKING_READ` stays True: a lost connection is exit 24 when the read decides |
 | L7 | What `sys.sql_modules` stores after CREATE OR ALTER and after ALTER, for each module kind and eleven header shapes. Pass: the stored text is the batch with the verb `CREATE` in place of `CREATE OR ALTER` or `ALTER` (`modules.stored_text`), and `runner._module_problems` with the compare on accepts every deployed file | Set `MODULE_TEXT_READBACK = False`. Read `observed` (`not_as_stored_text`, `refused_by_the_read_back`) to see what differs | `runner.MODULE_TEXT_READBACK` stays True. Baseline can set `source_sha256` (A15) |
 | L8 | How the engine writes DEFAULT, CHECK, computed and filter expressions, for a fixed list. With `--compare-normal-forms`: equal on two databases | Onboarding needs an accept list for expression text | Catalog to catalog compare with no accept list. Fixture for the table part of `catalog.py` |
-| L9 | Catalog reads inside the open transaction see 500 new procedures, a table, an index and a trigger. A trigger is gone when its table is dropped (A18). It records the read times | Wrong counts: the read-back design does not hold. Slow reads (`inconclusive`): you decide if the time is acceptable | Read-back, A12 and A18 inside the transaction |
+| L9 | Catalog reads inside the open transaction see 500 new procedures, a table, an index and a trigger. A trigger is gone when its table is dropped (A18). It records the read times in two groups: the reads of the deploy path (modules by key, the list of objects) and the read of every module, which only export and baseline make. `observed` holds `seconds_of_the_deploy_path`, `seconds_of_the_read_of_every_module` and `read_of_every_module` (the sentence) | Wrong counts: the read-back design does not hold. A read of the deploy path over 10 s (`inconclusive`): you decide if the time is acceptable. The read of every module over 10 s does not change the result: the item prints `L9 note: the read of every module, used by export and baseline, took N s: more than the limit ...` | Read-back, A12 and A18 inside the transaction |
 | L10 | Under `SET PARSEONLY ON` a syntax error raises, `SELECT 1/0` does not run, a bad module and a bad ALTER TABLE raise, nothing is created. The batch `/* azsqlcd:parseonly_off */ SELECT @@SPID;` gives no result set under PARSEONLY ON and one row after OFF | The plan has no syntax check. It must stop with `PARSEONLY_CANARY` | Plan step 9. It also shows why `FORBIDDEN_TOKEN` exists |
 | L11 | (a) Which module kinds can be created before the object that they use. (b) The error when a function that a CHECK uses is changed. (c) Unbind of two chained schema-bound views, dependant first, keeps object id and grants | (a) A17 must become an error for procedures and triggers. (c) The `unbind` directive cannot be used | A17, A15, design (d) |
 | L12 | The first connect to a paused serverless database succeeds inside 180 seconds. It records every error text | Add the text to `sqlerrors._KNOWN_MESSAGES` as 40613, or make `CONNECT_BUDGET_S` longer | The connect budget |
-| L13 | If a session ends when its token expires | Nothing fails. The result decides the rule | `min_token_minutes`; the row "Token expires on an open session" of the failure matrix |
+| L13 | If a session ends when its token expires. With SQL authentication: `not applicable` | Nothing fails. The result decides the rule | `min_token_minutes`; the row "Token expires on an open session" of the failure matrix |
 | L14 | A member of `db_ddladmin` with the grants of `setup-sql` can run every statement kind and every read of the tool | Add the smallest grant to `state.setup_sql` for each entry of `missing` | The grants of `setup-sql` |
 | L15 | The session applock: mode on the owner, test and request from a second session, kept after a rollback, free after KILL and after close. The filtered unique index of `azsqlcd.step` works | Do not deploy. The lock design does not hold | A4 |
 | L16 | The catalog collation can be read and the case probe of the fence agrees with it. A failed `sp_refreshsqlmodule` in a transaction raises and rolls back | Change the probe of `catalog.fence_facts` | `FENCE_CASE_SENSITIVE`; the refresh step |
@@ -231,7 +240,7 @@ reported as `not run`.
 | Scenario | Checks | Row of the failure matrix, or amendment |
 |---|---|---|
 | setup-sql | The script makes the state and the users. A second run changes nothing | A2 |
-| First release | A plan changes nothing. A token with too little life: 24 `TOKEN_TOO_SHORT`. Deploy with the expected plan: 0. A second deploy sends no module | Plan algorithm; token row; modules by checksum |
+| First release | A plan changes nothing. A token with too little life: 24 `TOKEN_TOO_SHORT` (with SQL authentication: `not applicable`). Deploy with the expected plan: 0. A second deploy sends no module | Plan algorithm; token row; modules by checksum |
 | Release with no change | The release is recorded (run row, no step). An old plan: 22 `STALE_PLAN`, nothing sent. An older release: 0 `ALREADY_PAST` | A6; stale plan |
 | Changed module | Only the changed module is sent | Modules by checksum |
 | Failing batch | 21 `BATCH_FAILED`: no step row, run `failed`, batch 1 undone, stored error text redacted. Then a lock on the table: 24 `LOCK_TIMEOUT`. Then a second runner inside the first: 25 `LOCK_NOT_GRANTED`; a plan: 25 `RUN_LIVE` | Run-time error in batch N; lock timeout; applock not granted; A4 |

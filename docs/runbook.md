@@ -46,8 +46,16 @@ reason code.
 | 30 | Drift found (`drift` only) | Untouched: `drift` only reads |
 | other | The tool did not start | Untouched |
 
-Engine messages are printed and stored redacted. `--show-error-text` prints the full message on
-stderr. The tool refuses the flag for `--env prod` and together with `--rebind-environment`
+Engine messages are printed and stored redacted: every quoted or parenthesised part is
+`<redacted>`. Nine messages that hold only names of objects and columns can keep their names.
+Four of them name objects that exist in the database and always keep the names (1913, 2714, 3726,
+5074), for example `The index 'IX_Order_Cust' is dependent on column 'CustId'.`. Five print a name
+as the statement wrote it (207, 208, 2705, 3701, 4902), for example
+`Invalid column name 'Status'.`. They keep the name only when the batch that was sent holds it as
+an identifier. A statement that dynamic SQL builds from data, an `sp_refreshsqlmodule` step and a
+read of the dependants do not: there the message reads `Invalid column name <redacted>.`. The
+column `error_text` of `azsqlcd.run` never keeps a name of these five. `--show-error-text` prints
+the full message on stderr. The tool refuses the flag for `--env prod` and together with `--rebind-environment`
 (`SHOW_ERROR_TEXT_REFUSED`). No workflow passes it.
 
 ## Rules with no exception
@@ -166,12 +174,12 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | `NOT_ON_MAIN` | `build`: the commit is not on the first-parent chain of `refs/remotes/origin/main` | Untouched | Releases come only from `main`. Merge by pull request. A tag `r<n>` that points off `main` was created by hand: see "A release is missing" |
 | `MAIN_REF_INVALID` | `build`: the ref of main is not a full ref name, or is a tag. `verify --base` (as a reason code): the base is a short name such as `origin/main`, and the repository has a tag of that name; git reads the tag first. Any other revision that git reads (`origin/main`, `HEAD`, a short commit id) is resolved by the command line to its full commit id. As a finding of the proof: the ref is not a full commit id and not a full ref name | Untouched | `build`: the tool default is `refs/remotes/origin/main`; a caller that passes `main_ref` must pass a full name such as `refs/heads/main`. `verify` and the proof of a withdrawal: give the commit, `azsqlcd verify --base "$(git merge-base origin/main HEAD)"`; the workflow passes the base commit of the pull request |
 | `SHALLOW_REPOSITORY` | The checkout has no full history, so the release number cannot be computed | Untouched | Workflow: the checkout needs `fetch-depth: 0`. Workstation: `git fetch --unshallow` |
-| `GIT_FAILED` | git could not read the commit, a blob or the history. The message names the git command and the revision or the ref of main (detail `revision`). Also: the `git` program that was found lies inside the repository or the current directory, and the tool does not start it | Untouched | `gh run rerun <run-id> --failed`. If it repeats, check that the checkout step has `fetch-depth: 0` and that `origin/main` exists in the checkout |
+| `GIT_FAILED` | git could not read the commit, a blob or the history. The message names the git command and the revision or the ref of main (detail `revision`). Also: the `git` program that was found lies inside the repository or the current directory, and the tool does not start it. When the root is a bare repository the tool names it to git with `--git-dir`, so the git setting `safe.bareRepository=explicit` does not stop a build. A bare repository inside a working tree is not named: git refuses it under that setting, and the message holds the text of git. A long error text of git is shown as its first line, ` [...] `, and its last 300 characters | Untouched | `gh run rerun <run-id> --failed`. If it repeats, check that the checkout step has `fetch-depth: 0` and that `origin/main` exists in the checkout |
 | `TREE_INVALID` | The commit, or the working tree, holds a path that a release cannot hold: a symbolic link, a submodule, a backslash, a path that is not UTF-8, a root folder in another letter case (`Schema/` for `schema/`), or a path that Windows cannot check out (a device name such as `aux`, a colon, a question mark, an asterisk, a double quote, an angle bracket or a vertical bar, a dot or a space at the end of a name, a file name above 255 bytes). The message names it | Untouched | Rename or remove the path by pull request. A folder in the wrong letter case: `git mv` |
 | `BUNDLE_INCOMPLETE` | `build`: the commit holds no `azsqlcd.toml` or no `migrations/migrations.sum` | Untouched | Add the file by pull request. A repository with no migration holds `migrations/migrations.sum` with the one line `azsqlcd-sum 1` |
 | `BUNDLE_INVALID` | `bundle.tar` holds a member that the manifest does not list, lists twice, or whose bytes differ; `manifest.json` is not a manifest; the manifest does not name the release that added a pending migration; or a member has a path that Windows cannot check out | Untouched | Same as `DIGEST_MISMATCH` |
 | `DIGEST_MISMATCH` | `manifest.json` of the downloaded release does not have the digest that the release job computed from the tag | Untouched | A release asset was replaced. Treat as a security event: check the audit log of the repository for `release` events. Restore: build the tag on a clean clone (`azsqlcd build --commit <sha of r<n>> --out dist`), `gh release upload r<n> dist/manifest.json dist/bundle.tar --clobber`, then PROMOTE |
-| `CONFIG_INVALID` | `azsqlcd.toml` is missing, is not TOML, or has an unknown key, a missing key or a bad value. A key name that holds `key`, `secret` or `password` is refused. The message names the key path, never a value | Untouched | Fix the file by pull request |
+| `CONFIG_INVALID` | `azsqlcd.toml` is missing, is not TOML, or has an unknown key, a missing key or a bad value. A key name that holds `key`, `secret` or `password` is refused. The message names the key path, never a value. A required key that is missing is named with its table and one example line, for example `azsqlcd.toml: project.min_token_minutes: is missing. Add the key min_token_minutes to the table [project], for example: min_token_minutes = 20`. `env.<name>.auth` must be `oidc` or `managed-identity`. `[project] module_chunk` can be left out (100) | Untouched | Fix the file by pull request. For a missing key, add the example line to the table that the message names and set the value |
 | `ENV_NOT_CONFIGURED` | `azsqlcd.toml` has no `[env.<name>]` for the stage | Untouched | Add the environment by pull request, or remove the stage from `db.yml` |
 | `TARGET_NOT_CONFIGURED` | `[env.<name>]` has no target with the id that the command names | Untouched | Give the `target` input the id from `azsqlcd.toml`, or add the target by pull request |
 | `CHAIN_INVALID` | `migrations/migrations.sum` breaks a chain rule (format, order, checksum, `replaces`), or a migration file of the release does not have the sha256 or the mode of its chain line | Untouched | In a pull request: merge `main`, run `azsqlcd gen --resum`, push. On `main`: fix by pull request |
@@ -185,6 +193,8 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | Reason code | Meaning | State of the database | What to do |
 |---|---|---|---|
 | `DRIVER_MISSING` | A database command ran without the driver | Untouched | Workflow: the action call needs `db: true`. Workstation: `uv sync --frozen --extra db` |
+| `AUTH_INVALID` | The sign-in of a database command cannot be used: the variable `AZSQLCD_AUTH` is not `entra`, `managed-identity` or `sql` (exact, lower case; not set or empty means `entra`); or `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` is set and is not a GUID; or SQL authentication in GitHub Actions (the variable `GITHUB_ACTIONS` is `true` or `1` in any letter case, the variable `GITHUB_RUN_ID` is set, or the command has `--ci github`); or the login or the password of SQL authentication holds a control character; or the password has fewer than 8 characters. The message names the variable, never its value | Untouched: no connection was tried | Workstation: set the variable to one of the three values, or remove it to sign in with the Azure CLI login (`az login`). Workflow: SQL authentication is refused there and has no override; set `auth = "oidc"` or `auth = "managed-identity"` for the environment in `azsqlcd.toml` by pull request, and remove `AZSQLCD_AUTH` from the variables of the runner machine. `docs/setup.md`, section 2, "Three ways to sign in" |
+| `SQL_AUTH_MISSING` | `AZSQLCD_AUTH=sql`, and the login (`AZSQLCD_SQL_USER`) or the password (`AZSQLCD_SQL_PASSWORD`) is not set or is empty. The message names the variable | Untouched: no connection was tried | Set both variables in the shell that runs the command (`docs/setup.md`, section 2, "Three ways to sign in", shows how to do it with no password on a command line). The password is read only from the variable: no argument, no key of `azsqlcd.toml` and no file takes it. For the Azure CLI login, remove `AZSQLCD_AUTH` |
 | `SESSION_OPTIONS` | At the start of a session the options that the tool set are not the options that it reads back (`XACT_ABORT`, `NOCOUNT`, the ANSI options, `LOCK_TIMEOUT`, `IMPLICIT_TRANSACTIONS` off, language `us_english`). The message holds both rows of twelve values | Untouched | `gh run rerun <run-id> --failed` once. If it repeats, the read of the options does not fit the driver: open an issue in the tool repository with the message. No deploy runs until it is fixed |
 | `FENCE_ENGINE_EDITION` | The server is not Azure SQL Database (engine edition is not 5). The tool runs nowhere else | Untouched | Wrong `server` in `azsqlcd.toml`: fix by pull request. There is no override |
 | `FENCE_READ_ONLY` | The database is not `READ_WRITE`: a read-only replica, or a database in a read-only state | Untouched | Secondary of a failover group: use the listener name as `server` in `azsqlcd.toml`. Else a DBA makes the database writable |
@@ -208,7 +218,7 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | `RUN_UNKNOWN` | An earlier run has the status `unknown` and no `clear-run` step after it | As the earlier run left it | "Unknown run" |
 | `BASELINE_REQUIRED` | (a) The chain of the release starts with `baseline` and the database has no baseline step. (b) `table_model = true`: an object of the table model has no managed row and no pending migration creates it, so the database was never compared with the model | Untouched | Onboard the target: `docs/setup.md`, section 7. For (b), after the switch to `table_model = true`: run `baseline` again for the target: `gh workflow run onboard.yml --ref main -f environment=<env> -f target=<target> -f action=baseline -f release=r<n> -f confirm_database=<database>` |
 | `CHAIN_DIVERGED` | The database holds an applied migration that the release chain does not hold at that position, or with another checksum; or a migration of the release is not applied and the database is past the release; a late replacement (a new line with `replaces=` for a withdrawn migration that this database never applied) is not this case: the plan has the note `late replacement: ...` and runs it after the migrations that the database applied already | Untouched | Stop. Someone deployed from another history, or changed a merged migration. Run LOOK; compare `azsqlcd.step` with `migrations/migrations.sum` of the release. Do not resolve until the cause is known; restore the chain on `main` by pull request |
-| `CATCHUP_REQUIRED` | The database has pending migrations that earlier releases added. A release applies only the migrations that it added. The message says "promote r<k> first". Not raised for the first deploy to a database that records no release, no migration, no baseline and no committed deploy: the whole chain then runs with this release, and the plan has the note `first deploy: ...` (see "First deploy to an empty database") | Untouched | `gh workflow run db.yml --ref main -f release=r<k> -f from_stage=<stage>`; repeat with the next release that the message names; then promote the release that was refused. If release r<k> does not exist: "A release is missing". If r<k> holds a migration that was withdrawn later: "Catch-up after a withdraw-and-replace" |
+| `CATCHUP_REQUIRED` | The database has pending migrations that earlier releases added. A release applies only the migrations that it added. The message says "promote r<k> first" and gives the two cases. Not raised for the first deploy to a database that records no release, no migration, no baseline and no committed deploy: the whole chain then runs with this release, and the plan has the note `first deploy: ...` (see "First deploy to an empty database") | Untouched | Case 1, r<k> can still be deployed: `gh workflow run db.yml --ref main -f release=r<k> -f from_stage=<stage>`; repeat with the next release that the message names; then promote the release that was refused. Case 2, r<k> cannot be deployed because its migration fails, or a module fails after it: withdraw the migration by pull request (`docs/setup.md`, section 7, "Withdraw and replace a merged migration"), then promote the release that holds the withdrawal; it carries the pending migrations of the later releases in one transaction (plan note `catch-up in one release: ...`) and the withdrawn migration never runs: "Catch-up after a withdraw-and-replace". Put the corrected change into the pull request of the withdrawal as a replacement (`replaces=`): a database that applied the migration keeps what it has, and every other database runs the replacement. A withdrawal with no replacement, with the corrected change as a new migration later, works only when no database applied the migration and `table_model = true`. If release r<k> does not exist: "A release is missing" |
 | `NONTX_NOT_ALONE` | A non-transactional migration is pending together with other work. It must be the only change of its release. The message lists the other pending items | Untouched | The other items are module changes of releases that this database skipped: promote the release before it, `gh workflow run db.yml --ref main -f release=r<n-1> -f from_stage=<stage>`, then the refused release. In a catch-up over a withdrawn migration there is no tool path: `docs/known-gaps.md`, section 4 |
 | `MODULE_ORPHAN` | A module is managed in this database and the release has no file and no tombstone for it. The tool never drops a module without a tombstone | Untouched | By pull request: add a `[[drop]]` entry for the key to `schema/_tombstones.toml`, or add the module file |
 | `TOMBSTONE_CONFLICT` | An object has a module file and a tombstone, also when the two keys differ only by case | Untouched | By pull request: remove the file or the tombstone |
@@ -290,9 +300,9 @@ A clean stop. Nothing of this unit of work is in the database. The same run can 
 
 | Reason code | Meaning | State of the database | What to do |
 |---|---|---|---|
-| `TOKEN_UNAVAILABLE` | No access token for the database: `azure/login` did not run, or the federated credential does not match the subject of the job | Untouched | `gh run rerun <run-id> --failed`. If it repeats: compare the subject in the `azure/login` log with the federated credentials (`scripts/setup_repo.py --repo <owner/name> --print-azure`) |
-| `TOKEN_TOO_SHORT` | The token expires sooner than the command needs. A command that writes needs `min_token_minutes`. A read-only command (`plan`, `drift`, `export`, `baseline --report-only`) needs 2 minutes. The message gives the minutes that are left and the minutes that are needed | Untouched | In a workflow: start the job again, `gh run rerun <run-id> --failed` (a new login gives a new token). On a workstation the Azure CLI gives out its cached token until a few minutes before the end of that token (seen in both live runs of 2026-10-07: 5 and 6 minutes left, 20 needed): wait the minutes that the message names and run the command again, or sign in again with `az login` |
-| `CONNECT_FAILED` | No connection inside the 180-second budget, or an error at connect that is not transient. The message holds the redacted engine text, and the number when the tool knows the text | Untouched | `gh run rerun <run-id> --failed`. If it repeats it is not transient. "Cannot open database" (4060): the database name is wrong, or the identity is not a user of the database (run the `setup-sql` script; check `azsqlcd.toml`). "Login failed" (18456): the identity is not a user of this database. A timeout or a denied connection (47073): no network path from the runner (`docs/setup.md`, section 5) |
+| `TOKEN_UNAVAILABLE` | No access token for the database. With the Azure CLI sign-in (`AZSQLCD_AUTH` not set, or `entra`): `azure/login` did not run, or the federated credential does not match the subject of the job. With `AZSQLCD_AUTH=managed-identity` the message starts "no access token for the database from the managed identity": the machine has no managed identity, the identity endpoint gave no answer, or `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` is not the client id of a user-assigned identity of this machine. The message holds `<client id>` in place of the client id (with or without its dashes), and `<token>` in place of a token that the identity library put into its error text. Not raised with SQL authentication: it has no token | Untouched | `gh run rerun <run-id> --failed`. If it repeats, with OIDC: compare the subject in the `azure/login` log with the federated credentials (`scripts/setup_repo.py --repo <owner/name> --print-azure`). With a managed identity: check that the job ran on a self-hosted runner in Azure, that the identity of `[identities]` is assigned to that runner machine, and that the client id in `azsqlcd.toml` is the client id of that identity (`docs/setup.md`, section 2, "Three ways to sign in") |
+| `TOKEN_TOO_SHORT` | The token expires sooner than the command needs. A command that writes needs `min_token_minutes`. A read-only command (`plan`, `drift`, `export`, `baseline --report-only`) needs 2 minutes. The message gives the minutes that are left and the minutes that are needed. Not applicable with SQL authentication (`AZSQLCD_AUTH=sql`): there is no token, the check does not run, and the plan prints `token minutes left: not applicable (SQL authentication has no access token)`. With a managed identity the check runs, and the message still speaks of the Azure CLI and `az login`: ignore that part | Untouched | With a managed identity: start the command again; the tool asks the identity for a token at each connect. In a workflow with OIDC: start the job again, `gh run rerun <run-id> --failed` (a new login gives a new token). On a workstation the Azure CLI gives out its cached token until a few minutes before the end of that token (seen in both live runs of 2026-10-07: 5 and 6 minutes left, 20 needed): wait the minutes that the message names and run the command again, or sign in again with `az login` |
+| `CONNECT_FAILED` | No connection inside the 180-second budget, or an error at connect that is not transient. The message holds the redacted engine text, and the number when the tool knows the text. With SQL authentication (`AZSQLCD_AUTH=sql`) a failed login reads `error 18456, class OTHER; the driver message is not shown for SQL authentication`: the text of the driver can hold the login, so it is never printed, also not with `--show-error-text`. Any other connect error of SQL authentication keeps its redacted text, with the login and the password replaced by `<hidden>`, also in the form that a connection string holds them (in braces, `}` doubled). A driver text that names a connection keyword of the sign-in (`UID=`, `PWD=`) ends there with `<hidden>`: the driver put the connection string into its message | Untouched | `gh run rerun <run-id> --failed`. If it repeats it is not transient. "Cannot open database" (4060): the database name is wrong, or the identity is not a user of the database (run the `setup-sql` script; check `azsqlcd.toml`). "Login failed" (18456): the identity is not a user of this database. With SQL authentication: check `AZSQLCD_SQL_USER` and `AZSQLCD_SQL_PASSWORD`, and that the login has a user in the database (the `setup-sql` script creates no user for a SQL login; a DBA creates it). A timeout or a denied connection (47073): no network path from the runner (`docs/setup.md`, section 5) |
 | `CONNECTION_LOST` | The connection was lost before any batch of the unit of work was sent, or in a read-only command (`plan`, `drift`, `export`, `baseline --report-only`) | Untouched | `gh run rerun <run-id> --failed` |
 | `LOCK_TIMEOUT` | A batch waited longer than `lock_timeout_ms` for a lock (1222). The tool rolled back and proved it. Also a read or a state write before the unit of work | Rolled back | "Lock timeout in prod at night" below |
 | `DEADLOCK` | The session was the victim of a deadlock (1205). The tool rolled back and proved it | Rolled back | `gh run rerun <run-id> --failed`. If it repeats: "Lock timeout in prod at night", step 4 |
@@ -379,6 +389,7 @@ Allow lines and migration batches.
 | `NTX004` | warning | `ONLINE = ON` without `WAIT_AT_LOW_PRIORITY` in a non-transactional migration: every later statement on the table waits behind the build. Each statement of a batch is read alone. An online `ALTER COLUMN` and a columnstore build take no such clause and are not findings | Add `WAIT_AT_LOW_PRIORITY (...)` |
 | `NTX005` | error | A non-transactional migration states no `expected-minutes`; the job timeout is computed from it | Write `-- azsqlcd:mode nontx expected-minutes: <N>` |
 | `NTX006` | error | `RESUMABLE = ON` in a transactional migration: a resumable build cannot run in a transaction | Move the statement to a migration with `-- azsqlcd:mode nontx expected-minutes: <N>`, or remove `RESUMABLE = ON` |
+| `PAR001` | error | The parentheses of a migration batch (model, raw or data; `tx` or `nontx`) or of a module file under `schema/` do not balance: a `)` closes nothing, or a `(` is never closed. The message names the line of the first such parenthesis. A parenthesis in a string, a comment or a quoted name is not counted. Without the finding only the engine refuses the text, at the deploy | Go to the line that the message names: remove the `)` that closes nothing, or add the `)` that is missing. No allow line exists for this finding. A merged migration cannot be corrected (`CHN004`): withdraw and replace it by pull request (`docs/setup.md`, section 7, "Withdraw and replace a merged migration"). A migration whose line of `migrations/migrations.sum` says `withdrawn` is not reported, so that pull request and every later one pass. A repository that held such a merged migration before the tool had this rule gets the finding from `lint`, `verify` and `build` until the migration is withdrawn |
 
 Files of one revision.
 
@@ -530,6 +541,29 @@ blocked for longer than the timeout.
    stages. Options for the next day: move the statement to a non-transactional migration with
    `ONLINE = ON`; or agree a window with the application owner.
 
+### Syntax check warnings of a deploy
+
+`report.json` of a deploy (key `warnings`) and the job summary can hold one of three notes about
+the syntax check (`SET PARSEONLY ON`). None of them stops the deploy. `plan.json` records the
+check in the key `syntax_check` (`ran`, `skipped` or null).
+
+| Note | When | What to do |
+|---|---|---|
+| `... was skipped: this run has no second session` | A plan job, or a deploy with `--inline-plan`, that could not open the second session | The engine did not parse the texts before the deploy. A syntax error then ends as 21 `BATCH_FAILED`, rolled back. |
+| `... was skipped: the plan job had no second session, and the deploy of an approved plan does not run the check` | A deploy with `--expect-plan-file`, and `plan.json` says `"syntax_check": "skipped"` | The same |
+| `... is not proven: the approved plan does not record that the plan job ran it, and the deploy of an approved plan does not run the check` | A deploy with `--expect-plan-file`, and `plan.json` has no key `syntax_check`: an older tool wrote the file | Plan and deploy with one tool version (PROMOTE) |
+
+A deploy of an approved plan whose plan job ran the check has no such note. The key is not part of
+`plan_sha256`: it is as good as the plan file. So `report.json` of a deploy says where the fact
+comes from, in its key `syntax_check`:
+
+| `syntax_check` of `report.json` | Meaning |
+|---|---|
+| `ran in this run` | `--inline-plan`: this run parsed the texts on its second session |
+| `ran in the plan job (read from plan.json; not in plan_sha256)` | `--expect-plan-file`: the plan file says `ran`. This run did not parse the texts. A plan file whose key was changed by hand gives the same value |
+| `skipped` | The texts were not parsed, or the plan file does not say. A note of `warnings` says which |
+| `null` | The run had no unit of work, so no text to parse; or it stopped before the plan was computed |
+
 ### Stale plan
 
 Exit 22 `STALE_PLAN`, in the deploy job, before any batch. Between the plan job and the deploy job
@@ -655,9 +689,13 @@ database is at the release, and the recorded release number is still the old one
 
 ### Catch-up after a withdraw-and-replace
 
-A migration M failed in an environment and was withdrawn; a later release holds its replacement.
-The releases from the one that added M up to the one before the withdrawal still hold M as a
-normal migration. A database that never applied M cannot take those releases: each would run M.
+A migration M failed in an environment and was withdrawn. The release of the withdrawal holds
+its replacement, or no replacement: then the corrected change comes later as a normal migration
+(`docs/setup.md`, section 7, "Withdraw and replace a merged migration"). The releases from the
+one that added M up to the one before the withdrawal still hold M as a normal migration. A
+database that never applied M cannot take those releases: each would run M. This is also the way
+out when a failed release blocks later releases that change other objects: those releases wait
+with `CATCHUP_REQUIRED` until M is withdrawn.
 
 1. `CATCHUP_REQUIRED` names r<k>. If r<k> is older than the release that added M, promote it:
    `gh workflow run db.yml --ref main -f release=r<k> -f from_stage=<stage>`
@@ -738,6 +776,27 @@ and after it the newer release.
 
 A newer release was approved first. Reject the pending approval of the older one. If it is approved
 by mistake, the deploy answers exit 0 `ALREADY_PAST`, or exit 22 `STALE_PLAN`, and sends no batch.
+
+## State tables
+
+The script of `azsqlcd setup-sql` creates schema `azsqlcd` (owner `dbo`) with four tables. Read
+them with LOOK. Never change them by hand.
+
+| Table | Key | One row for |
+|---|---|---|
+| `azsqlcd.meta` | `id` (always 1: the table has one row) | The binding of the database: `state_version`, `project`, `environment` |
+| `azsqlcd.run` | `run_id` (identity) | Each deploy, baseline and resolve: status, `segments_committed`, `release_seq`, `git_sha`, `manifest_sha256`, `plan_sha256`, tool version and digest, times, `principal_name` |
+| `azsqlcd.step` | `step_id` (identity); `run_id` names the run; `migration_id` is unique when it is not NULL | Each step of a run: kind `baseline`, `migration`, `nontx`, `modules` or `resolve` |
+| `azsqlcd.object` | `object_key` | Each managed object: status, `source_sha256`, the catalog capture and its sha256, and the `run_id` that recorded it |
+
+`azsqlcd.run.manifest_sha256` is the digest of the release. The digest is the sha256 of the file
+`manifest.json`. The manifest holds four things and nothing else: the commit (`commit`), the
+release number (`release_seq`), the path and the sha256 of each file of the release (`files`), and
+for each line of `migrations/migrations.sum` the number of the release that added it (`chain_added_in`). It
+holds no tool version, so two tool versions give one digest for one commit.
+
+`principal_name` is the name that the engine gives for the session. With SQL authentication it is
+the login name. The tool never reads the column back.
 
 ## Audit
 

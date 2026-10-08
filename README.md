@@ -47,7 +47,8 @@ What did not run: any production use; any workflow step after the Azure login on
 against a database (the unit tests pass on the Windows runners of `ci.yml`), or on Python 3.14
 against a database, or on the runner image; the role path of `setup-sql` for environments that
 share one identity; the spike items L8 (second database), L12, L13, L14; a loss of the network
-during COMMIT. The everyday work and the onboarding through the command line ran before the last
+during COMMIT; the sign-in with a managed identity and the sign-in with SQL authentication
+(unit tests only: `docs/known-gaps.md`, section 13). The everyday work and the onboarding through the command line ran before the last
 fix wave and were not repeated on the final commit: the tree holds changes made after those
 runs, and has not run against a database as a whole.
 
