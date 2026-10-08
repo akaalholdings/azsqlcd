@@ -1,10 +1,12 @@
 """azsqlcd.toml: every key is known and checked, and the file holds no secrets."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
 from azsqlcd.config import (
+    DEFAULT_MODULE_CHUNK,
     DEFAULT_SERVER_SUFFIXES,
     ENVIRONMENTS,
     Target,
@@ -14,6 +16,7 @@ from azsqlcd.config import (
 )
 from azsqlcd.errors import Exit, ToolError
 
+REPO = Path(__file__).resolve().parents[2]
 TENANT = "11111111-2222-3333-4444-555555555555"
 NONPROD_PLAN = "aaaaaaaa-0000-0000-0000-000000000001"
 NONPROD_DEPLOY = "aaaaaaaa-0000-0000-0000-000000000002"
@@ -306,6 +309,7 @@ def test_targets_matrix_gives_one_row_per_target_with_the_client_ids_resolved():
             "deploy_client_id": PROD_DEPLOY,
             "tenant_id": TENANT,
             "gated": True,
+            "auth": "oidc",
         },
         {
             "id": "sales-prod-eu",
@@ -315,12 +319,140 @@ def test_targets_matrix_gives_one_row_per_target_with_the_client_ids_resolved():
             "deploy_client_id": PROD_DEPLOY,
             "tenant_id": TENANT,
             "gated": True,
+            "auth": "oidc",
         },
     ]
     dev = targets_matrix(load_config(VALID), "dev")
     assert [(row["id"], row["deploy_client_id"], row["gated"]) for row in dev] == [
         ("sales-dev", NONPROD_DEPLOY, False)
     ]
+
+
+# ------------------------------------------------------------------ how the workflows sign in
+def test_an_environment_signs_in_with_oidc_unless_the_file_says_managed_identity():
+    config = load_config(VALID)
+    assert [environment.auth for environment in config.env.values()] == ["oidc", "oidc"]
+    explicit = load_config(VALID.replace('drift = "block"', 'drift = "block"\nauth = "oidc"'))
+    assert explicit == config  # the key with its default value changes nothing
+    managed = load_config(VALID.replace('drift = "block"', 'drift = "block"\nauth = "managed-identity"'))
+    assert (managed.env["dev"].auth, managed.env["prod"].auth) == ("oidc", "managed-identity")
+    assert dataclasses.replace(managed.env["prod"], auth="oidc") == config.env["prod"]
+
+
+def test_the_matrix_row_of_every_target_says_how_its_environment_signs_in():
+    text = VALID.replace('drift = "block"', 'drift = "block"\nauth = "managed-identity"')
+    before, after = targets_matrix(load_config(VALID), "prod"), targets_matrix(load_config(text), "prod")
+    assert [row["auth"] for row in after] == ["managed-identity", "managed-identity"]
+    # the identities of a row are the same ones: only the way to get their token differs
+    assert [{**row, "auth": "oidc"} for row in after] == before
+    assert [row["auth"] for row in targets_matrix(load_config(text), "dev")] == ["oidc"]
+
+
+@pytest.mark.parametrize(
+    "bad", ['"sql"', '"entra"', '"Managed-Identity"', '"managed_identity"', '""', "true", "1"]
+)
+def test_an_environment_takes_no_other_way_to_sign_in(bad):
+    """SQL authentication is for a workstation (AZSQLCD_AUTH): a workflow never gets it from the file."""
+    with pytest.raises(ToolError) as e:
+        load_config(VALID.replace('drift = "block"', f'drift = "block"\nauth = {bad}'))
+    assert (e.value.reason_code, e.value.detail["key"]) == ("CONFIG_INVALID", "env.prod.auth")
+    assert "'oidc' or 'managed-identity'" in e.value.message
+
+
+# ------------------------------------------------------------------ pilot: a file that is made by hand
+def test_module_chunk_is_optional_and_its_default_is_the_value_of_the_template():
+    assert "module_chunk = 100\n" in VALID
+    config = load_config(VALID.replace("module_chunk = 100\n", ""))
+    assert config.project.module_chunk == DEFAULT_MODULE_CHUNK == 100
+    assert config == load_config(VALID)
+    template = (REPO / "templates" / "db-repo" / "azsqlcd.toml").read_text(encoding="utf-8")
+    assert f"module_chunk = {DEFAULT_MODULE_CHUNK} " in template
+    assert load_config(VALID.replace("module_chunk = 100", "module_chunk = 7")).project.module_chunk == 7
+
+
+REQUIRED = [
+    ("project", "name", 'name = "sales"\n'),
+    ("project", "tenant_id", f'tenant_id = "{TENANT}"\n'),
+    ("project", "table_model", "table_model = false\n"),
+    ("project", "min_token_minutes", "min_token_minutes = 20\n"),
+    ("env.dev", "plan_identity", 'plan_identity = "nonprod_plan"\n'),
+    ("env.dev", "deploy_identity", 'deploy_identity = "nonprod_deploy"\n'),
+    ("env.dev", "drift", 'drift = "report"\n'),
+    ("env.dev", "lock_timeout_ms", "lock_timeout_ms = 30000\n"),
+    ("env.dev", "applock_wait_s", "applock_wait_s = 600\n"),
+    ("env.dev", "job_timeout_minutes", "job_timeout_minutes = 120\n"),
+    (
+        "env.dev",
+        "targets",
+        'targets = [{ id = "sales-dev", server = "sql-sales-dev.database.windows.net", '
+        'database = "sales" }]\n',
+    ),
+]
+
+
+@pytest.mark.parametrize(("table", "key", "line"), REQUIRED)
+def test_a_missing_required_key_names_the_key_the_table_and_one_example_line(table, key, line):
+    """Pilot: a file that was made by hand lacked a key, and the message said only `is missing`."""
+    assert VALID.count(line) >= 1
+    broken = VALID.replace(line, "", 1)
+    with pytest.raises(ToolError) as e:
+        load_config(broken)
+    message = e.value.message
+    assert (e.value.reason_code, e.value.detail["key"]) == ("CONFIG_INVALID", f"{table}.{key}")
+    assert message.startswith(
+        f"azsqlcd.toml: {table}.{key}: is missing. Add the key {key} to the table [{table}]"
+    )
+    example = message.rpartition(", for example: ")[2]
+    assert example.startswith(f"{key} = ")
+    # the example is a line that the file takes: with it in the table, the file loads
+    load_config(broken.replace(f"[{table}]\n", f"[{table}]\n{example}\n", 1))
+
+
+@pytest.mark.parametrize("key", ["id", "server", "database"])
+def test_a_missing_key_of_a_target_shows_a_whole_target(key):
+    start = VALID.index('targets = [{ id = "sales-dev"')
+    line = VALID[start : VALID.index("\n", start)]
+    part = {"id": 'id = "sales-dev", ', "server": 'server = "sql-sales-dev.database.windows.net", '}.get(
+        key, ', database = "sales"'
+    )
+    with pytest.raises(ToolError) as e:
+        load_config(VALID.replace(line, line.replace(part, ""), 1))
+    message = e.value.message
+    assert e.value.detail["key"] == f"env.dev.targets[0].{key}"
+    assert f"Add the key {key} to the target env.dev.targets[0], for example: targets = [{{ id = " in message
+    example = message.rpartition(", for example: ")[2]
+    load_config(VALID.replace(line, example.replace("example-dev", "sales-dev"), 1))
+
+
+@pytest.mark.parametrize(
+    ("table", "example"), [("project", "[project]"), ("identities", "[identities]"), ("env", "[env.dev]")]
+)
+def test_a_missing_table_names_the_table_and_its_first_line(table, example):
+    without = {"project": VALID[VALID.index("[identities]") :], "identities": None, "env": None}[table]
+    if table == "identities":
+        without = VALID[: VALID.index("[identities]")] + VALID[VALID.index("[env.dev]") :]
+    elif table == "env":
+        without = VALID[: VALID.index("[env.dev]")]
+    with pytest.raises(ToolError) as e:
+        load_config(without)
+    assert e.value.detail["key"] == table
+    assert e.value.message == (
+        f"azsqlcd.toml: {table}: is missing. The file needs the table [{table}], for example the line: "
+        f"{example}"
+    )
+
+
+def test_every_required_key_has_an_example_and_a_safety_setting_has_no_default():
+    for table, key, line in REQUIRED:
+        assert VALID.count(line) >= 1, (table, key)
+    # these four decide what a deploy may do: a file that lacks one is refused, never completed
+    for line in (
+        "table_model = false\n",
+        "min_token_minutes = 20\n",
+        'drift = "report"\n',
+        "lock_timeout_ms = 30000\n",
+    ):
+        assert refused_key(VALID.replace(line, "", 1)) != ""
 
 
 def test_targets_matrix_refuses_an_environment_that_the_file_does_not_define():

@@ -1280,7 +1280,12 @@ def test_onboard_uploads_the_result_after_a_tool_failure_and_not_after_a_failed_
     (login,) = [s for s in steps if s.get("uses", "").startswith("azure/login@")]
     (upload,) = result_uploads(steps)
     assert upload["with"]["if-no-files-found"] == "error"
-    assert upload["if"] == f"${{{{ always() && steps.{login['id']}.outcome == 'success' }}}}"
+    # 'skipped' with a managed identity: no login step runs, and the tool signs in itself
+    outcome, row = f"steps.{login['id']}.outcome", "fromJSON(needs.targets.outputs.target)"
+    assert " ".join(upload["if"].split()) == (
+        f"${{{{ always() && ({outcome} == 'success' || "
+        f"({outcome} == 'skipped' && {row}.auth == 'managed-identity')) }}}}"
+    )
 
 
 def test_drift_uses_the_plan_identity_and_cannot_write_to_the_repository():
@@ -1685,3 +1690,174 @@ def test_the_log_artefact_is_not_read_by_the_jobs_that_collect_plans_and_reports
     for _, job_id, _ in database_jobs():
         name = f"azsqlcd-logs-prod-sales-{job_id}"
         assert not name.startswith(("plan-", "report-"))
+
+
+# ----------------------------------------------------------------------------- OIDC or a managed identity
+# The identity of each job that opens a database session. A job of a plan environment runs before
+# the approval: it never gets the identity that can write.
+SIGN_IN = {
+    "stage.yml: plan": "plan_client_id",
+    "stage.yml: deploy": "deploy_client_id",
+    "drift.yml: drift": "plan_client_id",
+    "onboard.yml: read": "plan_client_id",
+    "onboard.yml: baseline": "deploy_client_id",
+    "resolve.yml: resolve": "deploy_client_id",
+}
+ROW = re.compile(r"(?:matrix\.target|fromJSON\(needs\.targets\.outputs\.target\))\.([a-z_]+)")
+PLAN_ID, DEPLOY_ID = "00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000b"
+
+
+def matrix_row(auth: str | None) -> dict[str, Any]:
+    row: dict[str, Any] = {"id": "sales-a", "plan_client_id": PLAN_ID, "deploy_client_id": DEPLOY_ID}
+    return row | {"tenant_id": "t", "gated": True} | ({} if auth is None else {"auth": auth})
+
+
+def value_of(expression: str, row: dict[str, Any], **steps: str) -> Any:
+    """What an expression of these files gives for a matrix row. `&&` and `||` give one of their
+    operands, as in Python; a key that the row does not hold is the empty string."""
+    inner = re.fullmatch(r"\$\{\{ (.*) \}\}", expression)
+    assert inner, expression
+    text = ROW.sub(lambda found: repr(row.get(found.group(1), "")), inner.group(1))
+    text = re.sub(r"steps\.([a-z]+)\.outcome", lambda found: repr(steps[found.group(1)]), text)
+    text = text.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
+    assert re.fullmatch(r"[A-Za-z0-9 '()=!_-]*", text), text  # only literals and operators are left
+    return eval(text, {"__builtins__": {}}, {})  # noqa: S307
+
+
+def sign_in_jobs() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """(where, job, its azure/login step) of every job that runs a database command."""
+    found = []
+    for path, job_id, job in database_jobs():
+        (login,) = [step for step in job["steps"] if step.get("uses", "").startswith("azure/login@")]
+        found.append((f"{path.name}: {job_id}", job, login))
+    return found
+
+
+def test_every_database_job_has_one_sign_in_and_the_table_of_this_file_names_its_identity():
+    assert {where for where, _, _ in sign_in_jobs()} == set(SIGN_IN)
+    for where, job, login in sign_in_jobs():
+        plan_environment = job["environment"].endswith("-plan")
+        assert SIGN_IN[where] == ("plan_client_id" if plan_environment else "deploy_client_id"), where
+        assert ROW.findall(login["with"]["client-id"]) == [SIGN_IN[where]], where
+
+
+@pytest.mark.parametrize("auth", ["oidc", None])
+def test_with_oidc_the_azure_login_step_runs_and_the_tool_reads_the_azure_cli_session(auth):
+    """None: a matrix row of a tool version that did not write the key. It signs in as before."""
+    row = matrix_row(auth)
+    for where, job, login in sign_in_jobs():
+        assert value_of(login["if"], row) is True, where
+        assert value_of(login["with"]["client-id"], row) == row[SIGN_IN[where]], where
+        assert value_of(job["env"]["AZSQLCD_AUTH"], row) == "entra", where
+        assert value_of(job["env"]["AZSQLCD_MANAGED_IDENTITY_CLIENT_ID"], row) == "", where
+
+
+def test_with_a_managed_identity_no_azure_login_runs_and_the_tool_gets_the_identity_of_the_job():
+    row = matrix_row("managed-identity")
+    for where, job, login in sign_in_jobs():
+        assert value_of(login["if"], row) is False, where
+        assert value_of(job["env"]["AZSQLCD_AUTH"], row) == "managed-identity", where
+        # the same identity that azure/login gets with OIDC: plan for a read, deploy for a write
+        assert value_of(job["env"]["AZSQLCD_MANAGED_IDENTITY_CLIENT_ID"], row) == row[SIGN_IN[where]], where
+        assert ROW.findall(job["env"]["AZSQLCD_MANAGED_IDENTITY_CLIENT_ID"]) == [
+            "auth",
+            *ROW.findall(login["with"]["client-id"]),
+        ], where
+
+
+def test_no_job_of_a_plan_environment_can_name_the_deploy_identity_in_either_way_to_sign_in():
+    for where, job, _ in sign_in_jobs():
+        if SIGN_IN[where] == "plan_client_id":
+            assert "deploy_client_id" not in json.dumps(job), where
+        else:
+            assert "plan_client_id" not in json.dumps(job), where
+
+
+def test_the_sign_in_of_a_job_is_set_for_the_whole_job_before_any_database_command():
+    """The variables are in `env:` of the job, as AZSQLCD_LOG_DIR is: every step of the job gets
+    them, also the steps of the composite action. No step sets them again, and no value of the
+    matrix reaches a script or an argument of the tool."""
+    from azsqlcd import config, session
+
+    for where, job, login in sign_in_jobs():
+        steps = job["steps"]
+        first_tool = min(at for at, step in enumerate(steps) if step.get("uses", "").startswith(OWN + "@"))
+        assert steps.index(login) < first_tool, where
+        names = {session.AUTH_VARIABLE, session.MANAGED_IDENTITY_CLIENT_ID_VARIABLE}
+        assert names < set(job["env"]), where
+        for step in steps:
+            assert not names & set(step.get("env") or {}), where
+            assert "auth" not in ROW.findall(json.dumps(step.get("with") or {})), where
+        # the words of the expressions are the ones of the tool
+        text = job["env"][session.AUTH_VARIABLE] + login["if"]
+        assert set(re.findall(r"'([a-z-]+)'", text)) == {config.AUTH_MANAGED_IDENTITY, session.AUTH_ENTRA}
+        assert config.AUTH_MANAGED_IDENTITY == session.AUTH_MANAGED_IDENTITY
+    # SQL authentication is for a workstation: no file of the pipeline can ask for it
+    for path in YAML_FILES:
+        text = path.read_text(encoding="utf-8")
+        assert "AZSQLCD_SQL" not in text and "'sql'" not in text, rel(path)
+
+
+def test_a_job_that_can_sign_in_keeps_the_permission_for_oidc():
+    for where, job, _ in sign_in_jobs():
+        assert permissions(job).get("id-token") == "write", where
+
+
+@pytest.mark.parametrize(
+    ("login", "auth", "uploads"),
+    [
+        ("success", "oidc", True),
+        ("failure", "oidc", False),
+        ("skipped", "oidc", False),  # a step before the login failed: the tool did not run
+        ("skipped", "managed-identity", True),  # no login step runs: the tool signs in itself
+    ],
+)
+def test_onboard_uploads_the_result_when_the_tool_can_have_run(login, auth, uploads):
+    steps = jobs(WORKFLOWS / "onboard.yml")["read"]["steps"]
+    (upload,) = result_uploads(steps)
+    expression = " ".join(upload["if"].split())
+    assert bool(value_of(expression, matrix_row(auth), login=login)) is uploads
+
+
+def test_the_template_and_the_example_sign_in_with_oidc_and_their_workflows_hold_no_sign_in():
+    from azsqlcd.config import load_config, targets_matrix
+
+    for folder in (TEMPLATE, REPO / "examples" / "demo-db"):
+        text = (folder / "azsqlcd.toml").read_text(encoding="utf-8")
+        config = load_config(text)
+        assert {environment.auth for environment in config.env.values()} == {"oidc"}, folder.name
+        assert all(row["auth"] == "oidc" for stage in STAGES for row in targets_matrix(config, stage))
+        assert "managed-identity" in text  # a comment says what the other value is
+        for path in sorted((folder / ".github" / "workflows").glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            assert "AZSQLCD_AUTH" not in workflow and "azure/login" not in workflow, rel(path)
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("env", "told"),
+    [
+        ({"AZSQLCD_AUTH": "not-a-sign-in"}, "AUTH_INVALID: AZSQLCD_AUTH must be one of"),
+        (
+            {"AZSQLCD_AUTH": "managed-identity", "AZSQLCD_MANAGED_IDENTITY_CLIENT_ID": "not-a-guid"},
+            "AUTH_INVALID: AZSQLCD_MANAGED_IDENTITY_CLIENT_ID must be a GUID",
+        ),
+    ],
+)
+def test_a_variable_of_the_job_reaches_the_tool_through_the_composite_action(tmp_path: Path, env, told):
+    """The action sets its own variables in `env:` of its step and passes the rest of the
+    environment on. The tool is run for real here, and it stops on the value before it reads the
+    release: so it read the variable."""
+    script = step_script(REPO / "action.yml", "action", "run")
+    args = "plan\n--bundle\nnone\n--digest\nd\n--env\ndev\n--target\nt\n--out\nplan\n--no-log\n"
+    base = {
+        "AZSQLCD_ARGS": args,
+        "AZSQLCD_DB": "true",
+        "GITHUB_ACTION_PATH": str(REPO),
+        "REAL_PYTHON": sys.executable,
+    }
+
+    done = run_step(script, tmp_path, base | env, {"uv": UV_THAT_RUNS_PYTHON})
+
+    assert done.returncode == 22, done.stdout + done.stderr
+    assert told in done.stdout

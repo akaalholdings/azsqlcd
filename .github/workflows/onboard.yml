@@ -122,6 +122,12 @@ jobs:
     # Every database command of the job writes its triage log here (docs/triage.md).
     env:
       AZSQLCD_LOG_DIR: azsqlcd-logs
+      # How the tool signs in. `auth = "managed-identity"` of the environment in azsqlcd.toml:
+      # the step azure/login does not run, and the tool asks the managed identity of the runner
+      # for the token of the plan identity. Else: the Azure CLI session of azure/login (OIDC).
+      AZSQLCD_AUTH: ${{ fromJSON(needs.targets.outputs.target).auth == 'managed-identity' && 'managed-identity' || 'entra' }}
+      AZSQLCD_MANAGED_IDENTITY_CLIENT_ID: >-
+        ${{ fromJSON(needs.targets.outputs.target).auth == 'managed-identity' && fromJSON(needs.targets.outputs.target).plan_client_id || '' }}
     steps:
       # The files of the release commit: azsqlcd.toml for export, onboarding/ for the report.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -139,6 +145,7 @@ jobs:
           if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
           gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
       - id: login
+        if: ${{ fromJSON(needs.targets.outputs.target).auth != 'managed-identity' }}
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ fromJSON(needs.targets.outputs.target).plan_client_id }}
@@ -181,8 +188,13 @@ jobs:
             github
       # Also after a tool exit that is not 0: the report of a baseline that differs is the result.
       # Not when the login failed: the tool did not run, and "no files" would hide the first error.
+      # With a managed identity the login step is skipped, and the tool signs in itself.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ always() && steps.login.outcome == 'success' }}
+        if: >-
+          ${{
+            always() && (steps.login.outcome == 'success' ||
+            (steps.login.outcome == 'skipped' && fromJSON(needs.targets.outputs.target).auth == 'managed-identity'))
+          }}
         with:
           name: onboard-${{ inputs.action }}-${{ inputs.environment }}-${{ inputs.target }}
           path: ${{ inputs.action == 'export' && 'export' || format('onboarding/{0}', inputs.environment) }}
@@ -210,6 +222,12 @@ jobs:
     # Every database command of the job writes its triage log here (docs/triage.md).
     env:
       AZSQLCD_LOG_DIR: azsqlcd-logs
+      # How the tool signs in. `auth = "managed-identity"` of the environment in azsqlcd.toml:
+      # the step azure/login does not run, and the tool asks the managed identity of the runner
+      # for the token of the deploy identity. Else: the Azure CLI session of azure/login (OIDC).
+      AZSQLCD_AUTH: ${{ fromJSON(needs.targets.outputs.target).auth == 'managed-identity' && 'managed-identity' || 'entra' }}
+      AZSQLCD_MANAGED_IDENTITY_CLIENT_ID: >-
+        ${{ fromJSON(needs.targets.outputs.target).auth == 'managed-identity' && fromJSON(needs.targets.outputs.target).deploy_client_id || '' }}
     steps:
       - name: Download the release
         shell: bash
@@ -221,7 +239,8 @@ jobs:
           name='^r[0-9]+$'
           if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
           gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      - if: ${{ fromJSON(needs.targets.outputs.target).auth != 'managed-identity' }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ fromJSON(needs.targets.outputs.target).deploy_client_id }}
           tenant-id: ${{ fromJSON(needs.targets.outputs.target).tenant_id }}

@@ -70,6 +70,22 @@ live_spike = _load("live_spike")
 live_acceptance = _load("live_acceptance")
 
 
+SIGN_IN_VARIABLES = (
+    "AZSQLCD_AUTH",
+    "AZSQLCD_MANAGED_IDENTITY_CLIENT_ID",
+    "AZSQLCD_SQL_USER",
+    "AZSQLCD_SQL_PASSWORD",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_sign_in_of_the_machine(monkeypatch) -> None:
+    """A workstation can have the sign-in variables of the tool set. No test reads them: a login
+    with the name of an object of a test would be hidden in the log that the test reads."""
+    for name in SIGN_IN_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
 class Sessions:
     """The `connect` of a script: a new FakeSession for each call, all scripted the same way."""
 
@@ -1514,3 +1530,281 @@ def test_the_work_folder_of_the_acceptance_run_is_removed_without_an_error_on_a_
     source = (SCRIPTS / "live_acceptance.py").read_text(encoding="utf-8")
     calls = re.findall(r"TemporaryDirectory\(([^)]*)\)", source)
     assert calls and all("ignore_cleanup_errors=True" in call for call in calls)
+
+
+def test_the_error_texts_of_the_spike_are_recorded_as_the_tool_stores_them_with_no_batch():
+    """tests/fixtures/live/error_texts.json is this output. Its key `redacted` is compared with
+    redact(text): the form with no batch, in which a name as the statement wrote it is redacted.
+    The message of the session that sent the batch can keep such a name."""
+    error = sql_error("[Microsoft][SQL Server]Invalid column name 'b'.").for_batch("SELECT b FROM t;")
+    assert error.message.endswith("Invalid column name 'b'.")
+    facts = live_spike.error_facts(error)
+    assert facts["text"] == "[Microsoft][SQL Server]Invalid column name 'b'."
+    assert facts["redacted"] == "[Microsoft][SQL Server]Invalid column name <redacted>."
+
+
+# ------------------------------------------------------------------ the sign-in of the live scripts
+SQL_USER, SQL_PASSWORD = "deploy_login", "a-password-of-the-test"
+SQL_ENVIRONMENT = {"AZSQLCD_AUTH": "sql", "AZSQLCD_SQL_USER": SQL_USER, "AZSQLCD_SQL_PASSWORD": SQL_PASSWORD}
+
+
+def a_sql_login() -> Any:
+    return live_spike.db.SqlLogin(SQL_USER, SQL_PASSWORD)
+
+
+@pytest.mark.parametrize(
+    ("environ", "kind"),
+    [
+        ({}, "entra"),
+        ({"AZSQLCD_AUTH": "entra"}, "entra"),
+        ({"AZSQLCD_AUTH": "managed-identity"}, "managed-identity"),
+        (SQL_ENVIRONMENT, "sql"),
+    ],
+)
+def test_the_live_scripts_sign_in_as_the_variable_of_the_tool_says(environ, kind):
+    credential = live_spike.live_credential(environ)
+    assert live_spike.db.auth_kind(credential) == kind
+    # one call of az for many connects; the other two sign-ins start no process
+    assert isinstance(credential, live_spike.CachedTokenProvider) is (kind == "entra")
+
+
+def test_a_cached_token_provider_is_of_the_kind_of_the_provider_that_it_asks():
+    assert live_spike.db.auth_kind(live_spike.CachedTokenProvider(None)) == "entra"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {"AZSQLCD_AUTH": "password"},
+        {"AZSQLCD_AUTH": "sql"},
+        SQL_ENVIRONMENT | {"GITHUB_ACTIONS": "true"},
+    ],
+)
+def test_a_live_script_refuses_the_sign_in_that_the_tool_refuses(environ):
+    with pytest.raises(ToolError) as stop:
+        live_spike.live_credential(environ)
+    assert stop.value.reason_code in ("AUTH_INVALID", "SQL_AUTH_MISSING")
+
+
+def test_every_live_script_reads_the_sign_in_from_the_environment_and_names_no_azure_cli_provider():
+    for name in ("live_spike", "live_acceptance", "live_tables"):
+        source = (SCRIPTS / f"{name}.py").read_text(encoding="utf-8")
+        assert "AzureCliTokenProvider" not in source, name
+        assert "live_credential(" in source, name
+        assert "AZSQLCD_AUTH" in source.split('"""')[1], name  # the usage text names the variable
+
+
+def test_l13_is_not_applicable_for_a_sql_login_and_never_a_pass(monkeypatch):
+    def never(*args: Any, **options: Any) -> Any:
+        raise AssertionError("the soak of a token ran for a sign-in that has no token")
+
+    monkeypatch.setattr(live_spike, "live_connect", never)
+    ctx = spike_ctx(FakeSession)
+    ctx.provider = a_sql_login()
+    ctx.options = live_spike.Options(
+        server=SERVER,
+        database=DATABASE,
+        confirm=DATABASE,
+        out=Path("x"),
+        items=(),
+        soak_past_expiry_minutes=90,
+    )
+    result = live_spike.l13_token_soak(ctx)
+    assert (result.id, result.result) == ("L13", "not applicable") == ("L13", live_spike.NOT_APPLICABLE)
+    assert "SQL authentication" in result.observed["reason"]
+    assert SQL_USER not in json.dumps(live_spike.item_json(result, {}))
+    # not a pass of a gate, and not a failure of the run
+    assert live_spike.summary({"L13": result.result})["items"] == {"L13": "not applicable"}
+
+
+def test_the_token_minutes_of_the_first_item_are_none_for_a_sql_login():
+    assert live_spike.token_minutes_left(a_sql_login()) is None
+    assert live_spike.token_minutes_left(None) is None  # the connect function was given by a test
+
+    class Token:
+        def get(self) -> AccessToken:
+            return AccessToken("t", 2**31)
+
+    assert live_spike.token_minutes_left(Token()) > 0
+
+
+def test_x1_does_not_probe_the_token_login_with_a_sql_login(monkeypatch):
+    def never(*args: Any, **options: Any) -> Any:
+        raise AssertionError("the probe of a refused token login ran for a SQL login")
+
+    monkeypatch.setattr(live_spike, "load_driver", never)
+    monkeypatch.setattr(live_spike.db, "open_session", never)
+    _, (ctx, _) = x1_result(monkeypatch, X1_TEXT, provider=a_sql_login())
+    assert "18456 connect to a database that does not exist" not in ctx.fixtures.errors
+
+
+def test_the_recorded_connect_of_the_spike_opens_a_session_without_a_token(monkeypatch):
+    opened: list[tuple[Any, Any]] = []
+    monkeypatch.setattr(live_spike, "load_driver", lambda: "driver")
+    monkeypatch.setattr(
+        live_spike.db, "open_session", lambda driver, keywords, token: opened.append((keywords, token))
+    )
+    log: list[dict[str, Any]] = []
+    keywords = live_spike.db.connection_keywords(SERVER, DATABASE, "app", a_sql_login())
+    live_spike.recording_connect(log)(keywords, None)
+    assert opened == [(keywords, None)] and log[0]["connected"] is True
+    assert SQL_PASSWORD not in json.dumps(log)
+
+
+def test_the_token_life_check_of_the_acceptance_is_not_applicable_for_a_sql_login(monkeypatch):
+    a = new_acceptance()
+    a.provider = a_sql_login()
+
+    def never(*args: Any, **options: Any) -> Any:
+        raise AssertionError("a deploy ran for a check that is not applicable")
+
+    monkeypatch.setattr(live_acceptance.Acceptance, "deploy", never)
+    live_acceptance.token_life_check(a)
+    [check] = a.checks
+    assert (check.result, check.expected, check.seen) == ("not applicable", "24 TOKEN_TOO_SHORT", "")
+    assert check.name == "a token with too little life stops before the connect"
+    assert "SQL authentication has no access token" in check.detail
+
+
+def test_the_token_life_check_of_the_acceptance_runs_for_a_token(monkeypatch):
+    a = new_acceptance()
+    seen: list[Any] = []
+
+    def deploy(self: Any, number: int, **options: Any) -> Any:
+        seen.append(options["provider"])
+        return live_acceptance.Outcome(24, "TOKEN_TOO_SHORT")
+
+    monkeypatch.setattr(live_acceptance.Acceptance, "deploy", deploy)
+    monkeypatch.setattr(live_acceptance.Acceptance, "run_count", lambda self: 0)
+    live_acceptance.token_life_check(a)
+    assert [check.result for check in a.checks] == ["pass"]
+    assert isinstance(seen[0], live_acceptance.ShortLivedToken)
+
+
+def test_a_check_that_is_not_applicable_is_counted_apart_and_is_no_pass_and_no_failure():
+    checks = [
+        live_acceptance.Check("a", "", "pass", "", ""),
+        live_acceptance.Check("b", "", "not applicable", "", ""),
+    ]
+    totals = live_acceptance.totals_of(checks)
+    assert totals == {"pass": 1, "fail": 0, "not run": 0, "not applicable": 1}
+    assert live_acceptance.exit_code_of(totals) == 0
+    assert live_acceptance.exit_code_of(totals | {"fail": 1}) == 1
+    assert live_acceptance.exit_code_of(totals | {"not run": 1}) == 1
+
+
+# L9: catalog reads inside the open transaction. Owner decision: a deploy reads modules by key
+# only; the read of every module (export, baseline) is timed and reported apart
+READ_OF_EVERY_MODULE = "the read of every module, used by export and baseline, took "
+
+
+def l9_connect(connect: Any = FakeSession) -> Any:
+    def scripted() -> FakeSession:
+        session = connect()
+        session.respond("FROM sys.columns", [[(2,)]])
+        session.respond("FROM sys.indexes", [[(1,)]])
+        session.respond("[name] LIKE N'l9[_]%'", [[(0,)]])
+        return session
+
+    return scripted
+
+
+def l9_engine(
+    monkeypatch: Any, *, by_key: float = 0.6, every: float = 0.6, listed: float = 0.2, without_keys: int = 500
+) -> None:
+    """A catalog that answers as the live engine did, and takes this many seconds for each read."""
+    clock = [100.0]
+    real = live_spike.time
+
+    class Clock:  # the clock of the script only: the time module of the test run stays as it is
+        monotonic = staticmethod(lambda: clock[0])
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real, name)
+
+    procedures = [live_spike.key("PROCEDURE", f"l9_p{n}") for n in range(1, live_spike.L9_OBJECTS + 1)]
+    trigger = {"parent": live_spike.obj("l9_t"), "events": {"INSERT": {"is_first": False, "is_last": False}}}
+
+    def capture(session: Any, keys: Any) -> dict[str, dict[str, Any]]:
+        clock[0] += every if keys is None else by_key
+        if keys is not None:
+            return {key: {} for key in keys}
+        return {key: {} for key in procedures[:without_keys]} | {live_spike.key("TRIGGER", "l9_tr"): trigger}
+
+    def list_objects(session: Any) -> list[Any]:
+        clock[0] += listed
+        return [live_spike.catalog.UserObject("TABLE", "azsqlcd_spike", "l9_t", "U")]
+
+    monkeypatch.setattr(live_spike.catalog, "capture_modules", capture)
+    monkeypatch.setattr(live_spike.catalog, "list_user_objects", list_objects)
+    monkeypatch.setattr(live_spike.catalog, "object_exists", lambda session, key: False)
+    monkeypatch.setattr(live_spike, "time", Clock())
+
+
+def l9_result(monkeypatch: Any, **engine: Any) -> Any:
+    l9_engine(monkeypatch, **engine)
+    return live_spike.l9_catalog_in_transaction(spike_ctx(l9_connect()))
+
+
+def test_l9_passes_when_the_reads_are_right_and_every_read_is_within_the_limit(monkeypatch):
+    result = l9_result(monkeypatch)
+    assert result.result == "pass", result.observed
+    assert result.observed["seconds_of_the_deploy_path"] == {
+        "capture_modules(keys)": 0.6,
+        "list_user_objects": 0.2,
+    }
+    assert result.observed["seconds_of_the_read_of_every_module"] == 0.6
+    assert result.note == READ_OF_EVERY_MODULE + "0.6 s"
+    assert result.observed["read_of_every_module"] == result.note
+
+
+def test_l9_passes_when_only_the_read_of_every_module_is_over_the_limit_and_says_so_in_words(monkeypatch):
+    """Pilot: the reads by key took 0.6 s and capture_modules(session, None) took 12 s. No step of
+    a deploy makes that read, so the time under the schema locks of a deploy is the 0.6 s."""
+    result = l9_result(monkeypatch, every=12.0)
+    assert result.result == "pass", result.observed
+    assert result.observed["seconds_of_the_deploy_path"] == {
+        "capture_modules(keys)": 0.6,
+        "list_user_objects": 0.2,
+    }
+    assert result.observed["seconds_of_the_read_of_every_module"] == 12.0
+    assert result.note == (
+        READ_OF_EVERY_MODULE + "12.0 s: more than the limit of 10 s for a read of the deploy path. "
+        "A deploy reads modules by key only, so this time does not decide the item"
+    )
+    assert result.observed["read_of_every_module"] == result.note
+    assert "export and baseline" in result.decides and "does not decide" in result.decides
+
+
+@pytest.mark.parametrize("slow", [{"by_key": 12.0}, {"listed": 10.5}, {"by_key": 11.0, "every": 30.0}])
+def test_l9_is_inconclusive_when_a_read_of_the_deploy_path_is_over_the_limit(monkeypatch, slow):
+    result = l9_result(monkeypatch, **slow)
+    assert result.result == "inconclusive"
+    assert result.note.startswith(READ_OF_EVERY_MODULE)
+
+
+@pytest.mark.parametrize("times", [{}, {"every": 12.0}, {"by_key": 12.0}])
+def test_l9_fails_when_a_read_does_not_show_the_objects_of_the_open_transaction(monkeypatch, times):
+    assert l9_result(monkeypatch, without_keys=499, **times).result == "fail"
+
+
+def test_the_limit_of_l9_is_ten_seconds_and_the_two_deploy_reads_are_the_ones_a_deploy_makes():
+    assert live_spike.L9_MAX_SECONDS == 10.0  # owner decision: the limit stays
+    # the read without keys is not in the planner and not in the runner
+    for module in (plan, runner):
+        calls = re.findall(r"catalog\.capture_modules\(\s*[\w.]+,\s*([^)\n]*)", inspect.getsource(module))
+        assert calls and not [call for call in calls if call.strip().startswith("None")], module.__name__
+
+
+def test_a_pass_of_l9_with_a_slow_read_of_every_module_is_printed_and_written_with_its_note(
+    monkeypatch, tmp_path, capsys
+):
+    l9_engine(monkeypatch, every=12.0)
+    assert spike(tmp_path, l9_connect(Sessions()), items="L9,L13") == 0
+    out = capsys.readouterr().out
+    assert "L9: pass" in out and f"L9 note: {READ_OF_EVERY_MODULE}12.0 s: more than the limit" in out
+    item = json.loads((tmp_path / "spike" / "L9.json").read_text(encoding="utf-8"))
+    assert (item["result"], item["note"]) == ("pass", item["observed"]["read_of_every_module"])
+    # an item with nothing to add keeps the keys that it had
+    other = json.loads((tmp_path / "spike" / "L13.json").read_text(encoding="utf-8"))
+    assert set(other) == {"id", "title", "result", "observed", "decides"}

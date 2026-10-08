@@ -31,6 +31,13 @@ lock_timeout_ms = 30000           # SET LOCK_TIMEOUT of the deploy session
 applock_wait_s = 600              # wait for another run that holds the deploy lock
 job_timeout_minutes = 120         # lower limit of the deploy job timeout
 gated = false                     # must equal `gated` of this stage in .github/workflows/db.yml
+# auth: how the jobs of the workflows sign in for this environment. "oidc" (the default): the step
+# azure/login signs the Azure CLI in. "managed-identity": the tool asks the managed identity of the
+# self-hosted runner for the token; the two client ids of the environment are then those of
+# user-assigned identities of the runner. Every job on a runner can use the identities of that
+# runner: the approval of a GitHub environment does not guard them. Give the deploy identity only
+# to runners that no other workflow can use.
+# auth = "oidc"
 targets = [{ id = "example-dev", server = "sql-example-dev.database.windows.net", database = "example" }]
 
 [env.sandbox]

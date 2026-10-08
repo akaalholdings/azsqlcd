@@ -391,6 +391,35 @@ def test_the_catch_up_refusal_names_the_way_out_for_a_release_that_fails_on_a_mo
     assert "withdraw the migration" in error.message and "REPLACEMENT_EDGE" in error.message
 
 
+def test_the_catch_up_refusal_gives_both_cases_in_plain_words_and_keeps_its_detail():
+    """Pilot finding: r5 failed on its migration, and the plans of the later releases said only
+    "promote r5 first", which cannot pass. The message named the withdrawal only for a migration
+    that is not wrong. It now gives the two cases: the release can run, or its migration fails."""
+    b = bundle(mig(M1, added=4), mig(M2, added=5), mig(M3, added=7), seq=7)
+    error = refusal(pending_work, b, recorded(steps=applied(b, M1), seq=4), 100)
+    assert error.reason_code == "CATCHUP_REQUIRED" and error.message == (
+        "promote r5 first: this database has pending migrations that earlier releases added, and r7 "
+        "applies only the migrations that it added. There are two cases. (1) r5 can still be deployed "
+        "here: promote it, then each later release in its turn. (2) r5 cannot be deployed here, because "
+        "its migration fails (21 BATCH_FAILED), or because a module fails after a correct migration (21 "
+        "DEPENDANT_BROKEN, or 21 BATCH_FAILED at a refresh step): withdraw the migration by pull request "
+        "(the word withdrawn on its line of migrations/migrations.sum). The release that holds the "
+        "withdrawal carries the pending migrations of the later releases in one catch-up, and the "
+        "withdrawn migration never runs here. A release that only changes modules cannot take the place "
+        "of r5. The corrected change is a replacement in the pull request of the withdrawal (allow "
+        "REPLACEMENT_EDGE; with the fix of the module when a module was the cause): a database that "
+        "applied the migration of r5 keeps what it has, and every other database runs the replacement. "
+        "A withdrawal with no replacement, and the corrected change as a new migration in a later pull "
+        "request, works only when no database applied the migration of r5 and table_model = true: a "
+        "database that applied it refuses the new migration (21), and with table_model = false the "
+        "withdrawal is refused (CHN006). Such a pull request puts the table files back. The steps: "
+        'docs/setup.md, section "Withdraw and replace a merged migration"'
+    )
+    # the way that works everywhere is named before the way that has conditions
+    assert error.message.index("a replacement in the pull request") < error.message.index("works only when")
+    assert error.detail == {"promote": 5, "release_seq": 7, "pending": {M2: 5, M3: 7}}
+
+
 def test_open_module_work_of_an_earlier_release_never_needs_a_catch_up():
     """The migrations of r6 are applied here (their steps are ok) and only its module work is
     open: the unit of r6 committed and its run did not end ok. r7 is planned; it adds its own
@@ -1288,6 +1317,89 @@ def test_every_pending_batch_and_module_is_parsed_on_the_second_session_after_th
     assert len(texts) == 4 and second.closed
     assert not set(texts.values()) & set(db.batches)
     assert [note for note in result.notes if "PARSEONLY" in note] == []
+
+
+SKIPPED_HERE = "the syntax check (SET PARSEONLY ON) was skipped: this run has no second session"
+
+
+def syntax_notes(result: Plan) -> list[str]:
+    return [note for note in result.notes if "syntax check" in note]
+
+
+def test_a_plan_records_whether_its_syntax_check_ran_and_the_hash_does_not_hold_the_answer():
+    b, st = a_release()
+    checked = planned(b, st, open_second_session=parse_only_session)
+    skipped = planned(b, st)
+    assert (checked.syntax_check, syntax_notes(checked)) == ("ran", [])
+    assert (skipped.syntax_check, syntax_notes(skipped)) == ("skipped", [SKIPPED_HERE])
+    for result in (checked, skipped):
+        assert json.loads(result.to_json())["syntax_check"] == result.syntax_check
+        assert Plan.from_json(result.to_json()) == result
+    # The deploy job computes the plan again under the lock and does not parse the texts a second
+    # time. The hash is what both jobs compute, so a fact of the plan job only cannot be in it
+    assert checked.plan_sha256 == skipped.plan_sha256
+
+
+def test_a_plan_with_nothing_to_send_records_no_syntax_check_and_has_no_note_about_it():
+    b = bundle(mig(M1), seq=7)
+    to_record = planned(b, recorded(steps=applied(b, M1), seq=6))
+    assert (to_record.outcome, to_record.units) == (RECORD, ())
+    assert (to_record.syntax_check, syntax_notes(to_record)) == (None, [])
+
+
+def test_a_plan_file_of_a_tool_that_did_not_record_the_syntax_check_is_read_and_proves_no_check():
+    result = planned(*a_release(), open_second_session=parse_only_session)
+    doc = json.loads(result.to_json())
+    del doc["syntax_check"]  # plan.json as the tool wrote it before the key existed
+    older = Plan.from_json(json.dumps(doc))
+    assert older.syntax_check is None and older.plan_sha256 == result.plan_sha256
+    assert dataclasses.replace(older, syntax_check="ran") == result
+
+
+@pytest.mark.parametrize("value", ["yes", "RAN", "", 1, True])
+def test_a_plan_file_with_another_value_for_the_syntax_check_is_refused(value):
+    doc = json.loads(planned(*a_release(), open_second_session=parse_only_session).to_json())
+    doc["syntax_check"] = value
+    error = refusal(Plan.from_json, json.dumps(doc))
+    assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "PLAN_INVALID")
+    assert "Plan.syntax_check must be " in error.message
+
+
+@pytest.mark.parametrize(
+    ("of_the_plan_job", "recorded_now", "told"),
+    [
+        ("ran", "ran", None),
+        ("skipped", "skipped", "the plan job had no second session"),
+        (None, "skipped", "the approved plan does not record that the plan job ran it"),
+    ],
+)
+def test_under_the_lock_the_plan_says_what_the_plan_job_did_with_the_syntax_check(
+    of_the_plan_job, recorded_now, told
+):
+    """A deploy of an approved plan has no second session by design: the plan job parsed the texts,
+    and the two plans have one hash, so they name the same texts. The note "this run has no second
+    session" was then a warning about a check that ran. It stays for a plan job that did not run it."""
+    b, st = a_release()
+    approved = dataclasses.replace(
+        planned(b, st, open_second_session=parse_only_session), syntax_check=of_the_plan_job
+    )
+    under_the_lock = planned(b, st, lock_held=True, approved_plan=approved)
+    assert under_the_lock.plan_sha256 == approved.plan_sha256
+    assert under_the_lock.syntax_check == recorded_now
+    notes = syntax_notes(under_the_lock)
+    if told is None:
+        assert notes == []
+    else:
+        assert len(notes) == 1 and told in notes[0] and "this run has no second session" not in notes[0]
+        assert notes[0].startswith("the syntax check (SET PARSEONLY ON) ")
+
+
+def test_under_the_lock_a_second_session_runs_the_check_whatever_the_approved_plan_says():
+    b, st = a_release()
+    approved = planned(b, st)  # its plan job had no second session
+    second = parse_only_session()
+    result = planned(b, st, lock_held=True, approved_plan=approved, open_second_session=lambda: second)
+    assert (result.syntax_check, syntax_notes(result)) == ("ran", []) and len(second.batches) == 3 + 4
 
 
 @pytest.mark.parametrize("statement_ran", ["raises", "returns a row"])

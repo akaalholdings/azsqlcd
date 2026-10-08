@@ -107,6 +107,12 @@ jobs:
     # Every database command of the job writes its triage log here (docs/triage.md).
     env:
       AZSQLCD_LOG_DIR: azsqlcd-logs
+      # How the tool signs in. `auth = "managed-identity"` of the environment in azsqlcd.toml:
+      # the step azure/login does not run, and the tool asks the managed identity of the runner
+      # for the token of the plan identity. Else: the Azure CLI session of azure/login (OIDC).
+      AZSQLCD_AUTH: ${{ matrix.target.auth == 'managed-identity' && 'managed-identity' || 'entra' }}
+      AZSQLCD_MANAGED_IDENTITY_CLIENT_ID: >-
+        ${{ matrix.target.auth == 'managed-identity' && matrix.target.plan_client_id || '' }}
     steps:
       - name: Download the release
         shell: bash
@@ -118,7 +124,8 @@ jobs:
           name='^r[0-9]+$'
           if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
           gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      - if: ${{ matrix.target.auth != 'managed-identity' }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ matrix.target.plan_client_id }}
           tenant-id: ${{ matrix.target.tenant_id }}
@@ -246,6 +253,12 @@ jobs:
     # Every database command of the job writes its triage log here (docs/triage.md).
     env:
       AZSQLCD_LOG_DIR: azsqlcd-logs
+      # How the tool signs in. `auth = "managed-identity"` of the environment in azsqlcd.toml:
+      # the step azure/login does not run, and the tool asks the managed identity of the runner
+      # for the token of the deploy identity. Else: the Azure CLI session of azure/login (OIDC).
+      AZSQLCD_AUTH: ${{ matrix.target.auth == 'managed-identity' && 'managed-identity' || 'entra' }}
+      AZSQLCD_MANAGED_IDENTITY_CLIENT_ID: >-
+        ${{ matrix.target.auth == 'managed-identity' && matrix.target.deploy_client_id || '' }}
     steps:
       - name: Download the release
         shell: bash
@@ -283,7 +296,8 @@ jobs:
             echo "approved_by=$approved_by"
             echo "approved_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      - if: ${{ matrix.target.auth != 'managed-identity' }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ matrix.target.deploy_client_id }}
           tenant-id: ${{ matrix.target.tenant_id }}

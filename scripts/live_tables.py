@@ -7,6 +7,7 @@ are wanted: each of the two drops the four state tables of schema [azsqlcd] at i
     az login
     uv run --extra db python scripts/live_tables.py --server S --database D
         --confirm-disposable-database D [--out DIR]                       (one line)
+The sign-in is that of the tool: the variable AZSQLCD_AUTH (see scripts/live_spike.py).
 
 What it does, with the real modules (gen.generate, gen.verify, release.build, plan.compute_plan
 and runner.deploy with tables.Hooks) and the real catalog:
@@ -64,7 +65,7 @@ from azsqlcd.errors import ToolError
 from azsqlcd.plan import Plan
 from azsqlcd.release import Bundle
 from azsqlcd.runner import RunError
-from azsqlcd.session import AzureCliTokenProvider, Session, TokenProvider
+from azsqlcd.session import Session
 from azsqlcd.sqlerrors import SqlError
 
 SCHEMA = "azsqlcd_tm"
@@ -621,7 +622,7 @@ def setup(session: Session, config: Config) -> None:
 
 def run(args: argparse.Namespace) -> int:
     live.refuse_unconfirmed(args.database, args.confirm)
-    provider: TokenProvider = live.CachedTokenProvider(AzureCliTokenProvider())
+    provider = live.live_credential()  # the sign-in of the tool: the variable AZSQLCD_AUTH
     connect = partial(db.connect, args.server, args.database, provider, live.APP_NAME)
     inspector = connect()
     checks: list[acc.Check] = []

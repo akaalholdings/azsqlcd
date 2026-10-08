@@ -496,6 +496,8 @@ def test_a_release_is_one_transaction_under_the_lock_and_the_run_row_records_it(
         steps_applied=(f"{M1}#1", f"{M1}#2", f"module:{NEW}", f"module:{CHANGED}", f"drop:{OLD}"),
         modules_deployed=(NEW, CHANGED),
         modules_dropped=(OLD,),
+        auth="entra",  # the kind of sign-in of the token provider of the test
+        syntax_check="ran in this run",  # --inline-plan: the second session parsed the texts
     )
 
 
@@ -884,6 +886,89 @@ def test_with_an_expected_plan_the_deploy_opens_one_session():
     opened: list = []
     report = run_deploy(b, st, env="prod", expect=plan_job(b, st), opened=opened)
     assert len(opened) == 1 and report.exit_code == 0  # the plan job ran the syntax check
+
+
+def syntax_warnings(report: Report) -> list[str]:
+    return [note for note in report.warnings if "syntax check" in note]
+
+
+def test_a_deploy_of_an_approved_plan_whose_syntax_check_ran_does_not_warn_that_it_was_skipped():
+    """Pilot finding: report.json of every deploy of an approved plan held the warning "the syntax
+    check (SET PARSEONLY ON) was skipped: this run has no second session". The plan job had parsed
+    every text; the deploy has one session by design."""
+    b, st = a_release(env="prod")
+    approved = compute_plan(
+        b,
+        CONFIG,
+        "prod",
+        "sales-prod",
+        Db(b, st),
+        tool_version="0.1.0",
+        tool_digest=TOOL_DIGEST,
+        open_second_session=parse_only_session,
+    )
+    assert approved.syntax_check == "ran"
+    opened: list = []
+    report = run_deploy(b, st, env="prod", expect=Plan.from_json(approved.to_json()), opened=opened)
+    assert (report.exit_code, len(opened), report.plan_sha256) == (0, 1, approved.plan_sha256)
+    assert syntax_warnings(report) == [] and json.loads(report.to_json())["warnings"] == list(report.warnings)
+
+
+def test_a_deploy_of_an_approved_plan_that_was_computed_with_no_second_session_still_warns():
+    b, st = a_release(env="prod")
+    approved = plan_job(b, st)  # no second session: the plan job did not parse the texts
+    assert approved.syntax_check == "skipped"
+    assert "the syntax check (SET PARSEONLY ON) was skipped: this run has no second session" in approved.notes
+    report = run_deploy(b, st, env="prod", expect=approved)
+    assert report.exit_code == 0 and syntax_warnings(report) == [
+        "the syntax check (SET PARSEONLY ON) was skipped: the plan job had no second session, and the "
+        "deploy of an approved plan does not run the check"
+    ]
+
+
+def test_a_deploy_of_a_plan_file_that_does_not_record_the_syntax_check_warns_that_it_is_not_proven():
+    b, st = a_release(env="prod")
+    doc = json.loads(plan_job(b, st).to_json())
+    del doc["syntax_check"]  # plan.json of a tool that did not write the key
+    report = run_deploy(b, st, env="prod", expect=Plan.from_json(json.dumps(doc)))
+    assert report.exit_code == 0 and syntax_warnings(report) == [
+        "the syntax check (SET PARSEONLY ON) is not proven: the approved plan does not record that the "
+        "plan job ran it, and the deploy of an approved plan does not run the check"
+    ]
+
+
+def test_the_report_says_where_the_fact_of_the_syntax_check_comes_from():
+    """plan.json is covered by plan_sha256 but for its key syntax_check. A file whose key was
+    changed from skipped to ran gives a deploy with no warning. The report must not be silent
+    then: it says that the check is a statement of the plan file, not a check of this run."""
+    b, st = a_release(env="prod")
+    skipped = plan_job(b, st)  # no second session: nothing was parsed
+    doc = json.loads(skipped.to_json())
+    doc["syntax_check"] = "ran"
+    doc["notes"] = [note for note in doc["notes"] if "syntax check" not in note]
+    changed = Plan.from_json(json.dumps(doc))  # the hash does not cover the key: the file reads
+    assert changed.plan_sha256 == skipped.plan_sha256
+
+    report = run_deploy(b, st, env="prod", expect=changed)
+
+    assert report.exit_code == 0 and syntax_warnings(report) == []
+    assert report.syntax_check == "ran in the plan job (read from plan.json; not in plan_sha256)"
+    assert json.loads(report.to_json())["syntax_check"] == report.syntax_check
+    assert report.syntax_check == runner.SYNTAX_OF_PLAN_FILE
+
+
+def test_the_report_names_a_syntax_check_of_its_own_run_a_skipped_one_and_none():
+    b, st = a_release()
+    inline = run_deploy(b, st, opened=[])  # --inline-plan: the check runs here, on a second session
+    assert inline.syntax_check == "ran in this run"
+    b, st = a_release(env="prod")
+    assert run_deploy(b, st, env="prod", expect=plan_job(b, st)).syntax_check == "skipped"
+    doc = json.loads(plan_job(b, st).to_json())
+    del doc["syntax_check"]
+    assert run_deploy(b, st, env="prod", expect=Plan.from_json(json.dumps(doc))).syntax_check == "skipped"
+    # a run with no unit of work has no text to parse: None (test_scenarios.py reads it from a
+    # deploy that only records a release)
+    assert dataclasses.fields(Report)[-2].name == "syntax_check" and Report.syntax_check is None
 
 
 @pytest.mark.parametrize(
@@ -1998,6 +2083,8 @@ def test_the_report_is_json_with_the_server_time_of_the_run():
         "modules_dropped": [OLD],
         "failed_step": None,
         "warnings": list(report.warnings),
+        "auth": "entra",  # the kind of sign-in of the token provider of the test
+        "syntax_check": "ran in this run",  # --inline-plan: the second session parsed the texts
     }
     assert report.to_json().endswith("}\n") and any(
         "tables are not modelled" in note for note in report.warnings

@@ -9,7 +9,10 @@ This is the only module of the tool that prints. What it holds to:
     message is printed redacted (A25). `--show-error-text` prints the full message, and is
     refused for prod;
   - an offline command imports no driver. A session is opened only by a database command, with
-    the token of the Azure CLI login;
+    the sign-in that the variable AZSQLCD_AUTH names: the token of the Azure CLI login (the
+    default), the token of a managed identity, or a SQL login of the environment, which is
+    refused in GitHub Actions. The plan, the report and the log name the kind of sign-in, never
+    a login or a client id;
   - the exit code tells what happened to the database. A report file that cannot be written
     after the run is a warning on stderr and changes no exit code;
   - a command that opens a session writes a triage log (module trace): one file per call, with
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import inspect
 import json
 import os
@@ -51,7 +55,16 @@ from azsqlcd import (
 )
 from azsqlcd.config import Config, load_config, resolve_target, targets_matrix
 from azsqlcd.errors import Exit, ToolError, refused, retry_safe, unknown
-from azsqlcd.session import AzureCliTokenProvider, Session, TokenProvider, connect
+from azsqlcd.session import (
+    AUTH_SQL,
+    Credential,
+    Session,
+    SqlLogin,
+    auth_kind,
+    connect,
+    credential_from_environment,
+    refuse_sql_in_github_actions,
+)
 from azsqlcd.sqlerrors import ErrorClass, SqlError
 
 type SessionFactory = Callable[[], Session]
@@ -89,7 +102,8 @@ class _Call:
 
     args: argparse.Namespace
     session_factory: SessionFactory | None  # None: the real connect
-    token_provider: TokenProvider | None  # None: the Azure CLI login
+    token_provider: Credential | None  # None: the sign-in that AZSQLCD_AUTH names
+    auth: str | None = None  # entra | managed-identity | sql, of a database command
     reason_code: str = OK  # of exit 0: OK, or a note such as ALREADY_PAST
     connected: bool = False  # a session was asked for; from then on an unknown error text is not printed
     token_asked: bool = False  # a token was asked for; the same rule for an unknown error text
@@ -284,11 +298,22 @@ def _repo_url() -> str | None:
 
 
 # ------------------------------------------------------------------ sessions
-def _token_provider(call: _Call) -> TokenProvider:
-    call.token_asked = True
+def _sign_in(call: _Call) -> Credential:
+    """The sign-in of a database command: the credential that the caller gave, else the one that
+    AZSQLCD_AUTH names. Nothing is asked of an identity here. Raises ToolError REFUSED:
+    AUTH_INVALID, SQL_AUTH_MISSING."""
+    ci_github = call.args.ci == "github"
     if call.token_provider is None:
-        call.token_provider = AzureCliTokenProvider()
+        call.token_provider = credential_from_environment(os.environ, ci_github=ci_github)
+    call.auth = auth_kind(call.token_provider)
+    if call.auth == AUTH_SQL:  # also a SQL login that the caller gave: the refusal is of the sign-in
+        refuse_sql_in_github_actions(os.environ, ci_github=ci_github)
     return call.token_provider
+
+
+def _token_provider(call: _Call) -> Credential:
+    call.token_asked = True
+    return _sign_in(call)
 
 
 def _sessions(call: _Call, config: Config, *, read_only: bool = False) -> SessionFactory:
@@ -303,6 +328,7 @@ def _sessions(call: _Call, config: Config, *, read_only: bool = False) -> Sessio
     live runs).
     """
     environment, target = resolve_target(config, call.args.env, call.args.target)
+    provider = _token_provider(call)
     with contextlib.suppress(Exception):  # the log never changes what a command does
         trace.config_event(
             call.trace,
@@ -312,9 +338,9 @@ def _sessions(call: _Call, config: Config, *, read_only: bool = False) -> Sessio
             server=target.server,
             database=target.database,
             table_model=config.project.table_model,
+            auth=call.auth,
         )
     given = call.session_factory
-    provider = _token_provider(call)
     app_name = f"azsqlcd/{__version__} run={os.environ.get('GITHUB_RUN_ID', 'local')}"
     options: dict[str, Any] = {"min_token_minutes": config.project.min_token_minutes}
     if read_only and "read_only" in inspect.signature(connect).parameters:
@@ -578,7 +604,18 @@ def _dependants(computed: plan.Plan) -> list[tuple[str, tuple[str, ...]]]:
     return [(key, tuple(computed.dependant_findings.get(key, ()))) for key in keys]
 
 
-def _plan_lines(computed: plan.Plan) -> list[str]:
+_NO_TOKEN = "not applicable (SQL authentication has no access token)"
+
+
+def _signed(computed: plan.Plan, auth: str | None) -> plan.Plan:
+    """The plan with a note that names the kind of sign-in, for plan.json. A note is not in
+    plan_sha256, so the plan job and the deploy job may sign in in different ways."""
+    if auth is None:
+        return computed
+    return dataclasses.replace(computed, notes=(*computed.notes, f"sign-in: {auth}"))
+
+
+def _plan_lines(computed: plan.Plan, auth: str | None = None) -> list[str]:
     """The plan for a log: names, hashes and counts. A plan holds no SQL text."""
     lines = [
         f"plan of r{computed.release_seq} for {computed.target_id} ({computed.environment}): "
@@ -587,6 +624,10 @@ def _plan_lines(computed: plan.Plan) -> list[str]:
         f"recorded: r{computed.recorded_release_seq} {computed.recorded_git_sha or '(no run ended ok)'}",
         f"release: r{computed.release_seq} {computed.git_sha}",
     ]
+    if auth is not None:
+        lines.append(f"sign-in: {auth}")
+    if auth == AUTH_SQL:
+        lines.append(f"token minutes left: {_NO_TOKEN}")
     if computed.compare_url:
         lines.append(f"compare: {computed.compare_url}")
     if computed.destructive:
@@ -609,10 +650,16 @@ def _plan_lines(computed: plan.Plan) -> list[str]:
     return lines
 
 
-def _plan_summary(computed: plan.Plan) -> list[str]:
+def _plan_summary(computed: plan.Plan, auth: str | None = None) -> list[str]:
     """A27, and plan step 12: what the approver reads. The destructive list is first, with a
     banner; then the plan, the dependants that the run checks (A12), the steps with their links,
-    and the notes. Every value goes through _md: a name or a reason cannot hide a row."""
+    and the notes. Every value goes through _md: a name or a reason cannot hide a row.
+
+    auth: the kind of sign-in of the command. A SQL login has no token: its token minutes are
+    shown as not applicable, never as a value."""
+    minutes: object = "" if computed.token_minutes_left is None else computed.token_minutes_left
+    if auth == AUTH_SQL:
+        minutes = _NO_TOKEN
     parts: list[str] = []
     if computed.destructive:
         parts.append(f"> **DESTRUCTIVE: {len(computed.destructive)} item(s). Read each one.**\n")
@@ -634,7 +681,8 @@ def _plan_summary(computed: plan.Plan) -> list[str]:
         ("Release", f"r{computed.release_seq} {computed.git_sha}"),
         ("Compare", compare),
         ("Service objective", computed.service_objective or ""),
-        ("Token minutes left", "" if computed.token_minutes_left is None else computed.token_minutes_left),
+        *([("Sign-in", auth)] if auth is not None else []),
+        ("Token minutes left", minutes),
         ("Unmanaged objects", len(computed.unmanaged)),
     ]
     parts.append(_table(("Plan", "Value"), facts))
@@ -675,7 +723,8 @@ def _cmd_plan(call: _Call) -> None:
     out = _out_dir(call)
     bundle, config = _release(call)
     sessions = _sessions(call, config, read_only=True)
-    token = _token_provider(call).get()
+    provider = _token_provider(call)
+    token = None if isinstance(provider, SqlLogin) else provider.get()  # a SQL login has no token
     with _read_session(call, config) as db:
         computed = plan.compute_plan(
             bundle,
@@ -687,15 +736,15 @@ def _cmd_plan(call: _Call) -> None:
             tool_digest=release.tool_digest(),
             repo_url=_repo_url(),
             open_second_session=sessions,
-            token_minutes_left=int((token.expires_on - time.time()) // 60),
+            token_minutes_left=None if token is None else int((token.expires_on - time.time()) // 60),
             table_hooks=_hooks(bundle, config),
         )
     if out is not None:
-        _write(out / "plan.json", computed.to_json())
+        _write(out / "plan.json", _signed(computed, call.auth).to_json())
     call.outputs |= {"pending": str(computed.pending).lower(), "plan_sha256": computed.plan_sha256}
-    for line in _plan_lines(computed):
+    for line in _plan_lines(computed, call.auth):
         call.say(line)
-    call.summary += _plan_summary(computed)
+    call.summary += _plan_summary(computed, call.auth)
 
 
 def _report_run(call: _Call, report: runner.Report, out: Path | None, plan_file: bool) -> None:
@@ -712,15 +761,17 @@ def _report_run(call: _Call, report: runner.Report, out: Path | None, plan_file:
 
 def _run_report(call: _Call, report: runner.Report, out: Path | None, plan_file: bool) -> None:
     if out is not None:
-        _write_after_run(call, out / "report.json", report.to_json())
+        told = dataclasses.replace(report, auth=call.auth)  # the kind of sign-in of this call
+        _write_after_run(call, out / "report.json", told.to_json())
         if plan_file and report.plan is not None:
-            _write_after_run(call, out / "plan.json", report.plan.to_json())
+            _write_after_run(call, out / "plan.json", _signed(report.plan, call.auth).to_json())
     if report.plan_sha256:
         call.outputs["plan_sha256"] = report.plan_sha256
     facts = [
         ("Target", f"{report.target_id} ({report.environment})"),
         ("Release", f"r{report.release_seq} {report.git_sha}"),
         ("Run", "" if report.run_id is None else report.run_id),
+        *([("Sign-in", call.auth)] if call.auth is not None else []),
         # the reference for a point-in-time restore (Part 2 (f))
         ("Started (UTC, server)", report.started_utc or ""),
         # the steps of the plan: each batch, module and refresh. Not the rows of azsqlcd.step, which
@@ -732,7 +783,8 @@ def _run_report(call: _Call, report: runner.Report, out: Path | None, plan_file:
     ]
     call.summary.append(_table(("Run", "Value"), facts))
     if report.plan is not None:
-        call.summary += _plan_summary(report.plan)  # its notes are the warnings of the report
+        # its notes are the warnings of the report; the sign-in is in the table of the run above
+        call.summary += _plan_summary(report.plan, AUTH_SQL if call.auth == AUTH_SQL else None)
     else:
         call.summary += [f"- {_md(note)}\n" for note in report.warnings]
 
@@ -1008,6 +1060,8 @@ def _open_trace(call: _Call, argv: Sequence[str]) -> None:
         else:
             folder = trace.default_log_dir(out)
         call.trace = trace.Trace(folder / trace.log_file_name(args.command, datetime.now(UTC)))
+        if isinstance(call.token_provider, SqlLogin):  # a SQL login that the caller gave
+            call.trace.hide_sign_in(call.token_provider.user, call.token_provider.password)
         if not call.trace.enabled:
             return  # _end_trace tells why
         call.outputs["log"] = str(call.trace.path)
@@ -1396,10 +1450,11 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     session_factory: SessionFactory | None = None,
-    token_provider: TokenProvider | None = None,
+    token_provider: Credential | None = None,
 ) -> int:
     """Run one command and return its exit code. session_factory and token_provider are for
-    tests; None means the real connect and the Azure CLI login, made when a command needs them."""
+    tests; None means the real connect and the sign-in that the variable AZSQLCD_AUTH names (the
+    Azure CLI login when it is not set), made when a command needs them."""
     _lenient_streams()  # first: argparse prints too
     args = parse(argv)
     call = _Call(args, session_factory, token_provider)
@@ -1415,6 +1470,8 @@ def main(
                 "--show-error-text is refused for prod, and for a database that is bound to another "
                 "environment (--rebind-environment): a full engine message can hold data",
             )
+        if args.command in _DATABASE_COMMANDS:
+            _sign_in(call)  # a sign-in that cannot be used is refused before anything is read
         args.handler(call)
         failure = None
     except ToolError as error:

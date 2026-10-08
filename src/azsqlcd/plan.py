@@ -40,6 +40,8 @@ from azsqlcd.state import ObjectRow, State
 PLAN_FORMAT = 1
 # Plan.outcome and Work.outcome. Only WORK has units. RECORD writes a run row and nothing else (A6).
 WORK, RECORD, NOOP, ALREADY_PAST = "work", "record", "noop", "already_past"
+# Plan.syntax_check, for a plan with units. None: the plan has no unit, so no text to parse
+SYNTAX_RAN, SYNTAX_SKIPPED = "ran", "skipped"
 
 _MIGRATIONS_DIR = "migrations/"
 _PARSEONLY_ON = "SET PARSEONLY ON;"
@@ -48,6 +50,7 @@ _CANARY_MUST_NOT_RUN = "SELECT 1/0;"  # harmless when it does run: it then raise
 _CANARY_MUST_NOT_PARSE = "SELECT FROM;"
 # sent after SET PARSEONLY OFF: a session that still parses only gives no result set for it
 _PARSEONLY_IS_OFF = "/* azsqlcd:parseonly_off */ SELECT @@SPID;"
+_NOT_IN_DEPLOY = ", and the deploy of an approved plan does not run the check"
 
 
 # ------------------------------------------------------------------ data
@@ -212,6 +215,12 @@ class Plan:
     recorded_release_seq, applied, touched, units (without the links), destructive, dependants,
     dependant_findings and pre_broken. Everything else is for the approver and can differ between
     the plan job and the deploy job.
+
+    syntax_check is not in the hash, and cannot be. The plan job parses the texts; the deploy job
+    computes the plan again under the lock and does not parse them a second time, and a deploy
+    runs only when both plans have one hash. So the key is a fact of the plan job that the deploy
+    job reads from plan.json. It decides a note of the report and nothing that is enforced; it is
+    as good as the file, like the notes that held the warning before the key existed.
     """
 
     plan_sha256: str
@@ -248,6 +257,10 @@ class Plan:
     service_objective: str | None = None
     token_minutes_left: int | None = None
     notes: tuple[str, ...] = ()
+    # ran: the engine parsed every pending text of the units under SET PARSEONLY ON (in this run,
+    # or in the plan job of the approved plan). skipped: it did not. None: the plan has no unit;
+    # in a plan file also: the file is of a tool that did not write the key, and proves no check
+    syntax_check: str | None = None
 
     @property
     def pending(self) -> bool:
@@ -266,7 +279,10 @@ class Plan:
             plan_format = doc.pop("format", None) if isinstance(doc, dict) else None
             if type(plan_format) is not int or plan_format != PLAN_FORMAT:
                 raise ValueError(f"not a plan of format {PLAN_FORMAT}")
+            doc.setdefault("syntax_check", None)  # a file of a tool that did not write the key
             plan: Plan = _build(cls, doc)
+            if plan.syntax_check not in (None, SYNTAX_RAN, SYNTAX_SKIPPED):
+                raise ValueError(f"Plan.syntax_check must be {SYNTAX_RAN}, {SYNTAX_SKIPPED} or null")
         except (ValueError, RecursionError) as e:
             raise refused("PLAN_INVALID", f"the plan file cannot be read: {e}") from None
         if plan.plan_sha256 != _hash(plan):
@@ -530,12 +546,23 @@ def _refuse_catch_up(
         raise refused(
             "CATCHUP_REQUIRED",
             f"promote r{first} first: this database has pending migrations that earlier releases added, "
-            f"and r{manifest.release_seq} applies only the migrations that it added. A database that "
-            f"is behind is caught up release by release. If the deploy of r{first} fails here and its "
-            "migration is not wrong (for example 21 DEPENDANT_BROKEN, or 21 BATCH_FAILED at a refresh "
-            "step), a release that only changes modules cannot take its place: withdraw the migration "
-            "and add its statements again as a replacement (allow REPLACEMENT_EDGE) in the pull request "
-            "that fixes the module",
+            f"and r{manifest.release_seq} applies only the migrations that it added. There are two "
+            f"cases. (1) r{first} can still be deployed here: promote it, then each later release in "
+            f"its turn. (2) r{first} cannot be deployed here, because its migration fails (21 "
+            "BATCH_FAILED), or because a module fails after a correct migration (21 DEPENDANT_BROKEN, or "
+            "21 BATCH_FAILED at a refresh step): withdraw the migration by pull request (the word "
+            "withdrawn on its line of migrations/migrations.sum). The release that holds the withdrawal "
+            "carries the pending migrations of the later releases in one catch-up, and the withdrawn "
+            f"migration never runs here. A release that only changes modules cannot take the place of "
+            f"r{first}. The corrected change is a replacement in the pull request of the withdrawal "
+            "(allow REPLACEMENT_EDGE; with the fix of the module when a module was the cause): a "
+            f"database that applied the migration of r{first} keeps what it has, and every other "
+            "database runs the replacement. A withdrawal with no replacement, and the corrected change "
+            "as a new migration in a later pull request, works only when no database applied the "
+            f"migration of r{first} and table_model = true: a database that applied it refuses the new "
+            "migration (21), and with table_model = false the withdrawal is refused (CHN006). Such a "
+            'pull request puts the table files back. The steps: docs/setup.md, section "Withdraw and '
+            'replace a merged migration"',
             promote=first,
             release_seq=manifest.release_seq,
             pending={file: added[file] for file in sorted(added)},
@@ -1288,11 +1315,16 @@ def compute_plan(
     token_minutes_left: int | None = None,
     table_hooks: TableHooks | None = None,
     lock_held: bool = False,
+    approved_plan: Plan | None = None,
 ) -> Plan:
     """The plan of one release for one target (plan steps 2 to 11). Read-only.
 
     lock_held: the caller holds the deploy lock on this session, so no other run can be live.
     open_second_session: opens the session of the syntax check; None skips the check with a note.
+    approved_plan: the plan of the plan job, in the deploy of an approved plan. With no second
+    session the check is not run again, and the note says what the plan job did: nothing when the
+    approved plan records that its check ran, else a warning. The caller compares the two hashes;
+    the same hash names the same texts.
 
     Refused: every code of pending_work(), and FENCE_ENGINE_EDITION, FENCE_READ_ONLY,
     FENCE_DB_NAME, FENCE_CASE_SENSITIVE, FENCE_META_MISMATCH, NAME_COLLISION, DRIFT_TOUCHED,
@@ -1535,10 +1567,21 @@ def compute_plan(
     notes += _temporal_notes(work.destructive, history)
 
     # step 9
+    syntax_check = None
     if units and open_second_session is not None:
         _parse_only(open_second_session, bundle, units)
+        syntax_check = SYNTAX_RAN
+    elif units and approved_plan is not None and approved_plan.syntax_check == SYNTAX_RAN:
+        syntax_check = SYNTAX_RAN  # in the plan job; a warning here would be about a check that ran
     elif units:
-        notes.append("the syntax check (SET PARSEONLY ON) was skipped: this run has no second session")
+        syntax_check = SYNTAX_SKIPPED
+        if approved_plan is None:
+            why = "was skipped: this run has no second session"
+        elif approved_plan.syntax_check == SYNTAX_SKIPPED:
+            why = "was skipped: the plan job had no second session" + _NOT_IN_DEPLOY
+        else:
+            why = "is not proven: the approved plan does not record that the plan job ran it" + _NOT_IN_DEPLOY
+        notes.append(f"the syntax check (SET PARSEONLY ON) {why}")
 
     # step 10: facts for the approver
     tables = sorted(key for key in table_keys if key.startswith("TABLE:"))
@@ -1559,4 +1602,5 @@ def compute_plan(
             TableFact(key, facts[key].rows, facts[key].reserved_pages) for key in sorted(facts)
         ),
         service_objective=catalog.service_objective(session),
+        syntax_check=syntax_check,
     )
