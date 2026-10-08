@@ -113,6 +113,7 @@ database repository; its `README.md` is the guide for the people who change a sc
 | `docs/live-testing.md` | For the owner: how to run the live spike and the live acceptance on a disposable database, and the results of 2026-10-07 |
 | `docs/known-gaps.md` | Not built, not proven, decisions that wait for the owner, dead ends, open review findings |
 | `docs/design.md` | The design of record. Part 1, "As built", holds the module map and the command-line reference |
+| `CHANGELOG.md` | What changed in each version, newest first |
 
 ## Tests
 
