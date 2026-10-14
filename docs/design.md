@@ -343,7 +343,8 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 Ends and outputs:
 
 - A non-zero end prints on stderr `REASON_CODE: message`, then one line for each item of the
-  detail lists `objects`, `blockers` and `failures` (names, properties, hashes, redacted text),
+  detail lists `objects`, `blockers`, `schemes` and `failures` (names, properties, hashes,
+  redacted text),
   then `azsqlcd <command>: exit N`.
 - `--ci github` appends to the file of `GITHUB_OUTPUT` the keys of the command plus `exit_code`
   and `reason_code`, for every end and before the process ends, and to the file of
@@ -650,6 +651,75 @@ code is now, where it differs from the text above:
   its migration). It names the replacement in the pull request of the withdrawal as the way, and
   the condition of the other one (no database applied the migration, and `table_model = true`).
   The detail keys are unchanged.
+
+### Partitioned tables and indexes (2026-10-13)
+
+- A34. Partitioned tables and indexes are in the table model. Partition functions and partition
+  schemes are prerequisites that a DBA owns, not objects of the model: the tool creates none,
+  changes none and reads no boundary. This overrides Part 2 ((c) 3), which lists "partitioned"
+  under `UNSUPPORTED`. A table, a `PRIMARY KEY` or `UNIQUE` constraint and an index (rowstore or
+  columnstore) can state `ON [scheme]([column])` with one partitioning column; `ON [PRIMARY]`
+  stays accepted. `SPLIT`, `MERGE`, `SWITCH` and a `TRUNCATE` of partitions are operations, not
+  design, and stay outside the tool.
+- Model (`model.py`): `Partition` (scheme name, column), `ON_PRIMARY`, `Place`, `place_on`;
+  the field `on` of `Table`, `PrimaryKey`, `Unique` and `Index`. `Table.on` is the place of the
+  heap or of the clustered key or index, and `None` when the table is not partitioned. A key or
+  an index of a partitioned table holds a `Partition` or `ON_PRIMARY`, never `None`: the engine
+  puts an index with no `ON` clause on the scheme of the table, so the file always writes the
+  place. A key or an index of any other table holds `None` or a `Partition`. The clustered key
+  or index is the table and has the place of the table. The canonical JSON writes `on` only when
+  it is not `None`, so the JSON and the file of a table that is not partitioned did not change.
+- Rules of the model, so that the parser and the replay refuse what the engine refuses: the
+  partitioning column is a column of the table; it is a key column of a `PRIMARY KEY`, a
+  `UNIQUE` constraint or a unique index on a scheme; a computed partitioning column is
+  `PERSISTED`. The option `STATISTICS_INCREMENTAL` (`ON`, `OFF`) goes only with a key or an
+  index on a scheme. A table type has no place.
+- Operations: a statement of a migration keeps the clause that it states (`None` is "no `ON`
+  clause"), and `replay.py` gives the key or index the place that the engine gives it
+  (`place_on`). One statement moves a table: a clustered key or index that is created on a heap
+  and states its place. The other keys and indexes stay where they are. `ALTER COLUMN` and
+  `DROP COLUMN` of a partitioning column are blocked; `sp_rename` of it is followed.
+  `replay.partitioned_on` is public. `RebuildTable.all_partitions` is
+  `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)`.
+- `gen` (`diff.py`) writes each key and index with the `ON` clause of the head revision, and
+  `REBUILD PARTITION = ALL` for a compression change of a partitioned heap. It refuses with
+  `PARTITION_CHANGE` (in `diff.REFUSALS`, so in `GEN_REFUSED`): a table that goes on a scheme or
+  off one, another scheme, another partitioning column, and `ALTER COLUMN` of a partitioning
+  column. `docs/runbook.md`, "Partitioned tables", has the hand route.
+- Lint: the closed list of a model batch holds
+  `REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = ...)`, read whole. The `ON` clause is a
+  part of its statement; a second statement behind it is `MODEL_STATEMENT`. A partition function
+  or scheme statement in a model batch is `MODEL_STATEMENT`. The rules of a `raw` batch did not
+  change. No new allow code: `LONG_LOCK` covers the builds and the rebuild, and the drop of a
+  clustered index or key of a table that exists (the table becomes a heap). The lexer cannot
+  see that an index is clustered: `lint.BatchFacts.may_lock` lists the table of a `DROP INDEX`
+  or `DROP CONSTRAINT`, so its `LONG_LOCK` line is not `ALLOW_UNUSED`; `diff.classify` gives
+  the code from the model, the proof (`gen._clustered_drop_findings`) asks for the line with
+  `PRF003` in a tx migration, and `gen` writes it.
+- Catalog (`catalog_tables.py`): `read_indexes` has 29 columns (was 26: `partition_scheme`,
+  `is_incremental`, `compression_kinds`), `read_index_columns` has 9 (was 8:
+  `partition_ordinal`). The reader no longer refuses a partitioned table. It refuses, as
+  `UNSUPPORTED` with a reason: a heap or an index whose partitions do not all have the same
+  compression; a partitioned object whose scheme or column the catalog does not give; a table
+  type on a scheme. The partitioning column that the engine adds to an index is no column of
+  the index in the model. The capture of a table has the property `partition`, always (null, or
+  scheme and column), as `heap_compression`; the capture of a key or an index has it only on a
+  scheme. No capture holds a boundary or a number of partitions. No older version could record
+  a partitioned table, so drift and the baseline compare read a stored table capture without
+  `partition` as null (`catalog_tables.with_stored_defaults`).
+  `catalog_tables.partition_schemes(session)` reads the names of the schemes (tag
+  `azsqlcd:partition_schemes`).
+- Plan: `TableHooks.missing_partition_schemes(session, work)` is asked first in step 8, before
+  the dependants and the blockers. `tables.Hooks` reads the scheme names from the pending model
+  statements (`CREATE TABLE`, `CREATE INDEX`, `ADD CONSTRAINT` of a key) and makes one read of
+  `sys.partition_schemes`; no read when no statement names a scheme. A scheme that a pending
+  `raw` or `data` batch creates before its use counts as present. New reason code:
+  `PARTITION_SCHEME_MISSING` (22), detail `schemes`. The deploy computes the plan again under the
+  lock, so it refuses the same way. With `table_model = false` there is no check.
+- Read-back, drift, export and the baseline compare needed no code of their own: the place is a
+  field of the model and a part of the capture.
+- Not proven: all of it ran against fakes only. `docs/known-gaps.md`, section 14, has the scope
+  cut, the assumptions about the engine and the limits.
 
 ---
 

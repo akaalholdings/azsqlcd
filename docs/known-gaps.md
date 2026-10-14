@@ -15,6 +15,10 @@ repeated on the final commit, so the tree as it stands now did not run against a
 whole. The unit tests use fakes at the session boundary. Do not use the tool on a
 production database before the open tests of section 2 pass.
 
+Partitioned tables and indexes (2026-10-13) are in the table model. That work ran on no
+database: unit tests with fakes only. Section 14 lists what it does not do and what is not
+proven.
+
 Scope decision of the owner (2026-10-07): structural changes only. Data batches are switched off
 by default: `[project] data_batches` of `azsqlcd.toml` is `false` unless the file says `true`, and
 `lint`, `verify` and `build` then refuse every `-- azsqlcd:data` batch with the finding `DATA000`.
@@ -38,6 +42,8 @@ each build task.
 11. Live command-line runs and the second review (2026-10-07, afternoon).
 12. GitHub Actions proof (2026-10-07).
 13. Sign-in modes and the fixes of the first pilot: what is closed, what is not proven.
+14. Partitioned tables and indexes (2026-10-13): what is closed, what is out of scope, what is not
+    proven.
 
 Ids: L1 to L17, L5b and X1 to X10 are spike items of `scripts/live_spike.py`. "Acc" names a
 scenario of `scripts/live_acceptance.py`. G1 to G7 are the GitHub checklist. All are in
@@ -264,6 +270,7 @@ scenario reads a table through these modules. A column that does not exist fails
 | Driver value types of the table queries: bit, tinyint, `decimal(38,0)`, `char(2)` padding, the `sql_variant` seed and increment of `sys.identity_columns` | No test yet |
 | Catalog values: vector length `(max_length - 8) / 4`; `fill_factor` 0 or 100 for FILLFACTOR = 100; `data_compression` per partition; `sys.sequences.cache_size` NULL for NO CACHE and for the default size; the spelling of `sys.synonyms.base_object_name`; the rows of the backing object of a table type | No test yet |
 | A persisted computed column that is declared NOT NULL when the engine already derives it gives the same catalog row | No test yet |
+| Partitioned tables: `sys.partition_schemes` joined through `sys.indexes.data_space_id`; `sys.index_columns.partition_ordinal`; `sys.stats.is_incremental`; the count of different compressions of the partitions of one index, read with a derived table inside the index query. Section 14 has each assumption | `live_tables.py`, first pass (P2, P4): not run |
 | `sys.sql_expression_dependencies`: `is_schema_bound_reference` and `referenced_minor_id` per column; `sys.database_principals` shows schema owners to the plan identity (a hidden owner quarantines the schema) | L14 for the grants; else no test yet |
 | Which sub-objects the engine refuses on DROP COLUMN, ALTER COLUMN and `sp_rename` (the blocker scan counts hypothetical indexes; a foreign key blocks a table rename by the design rule) | No test yet |
 | How the engine writes DEFAULT, CHECK, computed and filter text, which the table captures hold | L8 |
@@ -457,7 +464,7 @@ an operator or a developer sees. Until the owner says otherwise, the row is how 
 | An unparenthesised DEFAULT or computed expression has a closed shape (literal, name, call, NEXT VALUE FOR, a parenthesised run, joined by arithmetic operators). CASE, IS NULL and money literals need parentheses | `SYNTAX` | `parse.py` |
 | One known hole in "unknown syntax is an error": an unparenthesised index filter runs to the next known clause word, so an unknown word after it stays inside the filter expression | The PARSEONLY check on the target is the backstop | `parse.py` |
 | Not in the grammar: `WITH (ONLINE ...)` on DROP INDEX and DROP CONSTRAINT; REFERENCES with no column list; COLLATE anywhere but after the data type; a one-part type name | Hand-write in a `raw` batch is not possible for a managed table (`RAW001`, `RAW002`); change the statement | `parse.py` |
-| `gen` refusal codes beyond `ORD001`: `IDENTITY_CHANGE` (also seed or increment), `COMPUTED_CHANGE`, `COLLATION_CHANGE`, `ALTER_COLUMN_DEPENDANTS`, `USER_TYPE_CHANGE`, `SEQUENCE_CHANGE`, `SCHEMA_OWNER_CHANGE`, `ORDER_BLOCKED`, `TEMPORAL_CHANGE`, and `ORD002` | Hand-write; the proof checks it | `diff.py` `REFUSALS`; `gen.py` |
+| `gen` refusal codes beyond `ORD001`: `IDENTITY_CHANGE` (also seed or increment), `COMPUTED_CHANGE`, `COLLATION_CHANGE`, `ALTER_COLUMN_DEPENDANTS`, `USER_TYPE_CHANGE`, `SEQUENCE_CHANGE`, `SCHEMA_OWNER_CHANGE`, `ORDER_BLOCKED`, `TEMPORAL_CHANGE`, `PARTITION_CHANGE`, and `ORD002` | Hand-write; the proof checks it | `diff.py` `REFUSALS`; `gen.py` |
 | A changed START WITH of a sequence is refused, not written as `RESTART WITH`: that statement also sets the next value of the live sequence | Hand-write `RESTART WITH n` | `diff.py` |
 | `ALTER COLUMN` with an index, constraint or computed-column dependant is refused by `gen` and blocked by the replay. One exception: a `varchar`, `nvarchar` or `varbinary` column whose type, nullability and collation stay and whose length stays or grows (not `max`) is altered in place under `UNIQUE`, `CHECK` and a rowstore index (key or `INCLUDE`). `PRIMARY KEY`, `FOREIGN KEY`, a computed column, an index filter and a columnstore index still block. The tool is stricter than the engine here: the engine accepts a longer column under a `PRIMARY KEY` that no foreign key references, a nullability change together with a longer length under `UNIQUE`, and a nonclustered columnstore index (measured live; clustered columnstore not tested) | Hand-write drop, alter, add | `diff.py`; `replay.py` |
 | An unchanged foreign key is dropped and added again when the migration drops the key that it references | More statements than expected in a generated migration | `diff.py` |
@@ -487,6 +494,11 @@ an operator or a developer sees. Until the owner says otherwise, the row is how 
 | `SET (SYSTEM_VERSIONING = ON ...)` needs no `LONG_LOCK`, and `DATA_CONSISTENCY_CHECK` of a hand-written statement is read and not kept | With the check on, the engine reads the rows under its lock | `diff.py` `classify`; `parse.py` |
 | A table whose versioning was switched off outside the tool, with the period still in place, is outside the model | `drift` and the read-back report the one property `unsupported`, not `temporal`. A table recorded as plain that was made temporal outside the tool shows drift on its two period columns only | `catalog_tables.py` |
 | A retention with a singular unit (`1 YEAR`) or `HISTORY_RETENTION_PERIOD = INFINITE` in a table file fails `NF000` | Write the plural unit; write no clause for no limit | `emit.py` |
+| Partitioned tables and indexes are in the model (section 14). The model holds the name of the partition scheme and the one partitioning column of a table and of each key and index. A partition function and a partition scheme are not objects: no file, no state row, no statement of the model | A DBA creates them in every database before the release. The plan refuses a release whose scheme is missing (22 `PARTITION_SCHEME_MISSING`) | `model.py`; `tables.py` `missing_partition_schemes`; `plan.py` |
+| The file of a partitioned table writes the place of every key and index: `ON [scheme]([column])`, or `ON [PRIMARY]` for one that is not on a scheme. The engine accepts the file without these clauses and puts such an index on the scheme of the table | `NF000` for a file that leaves a clause out. A table that is not partitioned writes no `ON` clause, as before | `emit.py`; `model.py` |
+| Stricter than the engine, on purpose: a `CREATE TABLE` whose clustered key states a scheme must state the same `ON` clause on the table; `STATISTICS_INCREMENTAL` needs a written `ON [scheme]([column])` in the same statement | `SYNTAX` | `model.py` `Table`; `parse.py` |
+| A table is never moved by generated SQL (`PARTITION_CHANGE`): on to a scheme, off one, to another scheme or partitioning column. `ALTER COLUMN` and `DROP COLUMN` of a partitioning column are refused by `gen` and blocked by the replay | Hand-write the drop and the create of the clustered key or index with its `ON` clause; `verify` proves it (`docs/runbook.md`, "Partitioned tables") | `diff.py`; `replay.py` |
+| The check for a missing partition scheme counts a scheme as present when a `raw` or `data` batch of the pending migrations holds `CREATE PARTITION SCHEME <name>` before the statement that uses it. The specification of the work said: the scheme must exist in the database. The owner decides if the stricter rule is wanted | A release can bring its own scheme through a `raw` batch. A scheme that dynamic SQL creates is not seen: the plan refuses | `tables.py` `missing_partition_schemes` |
 
 ### Canonical form of a table-class file (NF000)
 
@@ -500,13 +512,18 @@ The form that `emit.py` writes, and that a file must have:
   Alias types as `[schema].[name]`. Collation names bare.
 - Constraints and indexes as table elements or statements of their own, each with a name. Options
   sorted by name.
+- A partitioned table: `ON [scheme]([column])` on a line of its own after the column list, before
+  `WITH (...)`; and behind every `PRIMARY KEY`, `UNIQUE` and index either `ON [scheme]([column])`
+  or `ON [PRIMARY]`, as the last clause. A table that is not partitioned has no `ON` clause; an
+  index of it that is on a scheme states `ON [scheme]([column])`.
 
-Refused as NF000: `ASC`; `ON [PRIMARY]`, `ON "default"`, `TEXTIMAGE_ON`; `ON DELETE NO ACTION` and
-`ON UPDATE NO ACTION`; IDENTITY without `(seed, increment)`; PRIMARY KEY, UNIQUE, FOREIGN KEY or
-CHECK written on a column; INDEX inside CREATE TABLE; another clause order inside a column or a
-sequence. Eleven hand-written object-file fixtures fail NF000 by this rule (`NOT_CANONICAL` in
-`tests/unit/test_roundtrip.py`). The owner decides if any of these forms should pass. No command
-prints the canonical text of a file.
+Refused as NF000: `ASC`; `ON [PRIMARY]` on a table that is not partitioned, `ON "default"`,
+`TEXTIMAGE_ON`; a key or an index of a partitioned table without its `ON` clause;
+`ON DELETE NO ACTION` and `ON UPDATE NO ACTION`; IDENTITY without `(seed, increment)`; PRIMARY
+KEY, UNIQUE, FOREIGN KEY or CHECK written on a column; INDEX inside CREATE TABLE; another clause
+order inside a column or a sequence. Sixteen hand-written object-file fixtures fail NF000 by
+this rule (`NOT_CANONICAL` in `tests/unit/test_roundtrip.py`). The owner decides if any of these
+forms should pass. No command prints the canonical text of a file.
 
 ## 4. Known dead ends
 
@@ -1632,3 +1649,151 @@ Two reviewers reproduced eight findings. Each has a regression test.
   error text of git.
 - Spike item L9 with its two groups of reads ran with a scripted catalog and clock, not live.
   `list_user_objects` is counted as a read of the deploy path; the pilot gave no time for it.
+
+## 14. Partitioned tables and indexes (2026-10-13)
+
+This work put partitioned tables and indexes into the table model. Source: the reports of the
+three engineers, checked against the code. Nothing of this section ran against a database: no
+connection was allowed. Every rule of the engine below comes from the product documentation. The
+unit tests use a fake engine that holds the names of partition schemes and nothing more. Do not
+use the tool on a partitioned table of a production database before the first pass of
+`scripts/live_tables.py` passes (`docs/live-testing.md`, section 5a).
+
+### What this work closes
+
+- The catalog reader refused every partitioned table with the reason "it is partitioned", and
+  the parser refused `ON [scheme]([column])`. Such a table stayed unmanaged. Now a heap, a
+  clustered table and a clustered columnstore table on a partition scheme are read, exported,
+  generated, proven, planned and read back. Each key and index holds its own place.
+- The index option `STATISTICS_INCREMENTAL` was refused. It is read, modelled, written and
+  compared, for an index or a key on a partition scheme.
+- `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` is a model statement.
+  `gen` writes it for a compression change of a partitioned heap.
+- New reason code: 22 `PARTITION_SCHEME_MISSING` (plan, and deploy under the lock). New refusal
+  of `gen`: `PARTITION_CHANGE`. No new finding code and no new allow code. Both have a row in
+  `docs/runbook.md`.
+- The capture of a table has the property `partition` (null, or scheme and column). The capture
+  of a key or an index has it only on a scheme. A table capture that an older tool stored does
+  not hold the property. An older tool refused every partitioned table, so drift, the plan and
+  the `baseline` compare read the missing property as null: a table that is still not
+  partitioned does not drift, and a heap that a DBA moved on to a scheme is drift of
+  `partition` (its keys and indexes stay on `[PRIMARY]`, so their captures do not change). The
+  object gets the property the next time it is recorded (a deploy that touches it,
+  `accept-drift`, `baseline`).
+- The drop of the clustered index, clustered columnstore index or clustered key of a table that
+  exists needs `allow LONG_LOCK` in a tx migration (the table becomes a heap: every row is
+  written again). This was missing before this work, also for a table that is not partitioned.
+  `lint` cannot see that an index is clustered: it accepts the line on a `DROP INDEX` or
+  `DROP CONSTRAINT`, `verify` asks for it with `PRF003`, and `gen` writes it.
+
+### Out of scope of version 1
+
+| Not built | Effect | What to do instead |
+|---|---|---|
+| Partition functions and partition schemes as managed objects | `CREATE PARTITION FUNCTION` and `CREATE PARTITION SCHEME` are `UNSUPPORTED` in a model batch; `ALTER` and `DROP` of them are `SYNTAX`. The tool reads no boundary and no number of partitions. It checks only that a scheme with the name exists | A DBA creates and changes them, in every environment, before the release |
+| Per-partition compression | The reader leaves the table unmanaged, with the reason "its partitions do not all have the same compression". The parser refuses `ON PARTITIONS (...)` and `REBUILD PARTITION = <number>`. This is a common shape of large tables: `COLUMNSTORE_ARCHIVE` on old partitions and `COLUMNSTORE` on new ones, or `PAGE` on old partitions and `NONE` on the current one | Read the export report of the first real database before you count on full coverage. Such a table stays `[unmanaged]` |
+| `SWITCH`, `SPLIT`, `MERGE`, `TRUNCATE ... WITH (PARTITIONS ...)` | No model statement. They are operations on the data, not design | A DBA runs them outside the tool. The capture holds no boundary and no number of partitions, so a `SPLIT` or a `MERGE` is no drift |
+| Partitioned views | Not modelled. Such a view is a module as any other view | None |
+| A table move by `gen`: on to a scheme, off one, to another scheme or partitioning column | `PARTITION_CHANGE` | Hand-write the drop and the create of the clustered key or index (`docs/runbook.md`, "Partitioned tables") |
+| `DROP_EXISTING` and `MOVE TO` | `DROP_EXISTING` is `UNSUPPORTED`; `WITH (MOVE TO ...)` on a drop is `SYNTAX`. A table moves only by a drop and a create of its clustered key or index, in two statements | None in the tool |
+| `ALTER COLUMN` and `DROP COLUMN` of a partitioning column | Refused by `gen` (`PARTITION_CHANGE`) and blocked by the replay (`PRF001`) | Move the table or the index off the scheme, change the column, move it back |
+| A table type on a partition scheme | `SYNTAX` in a file; `UNSUPPORTED` at export | None |
+| A partitioned table in `examples/demo-db` and in `docs/quickstart.md` | The example needs no scheme | `docs/setup.md`, section 7, "Partitioned tables" |
+
+More than one partitioning column cannot exist in the engine; `ON [scheme]([a], [b])` is `SYNTAX`.
+
+### Not proven on a database
+
+`scripts/live_tables.py` has a first pass for partitioned tables (P1 to P5, 17 checks). It was
+written against the fake engine and was not run. Pass P4 decides the largest open assumption. A
+row with "no test yet" has no check in any script. The run needs a disposable Azure SQL
+Database:
+
+```
+uv run --extra db python scripts/live_tables.py --server S --database D --confirm-disposable-database D
+```
+
+| Assumption | Proven by |
+|---|---|
+| The plan and the deploy refuse a release on a scheme that the database does not have, and send nothing | P1, not run |
+| The reader of a partitioned heap, clustered table and clustered columnstore table: the scheme through `sys.indexes.data_space_id`, `sys.data_spaces.type = 'PS'` and `sys.partition_schemes`; the row of `sys.index_columns` with `partition_ordinal = 1` for a heap (`index_id` 0); the derived table of the index query that counts the different compressions | P2, not run |
+| What the reader gives for each partitioned table is emitted as the file of the repository, byte for byte | P2 and P4, not run |
+| `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` on a partitioned heap sets every partition | P3, not run |
+| The same statement on a clustered table, and `REBUILD WITH (...)` without `PARTITION` on a partitioned table (both parse; `gen` writes neither) | No test yet |
+| The engine adds the partitioning column to an index that does not hold it, and the row of `sys.index_columns` has `key_ordinal = 0`, `is_included_column = 0` and `partition_ordinal = 1`. The reader leaves that column out of the index. If the row is another one, every export of such an index differs from its file | P4, not run. The script prints the rows; fix the filter in `catalog_tables.py` `_keys_and_indexes` and the helper `tabular_rows` of `tests/unit/test_catalog_tables.py` together |
+| `sys.stats.is_incremental` is 1 for an index that was created with `STATISTICS_INCREMENTAL = ON` | P4, not run |
+| An index or a key that is created with no `ON` clause on a partitioned table goes on the scheme of the table | P5, not run |
+| A `SPLIT` of the partition function changes no capture | P5, not run |
+| The error of the engine for a statement on a scheme that does not exist. The fake engine answers with 1921 ("Invalid partition scheme"); the number is from memory. No decision of the tool reads it | P5 prints what the engine says, not run |
+| `STATISTICS_INCREMENTAL` in `ALTER TABLE ... ADD CONSTRAINT ... WITH (...)`; what the engine does with the option on an index that is not aligned with its table | No test yet |
+| The drop of a clustered index or key leaves the heap on its scheme | No test yet |
+| `CREATE CLUSTERED INDEX` or `ADD CONSTRAINT ... CLUSTERED` with an `ON` clause on a heap moves the rows there and leaves the nonclustered keys and indexes where they are. The whole hand route of `PARTITION_CHANGE` rests on this and on the row above | No test yet |
+| `sp_rename` of a partitioning column is allowed (the replay follows it) | No test yet |
+| The engine refuses `ALTER COLUMN` and `DROP COLUMN` of a partitioning column (the model blocks both in any case) | No test yet |
+| The engine refuses a unique index whose key does not hold the partitioning column (error 1908, from the documentation), and a computed partitioning column that is not `PERSISTED`. The model refuses both | No test yet |
+| A principal that cannot see `sys.partition_schemes`: the plan then refuses `PARTITION_SCHEME_MISSING` for a scheme that exists, and the reader leaves a partitioned table unmanaged with the reason "the catalog does not give its partition scheme or its partitioning column". It never reads such a table as not partitioned. `setup-sql` grants `VIEW DEFINITION` to both users | No test yet |
+| `export` and `baseline` of a database with partitioned tables, through the command line | No test yet |
+
+### Limits
+
+- The model does not check: that the type of the partitioning column fits the partition
+  function; that an index with `STATISTICS_INCREMENTAL = ON` is aligned with its table;
+  `ALTER COLUMN ... ADD` or `DROP` of `SPARSE` or `ROWGUIDCOL` on a partitioning column. The
+  engine decides at the deploy (exit 21, rolled back).
+- With `table_model = false` there are no table hooks, so the scheme check does not run (the
+  note of the plan says so). A statement on a missing scheme then fails in its unit with the
+  error of the engine (exit 21, rolled back). Open: the check needs only the parse of the model
+  batches and one read of `sys.partition_schemes`, but without the model a model batch need not
+  parse, and a parse failure must not become a new refusal in that mode.
+- A `raw` batch that creates a scheme needs the key of an object of `[unmanaged] objects`
+  (`RAW001`). A partition scheme has no object key, so a repository whose partitioned tables are
+  all managed has no natural key for such a batch. The DBA creates the scheme: that is the normal
+  path.
+- The scheme check reads `CREATE PARTITION SCHEME` of the pending `raw` and `data` batches only.
+  It does not read a `DROP PARTITION SCHEME` of a pending batch.
+- `diff` stops at the `PARTITION_CHANGE` of a table: other refusals of the same table are not
+  collected in that run (the rule of `TEMPORAL_CHANGE`). `ALTER COLUMN` of a column that is a
+  partitioning column and a key column gives two refusals (`PARTITION_CHANGE`,
+  `ALTER_COLUMN_DEPENDANTS`); both are true.
+- Lint proves "one statement" with the lexer and does not look inside parentheses. So
+  `ON [scheme]([a], [b])`, `WITH (DATA_COMPRESSION = PAGE ON PARTITIONS (...))` on a create
+  statement and `ON [PRIMARY] (SELECT 1)` pass `lint` alone. The parser refuses them: in `verify`
+  (`SYNTAX`, `UNSUPPORTED`) and at the plan (`MIGRATION_INVALID`). `REBUILD` is the exception:
+  lint reads its option list whole.
+- Open: a change of an option of a clustered key or index, its compression included, is
+  written by `gen` as a drop and a create with the `ON` clause, as on any table. Exact case: a
+  table on `[PS_OrderYear]([OrderDate])` with `CREATE CLUSTERED INDEX [CIX_OrderLine] ...
+  ON [PS_OrderYear]([OrderDate])`, and the head file adds `WITH (DATA_COMPRESSION = PAGE)` to
+  that index. `gen` writes `DROP INDEX [CIX_OrderLine]` (allow `LONG_LOCK`), then the
+  `CREATE CLUSTERED INDEX` (allow `LONG_LOCK`): two writes of every row, two rebuilds of every
+  nonclustered index and a heap between them. One
+  `ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE)` gives
+  the same model. A person can write that in its place: the replay sets the compression of the
+  clustered key or index, so `verify` proves it. Not done in `diff`: it changes the rule
+  "an option change of an index is a drop and a create" for every table, and the case where the
+  head file states no `DATA_COMPRESSION` needs the replay to give the model of the file.
+- Open: a nonclustered columnstore index that is not aligned with its table is proven. Exact
+  cases: `CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI_OrderLine] ON [sales].[OrderLine]
+  ([Quantity]) ON [PRIMARY]` on a table on `[PS_OrderYear]([OrderDate])`; the same with
+  `ON [PS_ByShip]([ShipDate])`; and the same with `ON [PS_OrderYear]([OrderDate])` on a table
+  that is not partitioned. `gen` writes them and `verify` proves them. From the documentation,
+  not measured: the engine refuses each one (error 35316, a columnstore index must be
+  partition-aligned with its table, on the same partition function and the same or an
+  equivalent scheme). The model has no partition function, so it cannot know whether two
+  schemes are equivalent. The check (`model.Table._check_places`) waits for a live run of the
+  three cases; until then the engine refuses the statement at the deploy (exit 21, a tx unit
+  rolls back).
+- A migration statement now keeps `ON [PRIMARY]` on its operation. On a table that is not
+  partitioned the replay gives the same model as before.
+- The fake engine has no statement for a partition function or scheme: a test adds a name to its
+  set. It has no drop of a scheme and no check that a scheme in use cannot be dropped.
+- Tests that were not seen to fail before the code: the closed-loop tests of section 8 of
+  `tests/unit/test_closed_loop.py` (written together with the fake support), and the tests of
+  `tests/unit/test_verify_proof.py` for the hand-written moves (the model side gave the behaviour
+  already; only the `REBUILD PARTITION = ALL` case failed first).
+- Found during this work and not fixed, because it is older than this work: the replay of
+  `SET (SYSTEM_VERSIONING = OFF)` loses `DATA_COMPRESSION` of a temporal heap. A hand-written
+  OFF and ON on such a table fails `verify` with `PRF001` on the property `compression`, although
+  the migration is right (reproduced in memory). The proof refuses too much; it does not pass a
+  wrong migration. The fix is in `replay.py`, `_set_system_versioning`: give `compression` to
+  both tables that it builds, with one test.

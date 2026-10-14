@@ -36,7 +36,7 @@ What the scripts make in a database, and what they leave:
 |---|---|---|
 | `live_spike.py` | Schema `azsqlcd_spike` with its objects; the user `azsqlcd_spike_user` for a moment (item X4) | Nothing. It drops both at the start and at the end |
 | `live_acceptance.py` | Schema `azsqlcd` (the state of the tool); the users `azsqlcd-livetest-disposable-plan` and `-deploy`; schema `azsqlcd_accept` | All of it, so that you can read `azsqlcd.run` and `azsqlcd.step`. The next run drops the objects of `azsqlcd_accept` and the four state tables first |
-| `live_tables.py` | Schema `azsqlcd` (the state of the tool) and the two users; schema `azsqlcd_tm` with two tables, a view and a procedure | All of it. The next run drops the objects of `azsqlcd_tm` and the four state tables first |
+| `live_tables.py` | Schema `azsqlcd` (the state of the tool) and the two users; schema `azsqlcd_tm` with two tables, a view and a procedure. In its first pass also the partition function `[PF_azsqlcd_tm_year]`, the partition scheme `[PS_azsqlcd_tm_year]` and four partitioned tables in `azsqlcd_tm` | The objects of the second pass and its state. The first pass drops its tables, its function and its scheme at its end. The next run drops the objects of `azsqlcd_tm`, a function and a scheme that a stopped run left, and the four state tables first |
 | `tests/live` | Temporary tables only | Nothing |
 
 The two users of the acceptance run have client ids that do not exist. No identity can sign in as
@@ -156,7 +156,7 @@ the waits and the number of connections in the scripts.
 | L12 | Up to 3 minutes of connect, plus the pause |
 | Driver contract | 2 minutes |
 | Acceptance | 59 to 75 seconds, measured. About 100 connections |
-| Table model (`live_tables.py`) | 37 seconds, measured |
+| Table model (`live_tables.py`) | 37 seconds, measured, for the pass without partitions. The pass for partitioned tables was not run: no time yet |
 | L13 | The life of the token (60 to 90 minutes) plus 90 minutes |
 | GitHub checklist (section 8) | The blueprint estimates 8 owner hours, plus 4 to 8 hours of one-time Azure and GitHub setup |
 
@@ -271,7 +271,34 @@ stopped inside that scenario, the next run refuses with `LIVE_BOUND_ENVIRONMENT`
 
 `live_tables.py` builds a repository with `table_model = true` and runs `gen.generate`,
 `gen.verify`, `release.build`, `plan.compute_plan` and `runner.deploy` with `tables.Hooks`. It
-writes `tables_report.json`. Exit codes as in section 3.
+writes `tables_report.json`. Exit codes as in section 3. It runs two passes, each with a state
+and a repository of its own: first the partitioned tables, then the tables without partitions.
+
+First pass, partitioned tables (P1 to P5, 17 checks). Not run on a database yet: it was written
+against the fake engine of the unit tests (`tests/unit/test_live_tables_script.py`). The script
+acts as the DBA: its owner session creates the partition function `[PF_azsqlcd_tm_year]` (three
+partitions by year) and the partition scheme `[PS_azsqlcd_tm_year]` (all partitions on
+`[PRIMARY]`), and drops both, with the tables of the pass, when the pass ends. A run that was
+stopped leaves them; the next run drops them first.
+
+| Scenario | Checks |
+|---|---|
+| P1: no scheme | `gen` writes one migration for a partitioned heap, a partitioned clustered table (a key and an index on the scheme, a key and an index on `[PRIMARY]`) and a partitioned clustered columnstore table; `verify` has no error. Plan and deploy: 22 `PARTITION_SCHEME_MISSING`, the message names the scheme, the schema does not exist, no run row |
+| P2: create | The owner session creates the function and the scheme. Plan: `WORK`. Deploy with the expected plan: 0. The owner session reads `sys.data_spaces`: the heap, the clustered key, the aligned index and the columnstore index are on the scheme; the other key and index are on a filegroup. Round trip: `catalog_tables.read_model` gives each table, and `emit` writes it as the file of the repository. The next plan: `NOOP`, no drift |
+| P3: compression | Release r3 sets `PAGE` on the heap and on the aligned index. The migration holds `REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE`. Deploy: 0. `sys.partitions.data_compression` is 2 for every partition of the heap and of the index; the index is still on the scheme; the rows are there |
+| P4: the column that the engine adds | Release r4 has three indexes that do not hold the partitioning column: an aligned nonclustered index with `STATISTICS_INCREMENTAL = ON`, a nonclustered columnstore index on the heap, and a clustered index of a new table. Deploy: 0, so the read-back agrees. `sys.stats.is_incremental` is 1. Round trip of the four tables |
+| P5: drift | An aligned index that is created again `ON [PRIMARY]` by hand: the plan reports drift on `index [IX_OrderLine_Product]`. Created again with no `ON` clause: it is on the scheme, no drift. A `SPLIT` of the function: one partition more, no drift. `CREATE TABLE` on a scheme that does not exist: the script records the error of the engine |
+
+When P4 fails at the read-back or at the round trip: the script prints the rows of
+`sys.index_columns` for the three indexes as (index, column, `key_ordinal`,
+`is_included_column`, `partition_ordinal`). The reader expects `key_ordinal = 0` and
+`is_included_column = 0` for the column that the engine added. If the engine gives another row,
+change the filter in `catalog_tables.py` (`_keys_and_indexes`) and the helper `tabular_rows` of
+`tests/unit/test_catalog_tables.py` together. P5 prints the error number of the engine for a
+missing scheme; the fake engine uses 1921, which is not measured. `docs/known-gaps.md`, section
+14, lists what stays open after this pass.
+
+Second pass, tables without partitions (the run of 2026-10-07, 18 of 18 checks, is in section 11):
 
 | Scenario | Checks |
 |---|---|
@@ -461,7 +488,9 @@ For the next run on the disposable database, these objects are needed to reach t
 above: a columnstore index, a partitioned table, a full-text index, a filtered index, an index
 with a non-default option, a compressed table, a foreign key with an action, a disabled
 constraint, a constraint with an engine-made name, an alias type, a synonym, a trigger, and a
-module whose definition starts with a comment.
+module whose definition starts with a comment. Since 2026-10-13 `live_tables.py` makes its own
+partitioned tables, a columnstore index and compressed tables in its first pass (section 5a);
+that pass was not run.
 
 ## 11. Write-path results (2026-10-07)
 

@@ -66,7 +66,8 @@ the database of what ran.
 - **Structural changes only.** Data batches are off by default (`DATA000`), and the proof does
   not model them.
 - **Object types that the table model refuses**: ledger, memory-optimized, graph and external
-  tables; partitioned tables, partition functions and partition schemes; XML, spatial, JSON,
+  tables; partition functions and partition schemes (a partitioned table is in the model and
+  names its scheme; a DBA owns the scheme), per-partition compression; XML, spatial, JSON,
   vector and full-text indexes; column sets, Always Encrypted, `FILESTREAM`, typed xml, CLR
   types; the enable and the disable of a constraint. `src/azsqlcd/parse.py` holds the list.
 - **Modules that stay unmanaged at export**: an encrypted module, a signed module, a CLR module,

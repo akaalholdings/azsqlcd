@@ -8,6 +8,35 @@ number and date. Version numbers follow semantic versioning.
 
 ### Added
 
+- Partitioned tables and indexes in the table model (`table_model = true`). A table, a
+  `PRIMARY KEY` or `UNIQUE` constraint and an index (rowstore or columnstore) can state
+  `ON [scheme]([column])`, with one partitioning column. `export` no longer leaves a partitioned
+  table unmanaged with the reason "it is partitioned": it writes the table file with its `ON`
+  clauses. `gen`, `verify`, `plan`, `deploy`, the read-back, `drift` and `baseline` see the place
+  of the table and of each key and index. Partition functions and partition schemes are not
+  managed: a DBA creates them in every environment before the release. This did not run on a
+  database yet (`docs/known-gaps.md`, section 14). How to use it: `docs/setup.md`, section 7,
+  "Partitioned tables".
+- The file of a partitioned table writes the place of every key and index:
+  `ON [scheme]([column])`, or `ON [PRIMARY]` for one that is not on a scheme (`NF000` when a
+  clause is missing). The file of a table that is not partitioned did not change.
+- One compression for a table or an index. A table whose partitions do not all have the same
+  compression stays unmanaged at `export`, with a reason that says so.
+- Reason code 22 `PARTITION_SCHEME_MISSING`: `plan` and `deploy` refuse a release that creates a
+  table, a key or an index on a partition scheme that the database does not have, before any
+  statement runs. Each scheme is a detail line.
+- `gen` refusal `PARTITION_CHANGE` (in `GEN_REFUSED`): `gen` writes no statement that moves a
+  table on to a partition scheme, off one, to another scheme or to another partitioning column,
+  and no `ALTER COLUMN` of a partitioning column. A person writes that migration, and `verify`
+  proves it (`docs/runbook.md`, "Partitioned tables").
+- The index option `STATISTICS_INCREMENTAL = ON | OFF` for an index or a key on a partition
+  scheme. Before, the parser refused it.
+- `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` is a model statement.
+  `gen` writes it for a compression change of a partitioned heap. It needs `allow LONG_LOCK` in
+  a transactional migration, as `REBUILD WITH (...)` does.
+- `scripts/live_tables.py` has a first pass for partitioned tables (17 checks). It makes and
+  drops its own partition function and scheme. Not run yet.
+
 - Sign-in with a managed identity: with `AZSQLCD_AUTH=managed-identity` a database command asks
   the managed identity of the machine for the token and needs no Azure CLI.
   `AZSQLCD_MANAGED_IDENTITY_CLIENT_ID` names a user-assigned identity.
@@ -64,6 +93,22 @@ number and date. Version numbers follow semantic versioning.
 
 ### Changed
 
+- The capture of every table has the new property `partition`. A table capture that an older
+  version stored does not hold it. No older version could record a partitioned table, so drift,
+  the plan and `baseline` read the missing property as "not partitioned": a table that was not
+  partitioned gives no drift, and a heap that was moved on to a scheme behind the tool is drift
+  of `partition`. The object gets the property the next time it is recorded.
+- The drop of a clustered index, a clustered columnstore index or a clustered `PRIMARY KEY` or
+  `UNIQUE` constraint of a table that exists needs `allow LONG_LOCK` in a transactional
+  migration: the table becomes a heap, and the engine writes every row again and rebuilds every
+  nonclustered index. This is also true for a table that is not partitioned. `lint` cannot see
+  that an index is clustered, so `verify` asks for the line (`PRF003`) and `gen` writes it.
+  `lint` accepts the line on a `DROP INDEX` or `DROP CONSTRAINT`. Before, `gen` wrote such a drop
+  with no allow line, also as the first statement of the drop and create of a clustered item.
+- The note of a plan with `table_model = false` says that the partition scheme check does not
+  run.
+- A model statement that states `ON [PRIMARY]` behind a key or an index keeps the clause. On a
+  table that is not partitioned the model is the same as before.
 - `lint`, `NTX004` reads each statement of a batch alone. Before, one columnstore build, one
   `ALTER COLUMN` or one `WAIT_AT_LOW_PRIORITY` anywhere in a batch switched the rule off for the
   whole batch. An online rowstore index build with no low-priority wait is now reported also when
