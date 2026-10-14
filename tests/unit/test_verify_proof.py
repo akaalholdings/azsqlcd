@@ -282,6 +282,23 @@ def test_a_raw_batch_for_an_object_of_the_unmanaged_list_passes_and_is_not_repla
     assert errors(check(repo)) == []
 
 
+def test_a_raw_batch_that_creates_a_partition_function_or_scheme_follows_the_rules_of_any_raw_batch(
+    tmp_path: Path,
+):
+    """Partition functions and schemes are not objects of the model, and the raw rules did not
+    change for them: the batch is for an unmanaged object, is declared, and is not replayed."""
+    statements = (
+        "CREATE PARTITION FUNCTION [PF_LogYear] (date) AS RANGE RIGHT FOR VALUES ('2026-01-01');",
+        "CREATE PARTITION SCHEME [PS_LogYear] AS PARTITION [PF_LogYear] ALL TO ([PRIMARY]);",
+    )
+    body = "".join(RAW_FOR_LOG + statement + "\nGO\n" for statement in statements)
+    repo = start(tmp_path)
+    R.put(repo, one("0001__raw.sql", body))
+    assert errors(check(repo)) == []
+    R.put(repo, one("0001__raw.sql", body.replace("[audit].[Log]", "[sales].[Order]")))
+    assert [code for code, _, _ in errors(check(repo))] == ["RAW001", "RAW001"]  # one for each batch
+
+
 USP_TOUCH = "schema/procedures/sales.usp_Touch.sql"
 RAW_FOR_LOG = (
     "-- azsqlcd:raw TABLE:[audit].[Log] reason: housekeeping\n"
@@ -443,6 +460,225 @@ def test_gen_then_verify_passes_for_every_accepted_pair(tmp_path: Path, case: st
     assert len(errors(check(repo))) == result.text.count("reason: TODO")
     give_reasons(repo)
     assert errors(check(repo)) == []
+
+
+# ------------------------------------------------------------------ partitioned tables
+ON_YEAR = "ON [PS_OrderYear]([OrderDate])"
+LINE = "schema/tables/sales.OrderLine.sql"
+STAGE = "schema/tables/sales.OrderLineStage.sql"
+ALLOW_LOCK = "-- azsqlcd:allow LONG_LOCK {} reason: 2000 rows, written in under a second\n"
+LOSSY = "-- azsqlcd:allow ALTER_COLUMN_LOSSY {} reason: checked, no value is cut\n"
+# the hint of PARTITION_CHANGE, as a migration: the clustered key is created again with its place;
+# a heap gets a clustered index with the place, and the index is dropped
+MOVE_KEY = (
+    ALLOW_LOCK.format("[sales].[OrderLine]")
+    + "ALTER TABLE [sales].[OrderLine] DROP CONSTRAINT [PK_OrderLine];\nGO\n"
+    + ALLOW_LOCK.format("[sales].[OrderLine]")
+    + "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [PK_OrderLine] PRIMARY KEY CLUSTERED "
+    f"([OrderDate], [OrderLineId]) {ON_YEAR};\nGO\n"
+)
+MOVE_HEAP = (
+    ALLOW_LOCK.format("[sales].[OrderLineStage]")
+    + "CREATE CLUSTERED INDEX [CIX_Move] ON [sales].[OrderLineStage] ([OrderDate]) ON [PRIMARY];\nGO\n"
+    + ALLOW_LOCK.format("[sales].[OrderLineStage]")
+    + "DROP INDEX [CIX_Move] ON [sales].[OrderLineStage];\nGO\n"
+)
+
+
+def pair(tmp_path: Path, case: str) -> Path:
+    """A repository whose main holds the base side of a fixture pair and whose tree holds the head."""
+    repo = R.new_repo(tmp_path / "r", dict(loader.object_files(case, "base")))
+    R.put(repo, {path: None for path, _ in loader.object_files(case, "base")})
+    R.put(repo, dict(loader.object_files(case, "head")))
+    return repo
+
+
+@pytest.mark.parametrize("case", [case for case in loader.CASES if case.startswith("refuse_partition")])
+def test_a_table_that_changes_its_place_with_no_migration_fails_and_names_the_refusal_of_gen(
+    tmp_path: Path, case: str
+):
+    found = check(pair(tmp_path, case))
+    assert errors(found) == [("PRF002", "migrations/migrations.sum", 1)]
+    message = the(found, "PRF002").message
+    assert "hand-write the migration" in message and "PARTITION_CHANGE TABLE:[sales].[OrderLine" in message
+
+
+def test_a_hand_written_move_of_a_table_on_and_off_a_partition_scheme_is_proven(tmp_path: Path):
+    """gen refuses these changes (PARTITION_CHANGE). The statements of its hint are model
+    statements with the place written: lint reads them and the replay follows the table."""
+    repo = pair(tmp_path, "refuse_partition_a_table_that_was_not")
+    R.put(repo, one("0001__move.sql", MOVE_KEY + MOVE_HEAP))
+    assert errors(check(repo)) == []
+    # without its allow line the build is as any other build on a table that exists
+    R.put(repo, one("0001__move.sql", MOVE_KEY + MOVE_HEAP.split("\n", 1)[1]))
+    assert errors(check(repo)) == [("LCK001", "migrations/0001__move.sql", 9)]
+
+
+def test_a_hand_written_change_of_the_partition_scheme_is_proven(tmp_path: Path):
+    repo = pair(tmp_path, "refuse_partition_scheme_change")
+    body = (
+        ALLOW_LOCK.format("[sales].[OrderLine]")
+        + "DROP INDEX [CIX_OrderLine] ON [sales].[OrderLine];\nGO\n"
+        + ALLOW_LOCK.format("[sales].[OrderLine]")
+        + "CREATE CLUSTERED INDEX [CIX_OrderLine] ON [sales].[OrderLine] ([OrderDate], [OrderLineId]) "
+        "ON [PS_OrderMonth]([OrderDate]);\nGO\n"
+    )
+    R.put(repo, one("0001__move.sql", body))
+    assert errors(check(repo)) == []
+    # DROP_EXISTING would move the table in one statement that the proof cannot follow
+    R.put(
+        repo,
+        one("0001__move.sql", body.split("GO\n", 1)[1].replace(") ON", ") WITH (DROP_EXISTING = ON) ON")),
+    )
+    assert errors(check(repo)) == [("UNSUPPORTED", "migrations/0001__move.sql", 4)]
+
+
+def test_the_partitioned_table_of_the_setup_document_is_canonical_and_its_hand_written_move_is_proven(
+    tmp_path: Path,
+):
+    """docs/setup.md, "Partitioned tables", shows a table file and the migration that a person
+    writes to move that table on to its scheme. A reader copies both: the file must pass NF000,
+    gen must refuse the move as the text says, and verify must prove the migration."""
+    setup = (Path(__file__).resolve().parents[2] / "docs" / "setup.md").read_text(encoding="utf-8")
+    part = setup.split("\n### Partitioned tables\n", 1)[1].split("\n## ", 1)[0]
+    file, move = (block.split("```", 1)[0] for block in part.split("```sql\n")[1:])
+    plain = file
+    for clause in (f" {ON_YEAR}", f"\n{ON_YEAR}", f"\n    {ON_YEAR}", " ON [PRIMARY]"):
+        plain = plain.replace(clause, "")
+    assert "ON [" not in plain.replace("ON [sales].[OrderLine]", "")  # the table before the move
+    repo = R.new_repo(tmp_path / "r", {**R.SALES, LINE: plain})
+    R.put(repo, {LINE: file})
+    with pytest.raises(ToolError) as refused:
+        gen.generate(repo, "main", "move", [])
+    assert [r["code"] for r in refused.value.detail["refusals"]] == ["PARTITION_CHANGE"]
+    written = move.replace("<why the lock is acceptable>", "200 rows")
+    R.put(repo, one("0001__move.sql", written))
+    assert errors(check(repo)) == []  # NF000 of the file and the proof of the move
+    # the index that the file puts on the scheme stays on [PRIMARY] when only the key is built again
+    R.put(repo, one("0001__move.sql", written.split("DROP INDEX", 1)[0]))
+    assert [(f.code, f.path) for f in check(repo) if f.severity == "error"] == [("PRF001", LINE)]
+
+
+@pytest.mark.parametrize(
+    ("written", "file", "properties"),
+    [
+        # the key is built where the table is: the table did not move, and the file says it did
+        (
+            (MOVE_KEY.replace(f" {ON_YEAR}", ""), MOVE_HEAP),
+            LINE,
+            ["constraints[pk_orderline].on", "indexes[ix_orderline_product].on", "on"],
+        ),
+        # a clustered index with no ON clause is built on the scheme of the heap: nothing ended
+        ((MOVE_KEY, MOVE_HEAP.replace(" ON [PRIMARY]", "")), STAGE, ["on"]),
+    ],
+)
+def test_a_statement_that_does_not_write_the_new_place_moves_no_table_and_fails_the_proof(
+    tmp_path: Path, written: tuple[str, str], file: str, properties: list[str]
+):
+    repo = pair(tmp_path, "refuse_partition_a_table_that_was_not")
+    R.put(repo, one("0001__move.sql", "".join(written)))
+    found = [f for f in check(repo) if f.severity == "error"]
+    assert [(f.code, f.path) for f in found] == [("PRF001", file)] * len(properties)
+    assert [f.message.split(": ")[1] for f in found] == properties
+
+
+def test_a_hand_written_alter_or_drop_of_a_partitioning_column_fails_the_proof_at_its_line(tmp_path: Path):
+    """The engine refuses both statements while the column partitions the table or an index, so a
+    migration that holds one must not be proven."""
+    repo = pair(tmp_path / "alter", "refuse_alter_of_the_partitioning_column")
+    alter = (
+        "ALTER TABLE [sales].[Shipment] ADD [Note] varchar(50) NULL;\nGO\n"
+        + LOSSY.format("[sales].[Shipment].[ShippedOn]")
+        + "ALTER TABLE [sales].[Shipment] ALTER COLUMN [ShippedOn] datetime2(0) NOT NULL;\nGO\n"
+    )
+    R.put(repo, one("0001__x.sql", alter))
+    found = check(repo)
+    assert errors(found) == [("PRF001", "migrations/0001__x.sql", 6)]
+    assert "it is the partitioning column of index [IX_Shipment_Id]" in the(found, "PRF001").message
+
+    repo = pair(tmp_path / "drop", "refuse_drop_of_the_partitioning_column")
+    drop = (
+        "-- azsqlcd:allow DROP_COLUMN [sales].[OrderLineStage].[OrderDate] reason: replaced by ShipDate\n"
+        "ALTER TABLE [sales].[OrderLineStage] DROP COLUMN [OrderDate];\nGO\n"
+    )
+    R.put(repo, one("0001__x.sql", drop))
+    found = check(repo)
+    assert errors(found) == [("PRF001", "migrations/0001__x.sql", 4)]
+    assert (
+        "DROP COLUMN [OrderDate]: it is the partitioning column of the table" in the(found, "PRF001").message
+    )
+
+
+def test_a_unique_index_on_a_scheme_without_the_partitioning_column_in_its_key_is_not_proven(tmp_path: Path):
+    """The engine refuses the statement (error 1908); the proof must refuse it too."""
+    repo = pair(tmp_path, "partitioned_add_aligned_index")
+    R.put(repo, {path: text for path, text in loader.object_files("partitioned_add_aligned_index", "base")})
+    body = (
+        ALLOW_LOCK.format("[sales].[OrderLine]")
+        + "CREATE UNIQUE NONCLUSTERED INDEX [UX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId]) "
+        f"{ON_YEAR};\n"
+    )
+    R.put(repo, one("0001__x.sql", body))
+    found = check(repo)
+    assert errors(found) == [("PRF001", "migrations/0001__x.sql", 4)]
+    assert "[OrderDate]" in the(found, "PRF001").message
+
+
+def test_a_table_file_of_a_partitioned_table_that_leaves_out_the_place_of_an_index_fails_nf000(
+    tmp_path: Path,
+):
+    """The engine puts such an index on the scheme of the table, so the file would not say what the
+    catalog holds. The canonical form always writes the place."""
+    case = "partitioned_add_aligned_index"
+    repo = R.new_repo(tmp_path / "r", dict(loader.object_files(case, "base")))
+    text = dict(loader.object_files(case, "base"))[LINE]
+    assert f"\n    {ON_YEAR};\nGO\nCREATE NONCLUSTERED INDEX [IX_OrderLine_Quantity]" in text
+    R.put(
+        repo, {LINE: text.replace(f"\n    {ON_YEAR};\nGO\nCREATE NONCLUSTERED", ";\nGO\nCREATE NONCLUSTERED")}
+    )
+    found = check(repo)
+    assert errors(found) == [("NF000", LINE, 11)]  # and no migration is asked for: the model is the same
+    assert "the canonical form has ON [PS_OrderYear]" in the(found, "NF000").message
+
+
+def test_a_hand_written_drop_of_the_clustered_index_needs_long_lock_and_one_of_another_index_does_not(
+    tmp_path: Path,
+):
+    """The table becomes a heap: every row is written again and every nonclustered index is rebuilt.
+    lint cannot see that the index is clustered, so the proof asks for the line, in a tx migration."""
+    repo = pair(tmp_path, "partitioned_clustered_index_dropped_to_heap")
+    drop = "DROP INDEX [CIX_OrderLine] ON [sales].[OrderLine];\nGO\n"
+    R.put(repo, one("0001__heap.sql", drop))
+    found = check(repo)
+    assert errors(found) == [("PRF003", "migrations/0001__heap.sql", 3)]
+    assert "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason:" in the(found, "PRF003").message
+    R.put(repo, one("0001__heap.sql", ALLOW_LOCK.format("sales.ORDERLINE") + drop))
+    assert errors(check(repo)) == []
+    # nontx: as for every other LONG_LOCK, no line is asked for
+    R.put(repo, one("0001__heap.sql", drop, mode="nontx expected-minutes: 30"))
+    assert errors(check(repo)) == []
+
+    # the drop of a nonclustered index writes no row: a LONG_LOCK line on it matches nothing
+    repo = pair(tmp_path / "nci", "partitioned_drop_index")
+    other = (
+        ALLOW_LOCK.format("[sales].[OrderLine]")
+        + "DROP INDEX [IX_OrderLine_Product] ON [sales].[OrderLine];\nGO\n"
+        + "DROP INDEX [IX_OrderLine_Quantity] ON [sales].[OrderLine];\nGO\n"
+    )
+    R.put(repo, one("0001__x.sql", other))
+    found = check(repo)
+    assert errors(found) == [("PRF003", "migrations/0001__x.sql", 3)]
+    assert "drops no clustered index or key" in the(found, "PRF003").message
+
+
+def test_a_partition_function_or_scheme_in_a_model_batch_is_refused_by_lint_and_by_the_parser(tmp_path: Path):
+    repo = start(tmp_path)
+    scheme = "CREATE PARTITION SCHEME [PS_OrderYear] AS PARTITION [PF_OrderYear] ALL TO ([PRIMARY]);\nGO\n"
+    R.put(repo, one("0001__x.sql", scheme))
+    assert errors(check(repo)) == [
+        ("MODEL_STATEMENT", "migrations/0001__x.sql", 3),
+        ("UNSUPPORTED", "migrations/0001__x.sql", 3),
+    ]
 
 
 TEAM = "schema/tables/sales.Team.sql"

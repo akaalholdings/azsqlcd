@@ -1,0 +1,20 @@
+{
+  "class": "CreateIndex",
+  "schema": "sales",
+  "table": "OrderLine",
+  "index": {
+    "class": "Index",
+    "name": "UX_OrderLine_Date_Line",
+    "unique": true,
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "OrderDate", "descending": false},
+      {"class": "KeyColumn", "name": "OrderLineId", "descending": true}
+    ],
+    "included": ["Quantity"],
+    "filter": null,
+    "options": [["DATA_COMPRESSION", "ROW"], ["STATISTICS_INCREMENTAL", "ON"]],
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  },
+  "exec_options": [["ONLINE", "ON"]]
+}

@@ -1,0 +1,8 @@
+{
+  "class": "RebuildTable",
+  "schema": "sales",
+  "table": "OrderLineStage",
+  "compression": "PAGE",
+  "exec_options": [["ONLINE", "ON"]],
+  "all_partitions": true
+}

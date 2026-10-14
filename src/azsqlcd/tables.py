@@ -23,6 +23,13 @@ name of the history table, retention) are fields of the model and properties of 
 read-back, drift and the baseline compare see them as any other field. A history table is owned
 by the engine: export writes no file for it and lists it in the report; it is never unmanaged,
 never `only_here`, and nothing depends on it being managed.
+
+Partitioned tables and indexes: the place of a table and of each key and index (Table.on, .on of a
+key or an index) is a field of the model and a part of the capture, so read-back, drift, export and
+the baseline compare see it as any other field. A partition scheme is no object of the model and
+the tool never creates one: Hooks.missing_partition_schemes names the schemes that the pending
+statements use and that the database does not hold, and the plan refuses the release with
+PARTITION_SCHEME_MISSING before any statement runs.
 """
 
 from __future__ import annotations
@@ -39,7 +46,7 @@ from azsqlcd.catalog import Difference
 from azsqlcd.catalog_tables import SystemNamed, Unsupported, project_options
 from azsqlcd.config import Config
 from azsqlcd.errors import ToolError, failed, refused
-from azsqlcd.lex import BOM
+from azsqlcd.lex import BOM, LexError, significant, tokenize
 from azsqlcd.model import (
     AddColumn,
     AddConstraint,
@@ -60,6 +67,7 @@ from azsqlcd.model import (
     Model,
     ModelObject,
     Operation,
+    Partition,
     PrimaryKey,
     Rename,
     Schema,
@@ -112,19 +120,52 @@ def head_model(files: Mapping[str, bytes]) -> Model:
         ) from None
 
 
+def _operation(migration: chain.Migration, batch: chain.MigrationBatch) -> Operation:
+    """The operation of one model batch. ToolError REFUSED MIGRATION_INVALID."""
+    try:
+        return parse_statement(batch.text)
+    except ParseError as e:
+        line = batch.first_line + e.line - 1
+        message = f"{migration.file} line {line}: {e.code}: {e.message}"
+        raise refused("MIGRATION_INVALID", message, file=migration.file, line=line) from None
+
+
 def _operations(migration: chain.Migration) -> list[Operation]:
     """The operations of the model batches of a migration. Data and raw batches are not modelled."""
-    found: list[Operation] = []
-    for batch in migration.batches:
-        if batch.kind != "model":
-            continue
-        try:
-            found.append(parse_statement(batch.text))
-        except ParseError as e:
-            line = batch.first_line + e.line - 1
-            message = f"{migration.file} line {line}: {e.code}: {e.message}"
-            raise refused("MIGRATION_INVALID", message, file=migration.file, line=line) from None
-    return found
+    return [_operation(migration, batch) for batch in migration.batches if batch.kind == "model"]
+
+
+def _schemes_named(op: Operation) -> list[str]:
+    """The partition schemes that a statement puts a table, a key or an index on, as it writes them.
+
+    A statement without an ON clause, or with ON [PRIMARY], names no scheme: an index without a
+    place on a partitioned table goes on the scheme of the table, which is there.
+    """
+    match op:
+        case CreateTable():
+            places = [op.table.on, *(item.on for _, item in op.table.placed_items())]
+        case CreateIndex():
+            places = [op.index.on]
+        case AddConstraint(constraint=PrimaryKey() | Unique() as key):
+            places = [key.on]
+        case _:
+            places = []
+    return [on.scheme for on in places if isinstance(on, Partition)]
+
+
+def _schemes_created(text: str) -> list[str]:
+    """The partition schemes that a raw or data batch creates: CREATE PARTITION SCHEME <name>."""
+    try:
+        toks = significant(tokenize(text))
+    except LexError:
+        return []
+    words = [tok.text.upper() if tok.kind == "word" else "" for tok in toks]
+    return [
+        toks[at + 3].value
+        for at in range(len(toks) - 3)
+        if words[at : at + 3] == ["CREATE", "PARTITION", "SCHEME"]
+        and toks[at + 3].kind in ("word", "bident", "qident")
+    ]
 
 
 def _table_key(schema: str, name: str) -> str:
@@ -362,7 +403,9 @@ class Hooks:
                 skipped = catalog_tables.NOT_IN_DRIFT.get(str(row.capture.get("kind")), frozenset())
                 differences = [
                     difference
-                    for difference in catalog.capture_differences(row.capture, live[fold(key)])
+                    for difference in catalog.capture_differences(
+                        catalog_tables.with_stored_defaults(row.capture), live[fold(key)]
+                    )
                     if difference.property not in skipped
                 ]
             else:
@@ -371,6 +414,31 @@ class Hooks:
             if differences:
                 drift[key] = differences
         return drift
+
+    # -------------------------------------------------------------- partition schemes
+    def missing_partition_schemes(self, session: Session, work: Work) -> list[str]:
+        """Names of the partition schemes that a pending model statement creates a table, a key or
+        an index on and that the database does not hold: each once, as its first statement writes
+        it, in the order of the names without case. Read-only: one read of sys.partition_schemes,
+        and no batch when no pending statement names a scheme.
+
+        A scheme that a raw or data batch of the pending migrations creates before the statement
+        that uses it (CREATE PARTITION SCHEME <name>) is not missing: the release brings it.
+        """
+        created: set[str] = set()
+        named: dict[str, str] = {}
+        for migration in work.pending:
+            for batch in migration.batches:
+                if batch.kind != "model":
+                    created |= {fold(name) for name in _schemes_created(batch.text)}
+                    continue
+                for scheme in _schemes_named(_operation(migration, batch)):
+                    if fold(scheme) not in created:
+                        named.setdefault(fold(scheme), scheme)
+        if not named:
+            return []
+        present = {fold(name) for name in catalog_tables.partition_schemes(session)}
+        return [scheme for key, scheme in sorted(named.items()) if key not in present]
 
     # -------------------------------------------------------------- plan step 8
     def _blockers(self, session: Session, work: Work, config: Config, recorded: State) -> list[str]:
@@ -902,7 +970,8 @@ def _against_reference(
     A constraint that the engine named here is the constraint of the reference with the same
     capture value (kind, columns, target, expression text), whatever name the reference has.
     """
-    differing = [d.property for d in catalog.capture_differences(dict(reference), dict(live))]
+    stored = catalog_tables.with_stored_defaults(dict(reference))
+    differing = [d.property for d in catalog.capture_differences(stored, dict(live))]
     fixed = {f"constraint {names.quote(item.fixed_name)}": item for item in engine_named}
     free = [label for label in fixed if label not in reference]
     renames = [item for label, item in fixed.items() if label in reference and label not in differing]

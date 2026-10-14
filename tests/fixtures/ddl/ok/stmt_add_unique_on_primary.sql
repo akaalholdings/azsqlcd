@@ -1,0 +1,1 @@
+ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [UQ_OrderLine] UNIQUE NONCLUSTERED ([OrderLineId]) ON [PRIMARY];

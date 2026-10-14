@@ -41,12 +41,21 @@ What is checked. Only modelled objects count: modules, rows and unmanaged object
   * Dynamic data masking. ADD MASKED and DROP MASKED need a column that is not computed and not a
     period column; DROP MASKED needs a mask. ADD MASKED on a masked column replaces the mask.
     ALTER COLUMN with a data type removes the mask of the column, as the engine does.
+  * Partition schemes. A scheme is a name: the model does not hold it, and `plan` asks the database
+    for it. A new key or index gets the place that the engine gives it (model.place_on): without
+    an ON clause that is the place of the table. The partitioning column is a column of the table,
+    and a key column of a PRIMARY KEY, UNIQUE constraint or unique index on a scheme (engine error
+    1908). A table moves by one statement only: a clustered index or key that is created on a heap
+    and states its place takes the rows there (to a scheme, to another scheme or column, or to
+    [PRIMARY]); the other keys and indexes stay where they are. A drop of the clustered index or
+    key leaves the heap where it is. ALTER COLUMN and DROP COLUMN of a partitioning column, of
+    the table or of an index, are blocked. sp_rename of the column is followed.
 
 A column reference in an expression is found by its token: any identifier token with the name of
 the column counts. A function or type of the same name is not told apart, so a check can block
 too much and never too little.
 
-Public API: ReplayError, apply, replay, column_dependants, only_widens, has_key.
+Public API: ReplayError, apply, replay, column_dependants, only_widens, has_key, partitioned_on.
 """
 
 from __future__ import annotations
@@ -57,6 +66,7 @@ from typing import NoReturn, assert_never
 
 from azsqlcd import names
 from azsqlcd.model import (
+    ON_PRIMARY,
     TABLE_COMPRESSIONS,
     AddColumn,
     AddConstraint,
@@ -89,6 +99,8 @@ from azsqlcd.model import (
     MaskColumn,
     Model,
     Operation,
+    Partition,
+    Place,
     PrimaryKey,
     RebuildTable,
     Rename,
@@ -103,6 +115,7 @@ from azsqlcd.model import (
     UnmaskColumn,
     UnversionedTable,
     fold,
+    place_on,
 )
 
 _KIND = {PrimaryKey: "PRIMARY KEY", Unique: "UNIQUE", ForeignKey: "FOREIGN KEY", Check: "CHECK"}
@@ -500,7 +513,7 @@ def _set_system_versioning(model: Model, op: SetSystemVersioning) -> Model:
     if not op.on:
         if table.temporal is None:
             _blocked(table.key, "SYSTEM_VERSIONING = OFF: the table is not system-versioned")
-        return model.replace(UnversionedTable(*parts))
+        return model.replace(UnversionedTable(*parts, on=table.on))
     if table.temporal is not None:
         _blocked(table.key, "SYSTEM_VERSIONING = ON: the table is system-versioned already")
     start = [c.name for c in table.columns if c.generated == "ROW_START"]
@@ -517,9 +530,60 @@ def _set_system_versioning(model: Model, op: SetSystemVersioning) -> Model:
     temporal = Temporal(start[0], end[0], op.history_schema, op.history_table, op.retention)
     _need_history(model, table, temporal)
     try:
-        return model.replace(Table(*parts, temporal))
+        return model.replace(Table(*parts, temporal, on=table.on))
     except ValueError as e:
         _blocked(table.key, str(e))
+
+
+# ------------------------------------------------------------------ partition schemes
+def partitioned_on(table: Table, column: str) -> list[str]:
+    """What of the table is partitioned on the column: 'the table' and 'index [IX_Order_Date]'
+    for each key or index on a scheme with that partitioning column. The clustered key or index
+    is the table and is not named again."""
+    found = ["the table"] if table.on is not None and _same(table.on.column, column) else []
+    clustered = table.clustered_item()
+    return found + [
+        label
+        for label, item in table.placed_items()
+        if item is not clustered and isinstance(item.on, Partition) and _same(item.on.column, column)
+    ]
+
+
+def _need_no_partitioning_column(table: Table, column: Column, what: str) -> None:
+    users = partitioned_on(table, column.name)
+    if users:
+        shown = names.quote(column.name)
+        _blocked(table.key, f"{what} {shown}: it is the partitioning column of {' and '.join(users)}")
+
+
+def _restated[T: Constraint | Index](item: T, on: Partition | None) -> T:
+    """A key or an index that stays where it is, stated against a table that is now at `on`: off
+    a scheme it is ON [PRIMARY] on a partitioned table and has no place on any other table."""
+    if not isinstance(item, PrimaryKey | Unique | Index) or isinstance(item.on, Partition):
+        return item
+    return replace(item, on=place_on(on, ON_PRIMARY))
+
+
+def _placed[T: PrimaryKey | Unique | Index](table: Table, item: T) -> tuple[Table, T]:
+    """The table and a new key or index of it, each at the place that the engine gives it.
+
+    A clustered one is the table. With an ON clause it takes the rows of the heap to that place:
+    the one statement that moves a table. Every other one states its own place or gets the place
+    of the table (model.place_on).
+    """
+    on = table.on
+    if item.clustered and item.on is not None:
+        on = item.on if isinstance(item.on, Partition) else None
+    if on != table.on:
+        table = _changed(
+            table.key,
+            table,
+            constraints=tuple(_restated(c, on) for c in table.constraints),
+            indexes=tuple(_restated(i, on) for i in table.indexes),
+            on=on,
+        )
+    place: Place | None = place_on(on, item.on)
+    return table, replace(item, on=place)
 
 
 # ------------------------------------------------------------------ changes of one table
@@ -594,6 +658,7 @@ def _add_constraint(model: Model, op: AddConstraint) -> Model:
     if isinstance(constraint, PrimaryKey | Unique):
         _need_clustering(table, constraint, _label(constraint))
         compression = None if constraint.clustered else compression
+        table, constraint = _placed(table, constraint)
     return model.replace(
         _changed(table.key, table, constraints=(*table.constraints, constraint), compression=compression)
     )
@@ -631,6 +696,7 @@ def _alter_column(model: Model, op: AlterColumn) -> Model:
     if column.computed is not None:
         _blocked(table.key, f"column {shown} is computed: ALTER COLUMN cannot change it")
     _need_no_period_column(table, column, "ALTER COLUMN")
+    _need_no_partitioning_column(table, column, "ALTER COLUMN")
     widening = only_widens(column, op.type, op.nullable, op.collation)
     users = column_dependants(model, op.schema, op.table, op.column, widening=widening)
     if users:
@@ -728,6 +794,7 @@ def _drop_column(model: Model, op: DropColumn) -> Model:
     table = _table(model, op.schema, op.table)
     column = _column(table, op.column)
     _need_no_period_column(table, column, "DROP COLUMN")
+    _need_no_partitioning_column(table, column, "DROP COLUMN")
     users = column_dependants(model, op.schema, op.table, op.column)
     if column.default is not None:
         users.append(_label(column.default))
@@ -831,9 +898,14 @@ def _rename_column(model: Model, schema: str, table_name: str, old: str, new: st
     def keys(found: Iterable[KeyColumn]) -> tuple[KeyColumn, ...]:
         return tuple(replace(k, name=new) if _same(k.name, old) else k for k in found)
 
+    def place[P: (Place, Partition)](on: P | None) -> P | None:
+        if isinstance(on, Partition) and _same(on.column, old):
+            return replace(on, column=new)
+        return on
+
     def constraint(c: Constraint, own: bool) -> Constraint:
         if isinstance(c, PrimaryKey | Unique):
-            return replace(c, columns=keys(c.columns)) if own else c
+            return replace(c, columns=keys(c.columns), on=place(c.on)) if own else c
         if isinstance(c, ForeignKey):
             columns = renamed(c.columns) if own else c.columns
             referenced = renamed(c.ref_columns) if _references(c, schema, table_name) else c.ref_columns
@@ -852,8 +924,10 @@ def _rename_column(model: Model, schema: str, table_name: str, old: str, new: st
             columns=tuple(replace(c, name=new) if c is column else c for c in t.columns),
             constraints=constraints,
             indexes=tuple(
-                replace(i, columns=keys(i.columns), included=renamed(i.included)) for i in t.indexes
+                replace(i, columns=keys(i.columns), included=renamed(i.included), on=place(i.on))
+                for i in t.indexes
             ),
+            on=place(t.on),
         )
 
     return _map_tables(model, change)
@@ -1062,6 +1136,7 @@ def apply(model: Model, op: Operation) -> Model:
             _need_columns(table, columns, f"index {names.quote(index.name)}")
             _need_clustering(table, index, f"index {names.quote(index.name)}")
             compression = None if index.clustered else table.compression
+            table, index = _placed(table, index)
             return model.replace(
                 _changed(table.key, table, indexes=(*table.indexes, index), compression=compression)
             )

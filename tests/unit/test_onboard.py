@@ -51,6 +51,7 @@ from unit.test_catalog_tables import (
     SALES,
     CatalogRows,
     only,
+    partitioned,
     price_rows,
     rows_from_model,
     session_for,
@@ -1353,6 +1354,59 @@ def test_the_export_gives_a_temporal_table_its_file_and_names_its_history_table_
     whole_list = result.report_md.split("## List for azsqlcd.toml")[1]
     assert "Price_History" not in whole_list
     assert export_all(with_tables(Db())).history_tables == ()  # a database with no temporal table
+
+
+def test_the_export_gives_a_partitioned_table_its_file_with_the_place_of_the_table_and_of_each_index():
+    model, table = partitioned("table_partitioned_canonical_form")
+    heap_model, heap = partitioned("table_partitioned_heap_canonical_form")
+    catalog_rows = rows_from_model(Model([*model.values(), heap]))
+    # one partition of the heap is PAGE and the others are not: the model holds one compression
+    only(catalog_rows, "indexes", type=0)["compression_kinds"] = 2
+
+    result = export_all(with_tables(Db(), catalog_rows))
+
+    assert set(result.files) == {"schema/schemas/sales.sql", "schema/tables/sales.OrderLine.sql"}
+    text = result.files["schema/tables/sales.OrderLine.sql"].decode()
+    assert text == emit.emit_object_file(table)  # the canonical form: every place is written
+    assert text.count("ON [PS_OrderYear]([OrderDate])") == 4 and text.count("ON [PRIMARY]") == 2
+    assert result.snapshot["captures"][table.key]["partition"] == {
+        "scheme": "PS_OrderYear",
+        "column": "OrderDate",
+    }
+    # a partitioned table is no longer unmanaged for being partitioned; the one that stays out says why
+    assert [(q.object_key, q.code) for q in result.unmanaged] == [(heap.key, "UNSUPPORTED")]
+    assert "per-partition compression is outside the model" in result.unmanaged[0].reason
+    assert "it is partitioned" not in result.report_md
+    assert "PS_OrderYear" not in result.report_md.split("## List for azsqlcd.toml")[1]  # no scheme is listed
+
+
+def test_a_baseline_records_a_partitioned_table_and_refuses_one_whose_index_is_in_another_place():
+    model, table = partitioned("table_partitioned_canonical_form")
+    b = bundle(proc("usp_x"), *table_files(model))
+    hooks = tables.Hooks(b, TABLE_CONFIG)
+    db = with_tables(Db(live(USP_X, stored("usp_x"))), model)
+
+    run_baseline(db, b, table_hooks=hooks)
+
+    capture = read_model(session_for(rows_from_model(model))).captures[table.key]
+    assert capture["index [IX_OrderLine_Product]"]["partition"]["scheme"] == "PS_OrderYear"
+    assert f"N'{state.capture_sha256(capture)}'" in object_rows(db)[table.key]
+
+    # the file puts the index on the scheme; in this database it sits on [PRIMARY]
+    moved = rows_from_model(model)
+    index = only(moved, "indexes", name="IX_OrderLine_Product")
+    index.update(data_space_type="FG", partition_scheme=None, partition_count=1, is_incremental=0)
+    for member in moved["index_columns"]:
+        if member["index_id"] == index["index_id"]:
+            member["partition_ordinal"] = 0
+    other = with_tables(Db(live(USP_X, stored("usp_x"))), moved)
+
+    error = refusal(other, b, table_hooks=hooks)
+
+    assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "READBACK_MISMATCH")
+    (problem,) = error.detail["objects"]
+    assert problem["object"] == table.key and "indexes[ix_orderline_product].on" in problem["properties"]
+    assert other.sent("UPDATE [azsqlcd]") == []
 
 
 def test_the_snapshot_and_the_rename_script_of_the_export_are_those_of_the_table_part():

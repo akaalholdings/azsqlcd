@@ -8,6 +8,10 @@ Rules that hold for every text this module writes:
   * Constraints, indexes and options are written in a fixed order, whatever their order in the
     model. Names, expression tokens and included columns are written as the model holds them.
   * Nothing is dropped and nothing is guessed. A value that has no SQL spelling is a ValueError.
+  * A place is written where the model holds one: ON [scheme]([column]) or ON [PRIMARY], as the
+    last clause of the table, key or index. A table of the model holds one for every key and
+    index of a partitioned table and none for a table that is not partitioned, so the file of
+    such a table has no ON clause.
 
 Public API: emit_object_file, emit_operation, emit_create_script, token_roundtrip_differences,
 token_differences, NORMAL_FORM_EQUIVALENTS.
@@ -25,6 +29,7 @@ from typing import assert_never
 
 from azsqlcd.lex import CURRENCY, Tok, significant, split_batches, tokenize
 from azsqlcd.model import (
+    ON_PRIMARY,
     RETENTION_UNITS,
     AddColumn,
     AddConstraint,
@@ -59,6 +64,8 @@ from azsqlcd.model import (
     ModelObject,
     Operation,
     Options,
+    Partition,
+    Place,
     PrimaryKey,
     RebuildTable,
     Rename,
@@ -201,6 +208,17 @@ def _with(options: Options, exec_options: Options = ()) -> str:
     return f" WITH ({', '.join(items)})" if items else ""
 
 
+def _on(place: Place | None) -> str:
+    """'ON [scheme]([column])' or 'ON [PRIMARY]'; '' when the model holds no place."""
+    if place is None:
+        return ""
+    if isinstance(place, Partition):
+        return f"ON {quote(place.scheme)}({quote(place.column)})"
+    if place != ON_PRIMARY:
+        raise ValueError(f"not a place that can be written: {place!r}")
+    return "ON [PRIMARY]"
+
+
 def _masked(function: str) -> str:
     # The model holds the text between the quotes, a ' written twice. sql_literal refuses text that
     # would not arrive as written; a text that it does not give back holds a single quote that
@@ -259,7 +277,8 @@ def _constraint(constraint: Constraint, in_type: bool, exec_options: Options = (
         kind = "PRIMARY KEY" if isinstance(constraint, PrimaryKey) else "UNIQUE"
         clustering = "CLUSTERED" if constraint.clustered else "NONCLUSTERED"
         options = _with(constraint.options, exec_options)
-        return f"{named}{kind} {clustering} {_key_columns(constraint.columns)}{options}"
+        place = f" {_on(constraint.on)}" if constraint.on is not None else ""
+        return f"{named}{kind} {clustering} {_key_columns(constraint.columns)}{options}{place}"
     if exec_options:
         raise ValueError("execution options go with PRIMARY KEY and UNIQUE only")
     if isinstance(constraint, Check):
@@ -304,6 +323,8 @@ def _index_clauses(index: Index, exec_options: Options) -> list[str]:
     options = _with(index.options, exec_options)
     if options:
         clauses.append(options.strip())
+    if index.on is not None:
+        clauses.append(_on(index.on))
     return clauses
 
 
@@ -402,8 +423,9 @@ def _create(obj: ModelObject) -> str:
                 raise ValueError(
                     f"{obj.key} has period columns and versioning is off: it has no CREATE TABLE"
                 )
+            place = f"\n{_on(obj.on)}" if obj.on is not None else ""
             options = _table_options(obj.temporal, obj.compression)
-            return f"CREATE TABLE {qualified(obj.schema, obj.name)} {_body(obj)}{options}"
+            return f"CREATE TABLE {qualified(obj.schema, obj.name)} {_body(obj)}{place}{options}"
         case _:
             assert_never(obj)
 
@@ -494,7 +516,8 @@ def _statement(op: Operation) -> str:
             if any(name not in allowed for name, _ in op.exec_options):
                 raise ValueError("REBUILD takes the execution options ONLINE, MAXDOP and SORT_IN_TEMPDB only")
             options = _with((("DATA_COMPRESSION", op.compression),), op.exec_options)
-            return f"ALTER TABLE {qualified(op.schema, op.table)} REBUILD{options}"
+            partitions = " PARTITION = ALL" if op.all_partitions else ""
+            return f"ALTER TABLE {qualified(op.schema, op.table)} REBUILD{partitions}{options}"
         case DropColumn():
             return f"ALTER TABLE {qualified(op.schema, op.table)} DROP COLUMN {quote(op.column)}"
         case AddConstraint():
@@ -532,9 +555,10 @@ def emit_object_file(obj: ModelObject) -> str:
 
     A table file is CREATE TABLE (columns with their DEFAULT constraints, then PRIMARY KEY,
     UNIQUE, CHECK and FOREIGN KEY constraints, then PERIOD FOR SYSTEM_TIME and, after the body,
-    WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = ...)) for a temporal table), then one GO and one
-    CREATE INDEX batch for each index. Every other file is one statement. parse_object_file reads
-    the text back as an equal object when the path is names.path_for() of the object.
+    ON [scheme]([column]) for a partitioned table and WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE
+    = ...)) for a temporal table), then one GO and one CREATE INDEX batch for each index. Every
+    other file is one statement. parse_object_file reads the text back as an equal object when the
+    path is names.path_for() of the object.
     """
     if isinstance(obj, Table):
         separator = "\n" + _INDENT
@@ -696,7 +720,8 @@ def _batch_order(batches: _Batches) -> _Batches:
 # The one table of what NF000 accepts (A14): name -> (what may differ, how both texts are brought to
 # one form). The steps run in this order on the file and on the canonical text; what is left must
 # be equal token by token. Everything that is not here is a difference, also when the parser reads
-# both spellings as one model: ASC, ON [PRIMARY], TEXTIMAGE_ON, ON DELETE NO ACTION, IDENTITY
+# both spellings as one model: ASC, ON [PRIMARY] on a table that is not partitioned, a key or an
+# index of a partitioned table without its ON clause, TEXTIMAGE_ON, ON DELETE NO ACTION, IDENTITY
 # without (seed, increment), a PRIMARY KEY, UNIQUE, FOREIGN KEY or CHECK written on a column, an
 # INDEX written inside CREATE TABLE, the order of the clauses of a column or a sequence.
 NORMAL_FORM_EQUIVALENTS: Mapping[str, tuple[str, Callable[[_Batches], _Batches]]] = {

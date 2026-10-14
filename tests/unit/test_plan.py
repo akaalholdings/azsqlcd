@@ -1656,7 +1656,10 @@ def test_the_plan_holds_the_facts_for_the_approver():
         ("DATA_NO_WHERE", "[sales].[Order]"),
         ("DROP_MODULE", old),
     ]
-    assert [note for note in result.notes if note.startswith("tables are not modelled")] != []
+    (note,) = [note for note in result.notes if note.startswith("tables are not modelled")]
+    # the plan reads sys.partition_schemes for the statements of the model only: without it a
+    # statement on a scheme that is missing fails at the deploy, and the note must say so
+    assert "no partition scheme check" in note
 
 
 def other_recorded_release(b: Bundle, st: State) -> tuple[Bundle, State, dict[str, Any]]:
@@ -1853,6 +1856,10 @@ class Hooks:
     def sub_object_collisions(self, session: Any, work: Work, state: State) -> list[str]:
         return self.answers.get("collisions", [])
 
+    def missing_partition_schemes(self, session: Any, work: Work) -> list[str]:
+        self.schemes_asked = [m.file for m in work.pending]
+        return self.answers.get("missing_schemes", [])
+
     def refresh_set(self, session: Any, work: Work) -> list[str]:
         return self.answers.get("refresh", [])
 
@@ -2017,6 +2024,50 @@ def test_a_blocker_on_a_changed_table_refuses_the_plan():
         "TABLE_BLOCKER",
         {"blockers": list(blockers)},
     )
+
+
+def test_a_pending_statement_on_a_partition_scheme_that_the_database_does_not_hold_refuses_the_plan():
+    """Partition functions and schemes are not objects of the model: a DBA owns them, and no
+    statement of the tool creates one. A release that puts a table or an index on a scheme that is
+    not there would fail in its unit of work, so the plan refuses it before any statement runs and
+    says who creates the scheme."""
+    b, st, db = table_release()
+    hooks = Hooks(missing_schemes=["PS_OrderYear", "PS Ship]Year"])
+    error = refusal(planned, b, st, db, table_hooks=hooks)
+    assert (error.exit_code, error.reason_code, error.detail) == (
+        Exit.REFUSED,
+        "PARTITION_SCHEME_MISSING",
+        {"schemes": ["[PS_OrderYear]", "[PS Ship]]Year]"]},
+    )
+    assert "partition scheme [PS_OrderYear]" in error.message
+    assert "(2 partition scheme(s) in all)" in error.message
+    # what to do: the model creates neither; the scheme must be there before the statement runs
+    assert "Partition functions and partition schemes are not managed" in error.message
+    assert "a DBA creates them in this database, or a raw batch does that runs before" in error.message
+    assert error.message.endswith("Then plan again")
+    assert hooks.schemes_asked == [M1]
+
+
+def test_a_missing_partition_scheme_is_told_before_the_blockers_of_the_tables():
+    """A plan tells one refusal. The scheme is a prerequisite of the release as a whole, so it is
+    the first of the table checks."""
+    b, st, db = table_release()
+    blockers = ("index [IX_hand] on [sales].[Order] ([c]) is not recorded",)
+    hooks = Hooks(missing_schemes=["PS_OrderYear"], findings=TableFindings(blockers=blockers))
+    error = refusal(planned, b, st, db, table_hooks=hooks)
+    assert error.reason_code == "PARTITION_SCHEME_MISSING"
+    assert "(1 partition scheme(s) in all)" in error.message
+
+
+def test_a_plan_whose_partition_schemes_are_all_there_and_a_release_without_a_migration_are_not_refused():
+    b, st, db = table_release()
+    hooks = Hooks()
+    assert planned(b, st, db, table_hooks=hooks).outcome == WORK and hooks.schemes_asked == [M1]
+    # a release of modules only creates no table and no index: the catalog is not asked
+    modules_only = bundle(modules=[proc("usp_new")])
+    hooks = Hooks(missing_schemes=["PS_OrderYear"], touched=[])
+    assert planned(modules_only, recorded(seq=6), table_hooks=hooks).outcome == WORK
+    assert not hasattr(hooks, "schemes_asked")
 
 
 def test_a_pending_create_of_an_index_or_constraint_name_that_exists_and_is_not_recorded_is_refused():

@@ -161,7 +161,7 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | `LINT_FAILED` | `lint` or `build`: the files hold a finding with the severity `error`. Every finding is printed as `path:line: severity CODE: message`. `build` writes no release | No database is used | Fix each finding: section "Lint and verify findings". Check with `azsqlcd lint` |
 | `VERIFY_FAILED` | `verify`: a finding of lint, of the chain rules, of the module rules or of the model proof has the severity `error` | No database is used | Fix each finding: section "Lint and verify findings". Check with `azsqlcd verify --base "$(git merge-base origin/main HEAD)"` |
 | `GEN_NEEDS_TABLE_MODEL` | `gen --name`: `azsqlcd.toml` has `table_model = false`, so there is no model to write a migration from | No database is used | Write the migration by hand, add its line to `migrations/migrations.sum`, then `azsqlcd gen --resum` numbers and hashes it |
-| `GEN_REFUSED` | `gen` does not write this change. Each refusal is printed with code, object, message and hint: `ORD001`, `ORD002`, `IDENTITY_CHANGE`, `COMPUTED_CHANGE`, `COLLATION_CHANGE`, `ALTER_COLUMN_DEPENDANTS`, `USER_TYPE_CHANGE`, `SEQUENCE_CHANGE`, `SCHEMA_OWNER_CHANGE`, `ORDER_BLOCKED`, `TEMPORAL_CHANGE` (section "Temporal tables") | No database is used | Follow the hint. Hand-write the migration, then `azsqlcd gen --resum`; `azsqlcd verify --base "$(git merge-base origin/main HEAD)"` proves it |
+| `GEN_REFUSED` | `gen` does not write this change. Each refusal is printed with code, object, message and hint: `ORD001`, `ORD002`, `IDENTITY_CHANGE`, `COMPUTED_CHANGE`, `COLLATION_CHANGE`, `ALTER_COLUMN_DEPENDANTS`, `USER_TYPE_CHANGE`, `SEQUENCE_CHANGE`, `SCHEMA_OWNER_CHANGE`, `ORDER_BLOCKED`, `TEMPORAL_CHANGE` (section "Temporal tables"), `PARTITION_CHANGE` (section "Partitioned tables") | No database is used | Follow the hint. Hand-write the migration, then `azsqlcd gen --resum`; `azsqlcd verify --base "$(git merge-base origin/main HEAD)"` proves it |
 | `GEN_INVALID` | `gen`: the name is not letters, digits and `_` (at most 180); the migration file exists already; a new migration of the branch does not replay on the base revision; `--resum` ran before the base was merged into the branch; or a generated statement is one that lint refuses (the message names the statement class and the finding code of lint) | No database is used | Follow the message. For `--resum`: `git merge origin/main`, keep the lines of both sides in `migrations.sum`, then `azsqlcd gen --resum` |
 | `RENAME_INVALID` | `gen`: a `--rename` value cannot be read | No database is used | Write `--rename "column:[schema].[table].[old]=[new]"`. Kinds: `table`, `column`, `index`, `constraint`; a table and a constraint have no `[table]` part |
 | `MODEL_INVALID` | Table-class files do not parse, or do not fit together, so there is no model. `gen`: an object is in a schema that has no schema file; the message names the file to add (`schema/schemas/<name>.sql` with `CREATE SCHEMA [name];`). `gen` and `verify`; with `table_model = true` also `plan`, `deploy`, `baseline` and `resolve` | Untouched | Fix the files that the message and `azsqlcd lint` name, by pull request |
@@ -229,6 +229,7 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | `LEGACY_FLAGS` | A module to deploy is stored with `ANSI_NULLS` or `QUOTED_IDENTIFIER` off. A deploy would change the flags | Untouched | A DBA creates the module again with both options on; then `-f action=accept-drift -f subject=<object key>`; then PROMOTE |
 | `INDEXED_VIEW` | A managed view that the release alters or unbinds has an index. `ALTER VIEW` would drop every index of it. Detail `objects` lists the keys | Untouched | Take the change of the view out of the release; or a DBA drops the indexes of the view by hand, PROMOTE, and creates them again. A view with an index that needs no change stays unmanaged (`[unmanaged] objects`) |
 | `UNBIND_HEADER` | The header of a schema-bound module in the database cannot be rewritten: the definition cannot be read, or the header has no `SCHEMABINDING` | Untouched | A DBA alters the module in the database without `SCHEMABINDING`; then `-f action=accept-drift -f subject=<object key>`; then PROMOTE. The deploy binds it again from the file |
+| `PARTITION_SCHEME_MISSING` | `table_model = true`: a pending statement creates a table, a key or an index on a partition scheme that this database does not have. Partition functions and partition schemes are not managed objects: the tool creates none. Each scheme is a detail line. The deploy job refuses the same way under the lock when the scheme is dropped after the plan job | Untouched | A DBA creates the partition function and the partition scheme in this database, with the name of the detail line; then PROMOTE. Do this in every environment before the release reaches it. A `raw` batch of the pending migrations that creates the scheme before the statement that uses it also passes the check; a `raw` batch needs an object of `[unmanaged] objects` (`RAW001`). Section "Partitioned tables" |
 | `TABLE_BLOCKER` | `table_model = true`: a column or a table that the release drops, renames or retypes has a blocker that the files do not hold (index, user statistic, foreign key, schema-bound module), or an unmanaged module uses it. Each blocker is a detail line | Untouched | A DBA drops the blocker, or a pull request adds it to the files so that the migration handles it. An unmanaged dependant: fix it (DBA), or accept the break: add the line that the tool prints to `[ack] unmanaged_dependants` of `azsqlcd.toml` by pull request. Then PROMOTE |
 | `RENAME_NOT_RESOLVED` | `table_model = true`: a pending `sp_rename` names an object that the model of the release cannot follow | Untouched | Fix the migration by pull request (withdraw and replace): the rename and the object files must agree |
 | `FORBIDDEN_TOKEN` | A pending batch or module holds the word `PARSEONLY`. The text could switch off the syntax check and run, so it is not sent | Untouched | Fix the file by pull request. For a name, write `[PARSEONLY]` |
@@ -440,7 +441,7 @@ Table model and proof (`table_model = true`; `PRF000` also without it).
 | `PRF000` | warning | No proof: `table_model = false`, or this pull request sets it to `true` | None. After the switch run `baseline` on every target |
 | `PRF001` | error | The new migrations, replayed on the base model, do not give the model of the files. The message names object and property; or the model refuses a statement of the migration | Make the migration and the object file agree |
 | `PRF002` | error | A table-class file changed and the pull request adds no migration. The message holds what `gen` would write | `azsqlcd gen --base origin/main --name <name>` |
-| `PRF003` | error | `allow SET_NOT_NULL` is missing on an `ALTER COLUMN` that makes a column `NOT NULL`; or an allow line `SET_NOT_NULL` or `REPLACEMENT_EDGE` matches nothing | Add or remove the allow line |
+| `PRF003` | error | `allow SET_NOT_NULL` is missing on an `ALTER COLUMN` that makes a column `NOT NULL`; `allow LONG_LOCK` is missing on the drop of the clustered index or key of a table that exists in a tx migration (the table becomes a heap: every row is written again); or an allow line `SET_NOT_NULL`, `REPLACEMENT_EDGE`, or `LONG_LOCK` on a drop of an index or key that is not clustered, matches nothing | Add or remove the allow line |
 | `PRF004` | error | The pull request that sets `table_model = true` adds a migration: nothing can prove it | Add the migration in a pull request of its own |
 | `PRF005` | error | The pull request sets `table_model` from `true` to `false`. It is checked as with `table_model = true` | Do not switch the model off by pull request: revert the line |
 | `PRF006` | error | The replay accepts the new migrations, and `plan` could not follow one of their renames: a constraint is renamed and then goes with `DROP TABLE` of its table | Drop the table without the rename |
@@ -510,6 +511,65 @@ What an operator sees:
 - A new temporal table whose `HISTORY_TABLE` name exists already (a leftover of an earlier drop):
   the engine takes the existing table when its columns fit and refuses the statement when they
   do not (exit 21, rolled back). The tool does not check this name before the deploy.
+
+### Partitioned tables
+
+A table, a `PRIMARY KEY` or `UNIQUE` constraint and an index can be on a partition scheme:
+`ON [scheme]([column])`, with one partitioning column. The model holds the name of the scheme and
+the column. It does not hold the partition function, the scheme, the boundaries or the number of
+partitions: a DBA owns them. `SPLIT`, `MERGE`, `SWITCH` and `TRUNCATE ... WITH (PARTITIONS ...)`
+are operations of the DBA, outside the tool. `docs/setup.md`, section 7, "Partitioned tables", has
+the form of the table file. Nothing of this section ran on a database
+(`docs/known-gaps.md`, section 14).
+
+`gen` writes: `CREATE TABLE` of a partitioned table; each key and index with the `ON` clause of
+its file; the add and the drop of a column, a constraint and an index; `ALTER COLUMN` of a column
+that is not a partitioning column; a nonclustered key or index that changes its place, as a drop
+and a create; a compression change of a partitioned heap, as
+`ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)`. The allow lines are those
+of the same statement on any table: `LONG_LOCK` for an index build, a key build, a rebuild and the
+drop of the clustered index or key (the table becomes a heap) on a table that exists.
+
+`gen` refuses every change that moves a table with `PARTITION_CHANGE` (in `GEN_REFUSED`), and
+writes no file. A person writes that migration, and `verify` proves it.
+
+| Refusal | Changes | What to do |
+|---|---|---|
+| `PARTITION_CHANGE` | A table goes on a partition scheme, or off one. A table gets another scheme or another partitioning column. `ALTER COLUMN` of a partitioning column, of the table or of an index | Hand-write the migration, then `azsqlcd gen --resum`. A table moves when its clustered key or index is created with the new place. A table that has one: `DROP INDEX` or `DROP CONSTRAINT`, then `CREATE CLUSTERED INDEX` or `ADD CONSTRAINT` with `ON [scheme]([column])`, or with `ON [PRIMARY]` to end the partitioning. A heap: `CREATE CLUSTERED INDEX ... ON [scheme]([column])`, then `DROP INDEX`. The nonclustered keys and indexes stay where they are: drop and create each one that the file puts in another place. `docs/setup.md`, section 7, "Partitioned tables", has an example. A partitioning column: move the table or the index off the scheme, change the column, move it back. Each build, and each drop of a clustered index or key, writes every row again and holds a long lock: write `-- azsqlcd:allow LONG_LOCK [schema].[table] reason: ...` above it. The scheme must exist in every database first |
+
+Findings of a hand-written move, all errors:
+
+- `PRF001`, property `on`: the statement does not state the new place, so the table did not
+  move. A clustered key or index with no `ON` clause is built where the table is.
+- `PRF001` at the line of `ALTER COLUMN` or `DROP COLUMN` of a partitioning column: the replay
+  blocks both.
+- `PRF001` for a unique index, a `PRIMARY KEY` or a `UNIQUE` constraint on a scheme whose key does
+  not hold the partitioning column: the engine refuses such an index.
+- `UNSUPPORTED`: `DROP_EXISTING`, `ON PARTITIONS (...)` of `DATA_COMPRESSION`,
+  `REBUILD PARTITION = <number>`, `CREATE PARTITION FUNCTION` and `CREATE PARTITION SCHEME` in a
+  model batch. `MODEL_STATEMENT`: a second statement behind the `ON` clause, and every other
+  partition statement in a model batch.
+- `NF000`: the file of a partitioned table leaves out the `ON` clause of a key or an index, or the
+  file of a table that is not partitioned states `ON [PRIMARY]`.
+- `LCK001`: the build has no `LONG_LOCK` line. `PRF003`: the drop of the clustered index or key
+  has no `LONG_LOCK` line (`lint` cannot see that an index is clustered; the proof can).
+
+What an operator sees:
+
+- `PARTITION_SCHEME_MISSING` (exit 22) from the plan job or the deploy job: the database does
+  not have the scheme. Nothing ran. The row of the code is under "Exit 22".
+- An index or a key that was created again in another place outside the tool is drift of that
+  index or constraint, for example `index [IX_OrderLine_Product]`. A heap that was moved to
+  another scheme, on to a scheme or off one is drift of the property `partition` of the table;
+  also when an older version of the tool stored its capture (that version could not record a
+  partitioned table, so a capture without the property is read as "not partitioned").
+  An index of a partitioned table that was created again with no `ON` clause is on the scheme
+  of the table (the rule of the engine), so it is no drift when the file says the same.
+- A `SPLIT` or a `MERGE` of the partition function is no drift: the capture holds the name of
+  the scheme and the partitioning column, no boundary and no number of partitions.
+- `export` leaves a table unmanaged when the partitions of its heap or of one of its indexes do
+  not all have the same compression. The export report gives the reason. The model holds one
+  compression for a table or an index.
 
 ## Cases
 

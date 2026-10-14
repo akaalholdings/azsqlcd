@@ -1079,3 +1079,137 @@ def test_a_money_literal_in_a_generated_statement_has_no_space_after_the_currenc
     index = parse_statement("CREATE NONCLUSTERED INDEX [IX] ON [dbo].[T] ([A]) WHERE [Value] > $5")
     assert emit_operation(index) == "CREATE NONCLUSTERED INDEX [IX] ON [dbo].[T] ([A]) WHERE [Value] > $5;"
     assert parse_statement(emit_operation(index)) == index
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+PS = masking.Partition("PS_OrderYear", "OrderDate")
+LINE = Table(
+    "sales",
+    "OrderLine",
+    (
+        Column("OrderLineId", TypeRef("bigint"), False),
+        Column("OrderDate", TypeRef("date"), False),
+        Column("Quantity", INT, False),
+    ),
+)
+
+
+def test_a_partitioned_table_file_writes_the_place_of_the_table_and_of_every_key_and_index():
+    table = replace(
+        LINE,
+        constraints=(
+            PrimaryKey("PK_OrderLine", True, (KeyColumn("OrderDate"), KeyColumn("OrderLineId")), on=PS),
+            Unique("UQ_OrderLine", False, (KeyColumn("OrderLineId"),), on=masking.ON_PRIMARY),
+        ),
+        indexes=(
+            Index(
+                "IX_OrderLine_Quantity",
+                False,
+                False,
+                (KeyColumn("Quantity"),),
+                options=(("STATISTICS_INCREMENTAL", "ON"),),
+                on=PS,
+            ),
+            Index("IX_OrderLine_Id", False, False, (KeyColumn("OrderLineId"),), on=masking.ON_PRIMARY),
+        ),
+        on=PS,
+    )
+    assert emit_object_file(table) == (
+        "CREATE TABLE [sales].[OrderLine] (\n"
+        "    [OrderLineId] bigint NOT NULL,\n"
+        "    [OrderDate] date NOT NULL,\n"
+        "    [Quantity] int NOT NULL,\n"
+        "    CONSTRAINT [PK_OrderLine] PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId])"
+        " ON [PS_OrderYear]([OrderDate]),\n"
+        "    CONSTRAINT [UQ_OrderLine] UNIQUE NONCLUSTERED ([OrderLineId]) ON [PRIMARY]\n"
+        ")\n"
+        "ON [PS_OrderYear]([OrderDate]);\n"
+        "GO\n"
+        "CREATE NONCLUSTERED INDEX [IX_OrderLine_Id] ON [sales].[OrderLine] ([OrderLineId])\n"
+        "    ON [PRIMARY];\n"
+        "GO\n"
+        "CREATE NONCLUSTERED INDEX [IX_OrderLine_Quantity] ON [sales].[OrderLine] ([Quantity])\n"
+        "    WITH (STATISTICS_INCREMENTAL = ON)\n"
+        "    ON [PS_OrderYear]([OrderDate]);\n"
+    )
+
+
+def test_a_table_that_is_not_partitioned_has_no_on_clause_and_only_its_partitioned_index_has_one():
+    plain = Index("IX_OrderLine_Id", False, False, (KeyColumn("OrderLineId"),))
+    table = replace(
+        LINE,
+        constraints=(PrimaryKey("PK_OrderLine", True, (KeyColumn("OrderLineId"),)),),
+        indexes=(plain, Index("IX_OrderLine_Date", False, False, (KeyColumn("OrderDate"),), on=PS)),
+    )
+    text = emit_object_file(table)
+    assert text.count(" ON [") == 2 + 1  # the table name of each CREATE INDEX, and one place
+    assert "PRIMARY]" not in text
+    assert text.endswith(
+        "CREATE NONCLUSTERED INDEX [IX_OrderLine_Date] ON [sales].[OrderLine] ([OrderDate])\n"
+        "    ON [PS_OrderYear]([OrderDate]);\n"
+        "GO\n"
+        "CREATE NONCLUSTERED INDEX [IX_OrderLine_Id] ON [sales].[OrderLine] ([OrderLineId]);\n"
+    )
+
+
+def test_the_place_of_a_heap_comes_before_its_table_options():
+    heap = replace(LINE, compression="PAGE", on=PS)
+    assert emit_operation(CreateTable(heap)).endswith(
+        "\n)\nON [PS_OrderYear]([OrderDate])\nWITH (DATA_COMPRESSION = PAGE);"
+    )
+
+
+def test_a_statement_writes_the_on_clause_that_its_operation_holds_and_none_when_it_holds_none():
+    index = Index("IX", False, False, (KeyColumn("Quantity"),), ("OrderLineId",), sql("[Quantity] > 0"))
+    head = "CREATE NONCLUSTERED INDEX [IX] ON [sales].[OrderLine] ([Quantity]) INCLUDE ([OrderLineId])"
+    for place, clause in (
+        (None, ""),
+        (masking.ON_PRIMARY, " ON [PRIMARY]"),
+        (PS, " ON [PS_OrderYear]([OrderDate])"),
+    ):
+        operation = CreateIndex("sales", "OrderLine", replace(index, on=place), (("ONLINE", "ON"),))
+        assert emit_operation(operation) == f"{head} WHERE [Quantity] > 0 WITH (ONLINE = ON){clause};"
+        key = Unique("UQ", False, (KeyColumn("OrderDate"),), (("FILLFACTOR", "90"),), on=place)
+        assert emit_operation(AddConstraint("sales", "OrderLine", key)) == (
+            "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [UQ] UNIQUE NONCLUSTERED ([OrderDate])"
+            f" WITH (FILLFACTOR = 90){clause};"
+        )
+    columnstore = Index("CCI", False, True, (KeyColumn("Quantity"),), columnstore=True, on=PS)
+    assert emit_operation(CreateIndex("sales", "OrderLine", columnstore)) == (
+        "CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [sales].[OrderLine] ORDER ([Quantity])"
+        " ON [PS_OrderYear]([OrderDate]);"
+    )
+    inline = replace(LINE, indexes=(Index("IX", False, False, (KeyColumn("Quantity"),), on=PS),))
+    assert "    INDEX [IX] NONCLUSTERED ([Quantity]) ON [PS_OrderYear]([OrderDate])\n" in emit_operation(
+        CreateTable(inline)
+    )
+
+
+def test_the_names_of_a_scheme_and_its_column_are_quoted_like_every_other_name():
+    odd = masking.Partition("ps]year", "Order Date")
+    table = Table("s", "T", (Column("Order Date", TypeRef("date"), False),), on=odd)
+    assert emit_operation(CreateTable(table)).endswith(")\nON [ps]]year]([Order Date]);")
+
+
+def test_a_rebuild_of_a_partitioned_table_is_written_for_all_partitions():
+    rebuild = masking.RebuildTable("sales", "OrderLine", "PAGE", (("ONLINE", "ON"),), all_partitions=True)
+    assert emit_operation(rebuild) == (
+        "ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE, ONLINE = ON);"
+    )
+    assert parse_statement(emit_operation(rebuild)) == rebuild
+
+
+def test_the_create_script_makes_a_partitioned_table_where_it_is_and_never_moves_it():
+    table = replace(
+        LINE,
+        constraints=(PrimaryKey("PK", False, (KeyColumn("OrderLineId"),), on=masking.ON_PRIMARY),),
+        indexes=(Index("CIX", False, True, (KeyColumn("OrderDate"),), on=PS),),
+        on=PS,
+    )
+    script = emit_create_script(masking.Model([table]))
+    assert len(script) == 2
+    # CREATE TABLE is on the scheme already: the clustered index is built in place, on an empty heap
+    assert script[0].endswith(") ON [PRIMARY]\n)\nON [PS_OrderYear]([OrderDate]);")
+    assert script[1] == (
+        "CREATE CLUSTERED INDEX [CIX] ON [sales].[OrderLine] ([OrderDate]) ON [PS_OrderYear]([OrderDate]);"
+    )

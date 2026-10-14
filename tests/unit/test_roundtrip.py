@@ -113,6 +113,8 @@ def test_the_fixture_tables_hold_object_files_statements_and_recorded_canonical_
     assert len(OBJECT_FILES) >= 35 and len(STATEMENTS) >= 35
     assert CANONICAL_FILES == [
         "table_canonical_form",
+        "table_partitioned_canonical_form",
+        "table_partitioned_heap_canonical_form",
         "table_sparse_canonical_form",
         "table_wide_canonical_form",
         "type_table_canonical_form",
@@ -251,6 +253,43 @@ COLUMNSTORE = Table(
     (Column("d", INT, False), Column("s", INT, False)),
     indexes=(Index("CCI", False, True, (KeyColumn("s"), KeyColumn("d")), columnstore=True),),
 )
+PS = masking.Partition("PS_OrderYear", "OrderDate")
+PARTITIONED = Table(
+    "sales",
+    "OrderLine",
+    (Column("OrderLineId", TypeRef("bigint"), False), Column("OrderDate", TypeRef("date"), False)),
+    (
+        PrimaryKey("PK_OrderLine", True, (KeyColumn("OrderDate"), KeyColumn("OrderLineId")), on=PS),
+        Unique("UQ_OrderLine", False, (KeyColumn("OrderLineId"),), on=masking.ON_PRIMARY),
+    ),
+    (
+        Index(
+            "IX_OrderLine_Aligned",
+            False,
+            False,
+            (KeyColumn("OrderLineId"),),
+            options=(("STATISTICS_INCREMENTAL", "ON"),),
+            on=PS,
+        ),
+        Index(
+            "IX_OrderLine_Other",
+            True,
+            False,
+            (KeyColumn("OrderLineId"),),
+            on=masking.Partition("PS_Line", "OrderLineId"),
+        ),
+        Index(
+            "IX_OrderLine_Plain",
+            False,
+            False,
+            (KeyColumn("OrderDate"),),
+            filter=sql("[OrderDate] > '2026-01-01'"),
+            on=masking.ON_PRIMARY,
+        ),
+        Index("NCCI_OrderLine", False, False, (), ("OrderLineId",), columnstore=True, on=PS),
+    ),
+    on=PS,
+)
 OPERATIONS: list[Operation] = [
     CreateSchema(Schema("reporting")),
     CreateSchema(Schema("reporting", "dbo")),
@@ -334,7 +373,27 @@ OPERATIONS: list[Operation] = [
     *(AddConstraint("sales", "Wide", constraint) for constraint in WIDE.constraints),
     CreateIndex("sales", "Wide", WIDE.indexes[0], (("MAXDOP", "2"), ("ONLINE", "ON"))),
     CreateIndex("dw", "Fact", COLUMNSTORE.indexes[0], (("ONLINE", "OFF"),)),
+    # partition schemes: the place of a table, a key and an index, and ON [PRIMARY] beside them
+    CreateTable(PARTITIONED),
+    CreateTable(replace(PARTITIONED, constraints=(), indexes=(), compression="ROW")),
+    *(
+        AddConstraint("sales", "OrderLine", key, exec_options=(("ONLINE", "ON"),))
+        for key in PARTITIONED.constraints
+    ),
+    *(CreateIndex("sales", "OrderLine", index, (("MAXDOP", "2"),)) for index in PARTITIONED.indexes),
+    CreateIndex("sales", "OrderLine", Index("CCI", False, True, (), columnstore=True, on=masking.ON_PRIMARY)),
+    RebuildTable("sales", "OrderLine", "PAGE", (("ONLINE", "ON"),), all_partitions=True),
 ]
+
+
+def test_the_operations_hold_every_place_that_a_statement_can_state():
+    places = {
+        "scheme" if isinstance(item.on, masking.Partition) else item.on
+        for operation in OPERATIONS
+        for item in [getattr(operation, "index", None) or getattr(operation, "constraint", None)]
+        if isinstance(item, Index | PrimaryKey | Unique)
+    }
+    assert places == {None, masking.ON_PRIMARY, "scheme"}
 
 
 def test_the_operations_and_the_statement_fixtures_each_hold_every_operation_kind():
@@ -372,6 +431,7 @@ NOT_CANONICAL = {
     "table_inline_indexes": "indexes written inside CREATE TABLE, a key written on a column",
     "table_lower_case_bare_names": "IDENTITY without (seed, increment), a key written on a column",
     "table_masked_default_and_email": "the masking function as an N literal",
+    "table_partitioned_primary_key": "an index written inside CREATE TABLE, without its ON clause",
     "table_strings_with_go_and_comment_markers": "a CHECK constraint written on a column",
     "table_temporal_period_column_defaults": "ON [PRIMARY], HISTORY_RETENTION_PERIOD = INFINITE",
     "table_with_index_batches": "ASC",
@@ -396,10 +456,11 @@ def test_the_list_of_fixtures_that_are_not_canonical_names_fixtures():
 # Statement fixtures whose text is not the text that the emitter writes, with the reason. A model
 # batch of a migration need not be canonical. The proof replays the operation and the engine runs
 # the text, so every token that the parser reads and the operation does not hold is listed here.
+# ON [PRIMARY] behind an index or a key is not on the list: the operation holds it, because on a
+# partitioned table it is another place than no clause.
 STATEMENTS_NOT_CANONICAL = {
-    "stmt_create_columnstore_clustered": "ON [PRIMARY]",
     "stmt_create_columnstore_nonclustered": "MINUTES after COMPRESSION_DELAY",
-    "stmt_create_index_online_resumable": "ASC, ON [PRIMARY]",
+    "stmt_create_index_online_resumable": "ASC",
     "stmt_create_table": "a key and a foreign key written on a column",
     "stmt_create_type_table": "a key written on a column",
     "stmt_rename_object": "EXECUTE for EXEC, names without brackets inside the strings",
@@ -452,6 +513,9 @@ MEANINGFUL = (
     "WHERE [a] > 0",
     "INCLUDE ([x])",
     "ON [FG2]",
+    "ON [ps]([x])",
+    "PARTITION = ALL",
+    "WITH (STATISTICS_INCREMENTAL = ON)",
     "TEXTIMAGE_ON [FG2]",
     "CYCLE",
     "NO CACHE",
@@ -459,6 +523,9 @@ MEANINGFUL = (
     ", [x]",
     "NOT",
 )
+# ON [PRIMARY] is not kept behind CREATE TABLE (...), and behind a key inside CREATE TABLE of a table
+# that is not partitioned: there it says what no clause says. Behind CREATE INDEX and ADD CONSTRAINT
+# it is kept (test_parse_migration.py).
 DROPPED = ("ASC", "ON [PRIMARY]", "TEXTIMAGE_ON [PRIMARY]", "ON DELETE NO ACTION", "ON UPDATE NO ACTION")
 
 

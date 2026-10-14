@@ -8,6 +8,7 @@ import pytest
 
 from azsqlcd import model as masking
 from azsqlcd.model import (
+    ON_PRIMARY,
     AddColumn,
     AddConstraint,
     AlterColumn,
@@ -33,6 +34,7 @@ from azsqlcd.model import (
     ForeignKey,
     Identity,
     KeyColumn,
+    Partition,
     PrimaryKey,
     RebuildTable,
     Rename,
@@ -422,7 +424,6 @@ def test_a_refused_feature_is_refused_in_alter_table_as_well():
             "temporal tables",
         ),
         ("ALTER TABLE [dbo].[T] ADD [a] xml COLUMN_SET FOR ALL_SPARSE_COLUMNS;", "column sets"),
-        ("ALTER TABLE [dbo].[T] ADD CONSTRAINT [PK] PRIMARY KEY CLUSTERED ([a]) ON [ps] ([a]);", "partition"),
         ("ALTER TABLE [dbo].[T] REBUILD PARTITION = 2 WITH (DATA_COMPRESSION = ROW);", "partitioned tables"),
     ):
         error = rejected(sql)
@@ -905,3 +906,119 @@ def test_not_for_replication_and_xml_compression_are_read_in_alter_table():
     )
     assert isinstance(primary, AddConstraint) and isinstance(primary.constraint, PrimaryKey)
     assert primary.constraint.options == (("XML_COMPRESSION", "ON"),)
+
+
+# ------------------------------------------------------------------ partition schemes
+PS = Partition("PS_OrderYear", "OrderDate")
+PS_D = Partition("ps", "d")
+INDEX = "CREATE NONCLUSTERED INDEX [IX] ON [sales].[OrderLine] ([Quantity]){};"
+KEY = "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [UQ] UNIQUE NONCLUSTERED ([OrderDate]){};"
+
+
+@pytest.mark.parametrize(
+    ("clause", "place"),
+    [
+        ("", None),
+        (" ON [PRIMARY]", ON_PRIMARY),
+        (' ON "default"', ON_PRIMARY),
+        (" ON [PS_OrderYear]([OrderDate])", PS),
+        (" on ps_orderyear ( orderdate )", PS),
+        (" WITH (FILLFACTOR = 90) ON [PS_OrderYear]([OrderDate])", PS),
+    ],
+)
+def test_a_statement_keeps_the_on_clause_that_it_states_because_the_replay_knows_the_table(clause, place):
+    """No clause, ON [PRIMARY] and ON [scheme]([column]) are three statements: on a partitioned
+    table the engine puts the first on the scheme of the table and the second on [PRIMARY]."""
+    index = parse_statement(INDEX.format(clause))
+    assert isinstance(index, CreateIndex) and index.index.on == place
+    key = parse_statement(KEY.format(clause))
+    assert (
+        isinstance(key, AddConstraint) and isinstance(key.constraint, Unique) and key.constraint.on == place
+    )
+
+
+@pytest.mark.parametrize(
+    ("clause", "place"), [("", None), (" ON [PRIMARY]", ON_PRIMARY), (" ON [ps]([d])", PS_D)]
+)
+def test_a_columnstore_index_keeps_its_on_clause_too(clause: str, place: object):
+    clustered = parse_statement(f"CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [dw].[Fact]{clause}")
+    assert isinstance(clustered, CreateIndex) and clustered.index.on == place
+    nonclustered = parse_statement(
+        f"CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [dw].[Fact] ([a]) WITH (MAXDOP = 1){clause}"
+    )
+    assert isinstance(nonclustered, CreateIndex) and nonclustered.index.on == place
+
+
+def test_a_where_clause_ends_at_the_on_clause_of_the_index():
+    filtered = parse_statement(INDEX.format(" WHERE [Quantity] > 0 ON [PS_OrderYear]([OrderDate])"))
+    assert isinstance(filtered, CreateIndex) and filtered.index.on == PS
+    assert filtered.index.filter == Expression.from_sql("[Quantity] > 0")
+
+
+def test_create_table_of_a_migration_places_its_keys_as_the_object_file_does():
+    operation = parse_statement(
+        "CREATE TABLE [sales].[OrderLine] ([OrderLineId] bigint NOT NULL, [OrderDate] date NOT NULL, "
+        "CONSTRAINT [PK] PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId]), "
+        "CONSTRAINT [UQ] UNIQUE NONCLUSTERED ([OrderLineId]) ON [PRIMARY]) ON [PS_OrderYear]([OrderDate]);"
+    )
+    assert isinstance(operation, CreateTable) and operation.table.on == PS
+    key, unique = operation.table.constraints
+    assert isinstance(key, PrimaryKey) and isinstance(unique, Unique)
+    assert (key.on, unique.on) == (PS, ON_PRIMARY)
+    # the engine refuses a unique key on a scheme without the partitioning column: so does the parser
+    error = rejected(
+        "CREATE TABLE [sales].[OrderLine] ([OrderLineId] bigint NOT NULL, [OrderDate] date NOT NULL, "
+        "CONSTRAINT [UQ] UNIQUE NONCLUSTERED ([OrderLineId])) ON [PS_OrderYear]([OrderDate]);"
+    )
+    assert (error.code, "must be one of its key columns" in error.message) == ("SYNTAX", True)
+
+
+def test_rebuild_of_all_partitions_is_the_rebuild_of_a_partitioned_table_and_one_partition_is_refused():
+    operation = parse_statement(
+        "ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ROW, MAXDOP = 4);"
+    )
+    assert operation == RebuildTable("sales", "OrderLine", "ROW", (("MAXDOP", "4"),), all_partitions=True)
+    assert operation != RebuildTable("sales", "OrderLine", "ROW", (("MAXDOP", "4"),))
+    assert "maintenance" in rejected("ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = ALL;").message
+    for sql in (
+        "ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = 3 WITH (DATA_COMPRESSION = ROW);",
+        "ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = ALL "
+        "WITH (DATA_COMPRESSION = ROW ON PARTITIONS (1));",
+    ):
+        error = rejected(sql)
+        assert (error.code, "partitioned tables" in error.message) == ("UNSUPPORTED", True), sql
+    assert (
+        rejected("ALTER TABLE [sales].[OrderLine] REBUILD PARTITION ALL WITH (DATA_COMPRESSION = ROW);").code
+        == "SYNTAX"
+    )
+
+
+@pytest.mark.parametrize(
+    ("sql", "code"),
+    [
+        (
+            "CREATE PARTITION FUNCTION [PF_OrderYear] (date) AS RANGE RIGHT FOR VALUES ('2026-01-01');",
+            "UNSUPPORTED",
+        ),
+        (
+            "CREATE PARTITION SCHEME [PS_OrderYear] AS PARTITION [PF_OrderYear] ALL TO ([PRIMARY]);",
+            "UNSUPPORTED",
+        ),
+        ("ALTER PARTITION FUNCTION [PF_OrderYear]() SPLIT RANGE ('2027-01-01');", "SYNTAX"),
+        ("ALTER PARTITION SCHEME [PS_OrderYear] NEXT USED [PRIMARY];", "SYNTAX"),
+        ("DROP PARTITION SCHEME [PS_OrderYear];", "SYNTAX"),
+        ("ALTER TABLE [sales].[OrderLine] SWITCH PARTITION 1 TO [sales].[OrderLineOld];", "SYNTAX"),
+        ("ALTER TABLE [sales].[OrderLine] SPLIT RANGE ('2027-01-01');", "SYNTAX"),
+        ("TRUNCATE TABLE [sales].[OrderLine] WITH (PARTITIONS (1));", "SYNTAX"),
+        (
+            "CREATE NONCLUSTERED INDEX [IX] ON [dbo].[T] ([a]) WITH (DROP_EXISTING = ON) ON [ps]([a]);",
+            "UNSUPPORTED",
+        ),
+        ("DROP INDEX [IX] ON [sales].[OrderLine] WITH (MOVE TO [ps]([a]));", "SYNTAX"),
+        ("ALTER TABLE [sales].[OrderLine] DROP CONSTRAINT [PK] WITH (MOVE TO [PRIMARY]);", "SYNTAX"),
+    ],
+)
+def test_a_partition_function_a_scheme_and_a_partition_operation_are_no_model_statements(sql: str, code: str):
+    """Functions and schemes are prerequisites that a DBA owns; SPLIT, MERGE, SWITCH and a move by
+    DROP_EXISTING or MOVE TO are operations. None of them is in the closed grammar."""
+    assert rejected(sql).code == code

@@ -37,6 +37,8 @@ from azsqlcd.model import (
     CreateType,
     DefaultConstraint,
     DropColumn,
+    DropConstraint,
+    DropIndex,
     DropTable,
     Expression,
     Model,
@@ -64,7 +66,7 @@ CODES: dict[str, str] = {
     "PRF000": WARNING,  # no proof: table_model is false, or this pull request sets it to true
     "PRF001": ERROR,  # the new migrations do not give the head model
     "PRF002": ERROR,  # a table-class file changes and the pull request adds no migration
-    "PRF003": ERROR,  # allow SET_NOT_NULL is missing; or an allow line of the proof matches nothing
+    "PRF003": ERROR,  # allow SET_NOT_NULL, or LONG_LOCK of a clustered drop, is missing or matches nothing
     "PRF004": ERROR,  # the pull request that sets table_model = true adds a migration
     "PRF005": ERROR,  # the pull request sets table_model from true to false
     "PRF006": ERROR,  # a rename of the new migrations that plan could not follow
@@ -81,7 +83,7 @@ CODES: dict[str, str] = {
 
 # Allow codes of diff.classify that depend on the model before the statement, not on its text.
 # SET_NOT_NULL is written by _set_not_null; LONG_LOCK is read by lint.py with the tables that the
-# migration created.
+# migration created, and for the drop of a clustered index or key by _clustered_drop.
 _MODEL_ONLY_CODES = frozenset({"SET_NOT_NULL", "LONG_LOCK"})
 # the roots that release.read_tree reads, next to release.CONFIG_PATH
 _ROOTS = ("schema", "migrations", "onboarding")
@@ -441,6 +443,43 @@ def _set_not_null(op: Operation, state: Model) -> str | None:
     return None
 
 
+def _clustered_drop(op: Operation, state: Model, created: Collection[str] = ()) -> str | None:
+    """The object of the allow LONG_LOCK line that a drop of the clustered index or key needs, or None.
+
+    The table becomes a heap: every row is written again. lint.py cannot see that the index is
+    clustered (lint.BatchFacts.may_lock), so only the model decides this line. created: the keys of
+    the tables that the migration created before the statement, which take no long lock.
+    """
+    if isinstance(op, DropIndex | DropConstraint) and "LONG_LOCK" in diff.classify(
+        op, state, created=created
+    ):
+        return names.qualified(op.schema, op.table)
+    return None
+
+
+def _clustered_drop_findings(
+    step: _Step, state: Model, path: str, mode: str, created: Collection[str]
+) -> list[Finding]:
+    """PRF003 for one model batch that drops an index or a key: allow LONG_LOCK is missing for the
+    clustered one, or it is there on the drop of another. A tx migration only, as for lint.py."""
+    if mode != "tx" or not isinstance(step.op, DropIndex | DropConstraint):
+        return []
+    wanted = _clustered_drop(step.op, state, created)
+    allows = [d for d in step.batch.directives if isinstance(d, chain.Allow) and d.code == "LONG_LOCK"]
+    if wanted is None:
+        why = "the statement of its batch drops no clustered index or key of a table that exists"
+        return [Finding("PRF003", ERROR, path, d.line, f"allow LONG_LOCK {d.object}: {why}") for d in allows]
+    if any(_same_name(d.object, wanted) for d in allows):
+        return []
+    message = (
+        f"LONG_LOCK {wanted} has no allow line: the statement drops the clustered index or key, so the "
+        "table becomes a heap; the engine writes every row again and rebuilds every nonclustered index "
+        f"under a schema-modification lock. Write above the statement: {lex.DIRECTIVE_PREFIX}allow "
+        f"LONG_LOCK {wanted} reason: <why the lock is acceptable>"
+    )
+    return [Finding("PRF003", ERROR, path, step.line, message)]
+
+
 def _not_null_findings(step: _Step, state: Model, path: str) -> list[Finding]:
     """PRF003 for one model batch: allow SET_NOT_NULL is missing, or it is there for nothing.
 
@@ -547,14 +586,19 @@ def _raw_findings(
 
 
 def _replay(
-    state: Model, steps: Sequence[_Step], path: str, code: str, *, check_allows: bool = False
+    state: Model, steps: Sequence[_Step], path: str, code: str, *, check_allows: str | None = None
 ) -> tuple[Model | None, list[Finding]]:
     """(the model after the steps, findings). The model is None when a statement is blocked; the
-    finding for it has the given code. check_allows: the SET_NOT_NULL lines of a new migration."""
+    finding for it has the given code. check_allows: the mode of a new migration, whose allow lines
+    that only the model decides are checked (SET_NOT_NULL, LONG_LOCK of a clustered drop)."""
     findings: list[Finding] = []
+    created: list[str] = []  # keys of the tables that the steps created so far
     for step in steps:
-        if check_allows:
+        if check_allows is not None:
             findings += _not_null_findings(step, state, path)
+            findings += _clustered_drop_findings(step, state, path, check_allows, created)
+        if isinstance(step.op, CreateTable):
+            created.append(step.op.table.key)
         try:
             state = replay.apply(state, step.op)
         except replay.ReplayError as e:
@@ -591,7 +635,7 @@ def _replay_new(
         if unparsed or done is None:
             done = None
             continue
-        done, found = _replay(done, steps, path, "PRF001", check_allows=True)
+        done, found = _replay(done, steps, path, "PRF001", check_allows=entry.mode)
         findings += found
     return done, findings
 
@@ -957,6 +1001,9 @@ def _draft(
         not_null = _set_not_null(op, state)
         if not_null is not None:
             wanted.append(("SET_NOT_NULL", not_null))
+        clustered = _clustered_drop(op, state)
+        if clustered is not None and not any(_same_name(clustered, table) for table in created):
+            wanted.append(("LONG_LOCK", clustered))
         # The codes that the statement alone decides (DROP_TABLE, TEMPORAL_OFF, UNMASK, ...) come
         # from diff.classify too. lint.py must read each of them from the statement: a code that
         # it does not read would leave a destructive statement with no allow line, and verify,
@@ -1079,10 +1126,10 @@ def generate(root: release.StrPath, base_ref: str, name: str, renames: Sequence[
     prints it.
 
     Raises ToolError REFUSED: GEN_REFUSED (detail['refusals']: code, object, message, hint of every
-    change that the generator does not write: the codes of diff.REFUSALS, TEMPORAL_CHANGE among
-    them, and ORD002), RENAME_INVALID (a --rename value
-    that cannot be read), GEN_INVALID (the name; a new migration of the branch that does not
-    replay), and the refusals of the layers below (GIT_FAILED, MODEL_INVALID, CHAIN_INVALID, ...).
+    change that the generator does not write: the codes of diff.REFUSALS, TEMPORAL_CHANGE and
+    PARTITION_CHANGE among them, and ORD002), RENAME_INVALID (a --rename value that cannot be
+    read), GEN_INVALID (the name; a new migration of the branch that does not replay), and the
+    refusals of the layers below (GIT_FAILED, MODEL_INVALID, CHAIN_INVALID, ...).
     """
     if not _NAME.fullmatch(name) or len(name) > 180:
         raise refused(
@@ -1496,7 +1543,7 @@ def _replacement_findings(
         message = f"the model before {entry.replaces} cannot be read, so nothing is proven: {e}"
         return [*out, Finding("WDR002", ERROR, path, 1, message)]
     old, found = _replay(before, old_steps, f"migrations/{entry.replaces}", "WDR002")
-    new, more = _replay(before, steps, path, "WDR002", check_allows=True)
+    new, more = _replay(before, steps, path, "WDR002", check_allows=entry.mode)
     out += [*found, *more]
     if old is not None and new is not None:
         for key, prop in old.diff_paths(new):

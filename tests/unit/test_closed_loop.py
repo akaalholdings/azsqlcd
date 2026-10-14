@@ -21,6 +21,7 @@ from azsqlcd import catalog, catalog_tables, chain, cli, emit, names, release, r
 from azsqlcd.config import load_config
 from azsqlcd.errors import ToolError
 from azsqlcd.model import (
+    ON_PRIMARY,
     Column,
     DefaultConstraint,
     Expression,
@@ -28,6 +29,7 @@ from azsqlcd.model import (
     Index,
     KeyColumn,
     Model,
+    Partition,
     PrimaryKey,
     Schema,
     Table,
@@ -649,6 +651,151 @@ def test_an_export_passes_lint_and_verify_in_a_new_repository_and_a_baseline_rec
     assert onboard.tool("drift", *built.where, db=other).code == 0
 
 
+# ------------------------------------------------------------------ 8. a partitioned table
+BY_YEAR = Partition("PS_OrderYear", "OrderDate")
+ORDER_LINE = Table(
+    "sales",
+    "OrderLine",
+    (
+        Column("OrderLineId", TypeRef("bigint"), False),
+        Column("OrderDate", TypeRef("date"), False),
+        Column("ProductId", TypeRef("int"), False),
+        Column("Quantity", TypeRef("int"), False),
+    ),
+    (PrimaryKey("PK_OrderLine", True, (KeyColumn("OrderDate"), KeyColumn("OrderLineId")), (), BY_YEAR),),
+    (Index("IX_OrderLine_Product", False, False, (KeyColumn("ProductId"),), on=BY_YEAR),),
+    on=BY_YEAR,
+)
+ORDER_LINE_2 = dataclasses.replace(
+    ORDER_LINE,
+    indexes=(
+        *ORDER_LINE.indexes,
+        Index("IX_OrderLine_Quantity", False, False, (KeyColumn("Quantity"),), on=BY_YEAR),
+    ),
+)
+ORDER_LINE_PATH = "schema/tables/sales.OrderLine.sql"
+DROP_PRODUCT_INDEX = "DROP INDEX [IX_OrderLine_Product] ON [sales].[OrderLine];"
+PRODUCT_INDEX = "CREATE NONCLUSTERED INDEX [IX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId])"
+STAGE = Table(
+    "sales",
+    "OrderLineStage",
+    (Column("OrderLineId", TypeRef("bigint"), False), Column("OrderDate", TypeRef("date"), False)),
+    on=BY_YEAR,
+)
+
+
+def order_lines(project: Project) -> Built:
+    project.write_objects(SALES, ORDER_LINE)
+    return project.release("order lines by year", "create_order_line")
+
+
+def test_a_release_on_a_partition_scheme_that_the_database_does_not_have_is_refused_before_any_statement(
+    project,
+):
+    first = order_lines(project)
+    assert "ON [PS_OrderYear]([OrderDate])" in first.batches[1]  # gen wrote the place from the model
+    db = project.database()
+    before = (db.rows("run"), db.rows("step"), db.rows("object"))
+
+    plan = project.tool("plan", *first.where, "--out", str(project.out("plan")), db=db)
+    deploy = project.deploy(first, db)
+
+    for refused in (plan, deploy):
+        assert (refused.code, refused.reason) == (22, "PARTITION_SCHEME_MISSING")
+        assert "[PS_OrderYear]" in refused.err
+    assert db.ddl == [] and len(db.model) == 0
+    assert (db.rows("run"), db.rows("step"), db.rows("object")) == before
+    assert len(db.sent("azsqlcd:partition_schemes")) == 2  # one read for each plan
+
+    db.partition_schemes.add("ps_orderyear")  # a DBA made the scheme; its name has no letter case
+    assert project.deploy(first, db).code == 0
+
+
+def test_a_partitioned_table_is_created_changed_read_back_watched_for_drift_and_exported(project, tmp_path):
+    first = order_lines(project)
+    db = project.database()
+    db.partition_schemes.add("PS_OrderYear")
+
+    done = project.deploy(first, db)
+
+    assert done.code == 0, done.err  # the read-back passed: the catalog holds the places of the files
+    assert db.ddl == first.batches and db.model == first.model
+    line = db.model[ORDER_LINE.key]
+    assert isinstance(line, Table) and line.on == BY_YEAR
+    assert [item.on for _, item in line.placed_items()] == [BY_YEAR, BY_YEAR]
+    capture = next(row for row in db.rows("object") if row["object_key"] == ORDER_LINE.key)["catalog_capture"]
+    place = {"scheme": "PS_OrderYear", "column": "OrderDate"}
+    assert json.loads(capture)["partition"] == place
+    assert json.loads(capture)["index [IX_OrderLine_Product]"]["partition"] == place
+    drift = project.tool("drift", *first.where, db=db)
+    assert drift.code == 0 and drift.out.strip() == "no drift"
+
+    # a second release adds an aligned nonclustered index
+    project.write_objects(ORDER_LINE_2)
+    second = project.release("order lines by quantity", "order_line_quantity")
+    assert len(second.batches) == 1 and second.batches[0].rstrip().endswith("ON [PS_OrderYear]([OrderDate]);")
+    sent = len(db.ddl)
+
+    done = project.deploy(second, db)
+
+    assert done.code == 0, done.err
+    assert db.ddl[sent:] == second.batches and db.model == second.model
+    assert project.tool("drift", *second.where, db=db).code == 0
+
+    # somebody creates an aligned index again on [PRIMARY]: the file says the scheme
+    db.out_of_band(DROP_PRODUCT_INDEX, PRODUCT_INDEX + " ON [PRIMARY];")
+
+    drift = project.tool("drift", *second.where, db=db)
+
+    assert (drift.code, drift.reason) == (30, "DRIFT_FOUND")
+    lines = drift.out.splitlines()
+    assert {line.split(" ")[1] for line in lines} == {ORDER_LINE.key}
+    assert [line.split(" ", 2)[2].rsplit(" ", 2)[0] for line in lines] == ["index [IX_OrderLine_Product]"]
+
+    # the export of that database says what the catalog holds, and its files parse to that model
+    exported = tmp_path / "exported"
+    done = project.tool("export", "--root", str(project.repo), *TARGET, "--out", str(exported), db=db)
+
+    assert done.code == 0, done.err
+    files = {
+        path.relative_to(exported).as_posix(): path.read_text() for path in exported.glob("schema/*/*.sql")
+    }
+    assert tables.head_model({path: text.encode() for path, text in files.items()}) == db.model
+    text = files[ORDER_LINE_PATH]
+    assert text.count("ON [PS_OrderYear]([OrderDate])") == 3 and text.count("ON [PRIMARY]") == 1
+    moved = db.model[ORDER_LINE.key]
+    assert isinstance(moved, Table) and moved.index("IX_OrderLine_Product").on == ON_PRIMARY
+    assert "it is partitioned" not in (exported / "onboarding" / "dev" / "export.md").read_text()
+
+    # without an ON clause the engine puts the index on the scheme of the table: no drift again
+    db.out_of_band(DROP_PRODUCT_INDEX, PRODUCT_INDEX + ";")
+    assert db.model == second.model
+    assert project.tool("drift", *second.where, db=db).code == 0
+
+
+def test_a_compression_change_of_a_partitioned_heap_rebuilds_all_partitions(project):
+    project.write_objects(SALES, STAGE)
+    first = project.release("the stage of order lines", "create_stage")
+    db = project.database()
+    db.partition_schemes.add("PS_OrderYear")
+    assert project.deploy(first, db).code == 0
+    project.write_objects(dataclasses.replace(STAGE, compression="PAGE"))
+    second = project.release("compress the stage", "compress_stage")
+    sent = len(db.ddl)
+
+    done = project.deploy(second, db)
+
+    assert done.code == 0, done.err
+    (rebuild,) = db.ddl[sent:]
+    assert rebuild.rstrip().endswith(
+        "ALTER TABLE [sales].[OrderLineStage] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);"
+    )
+    assert db.model == second.model
+    stage = db.model[STAGE.key]
+    assert isinstance(stage, Table) and (stage.compression, stage.on) == ("PAGE", BY_YEAR)
+    assert project.tool("drift", *second.where, db=db).code == 0
+
+
 # ------------------------------------------------------------------ further loops
 BOUND = (
     "schema/views/sales.vw_Refs.sql",
@@ -944,3 +1091,42 @@ def test_a_view_of_the_fake_needs_its_table_and_a_schema_bound_view_holds_the_co
     ]
     assert catalog.broken_references(session, "PROCEDURE:[dbo].[p]") == ["UNRESOLVED [dbo].[missing]"]
     assert catalog_tables.blockers(session, "TABLE:[dbo].[T]", "x") == ["SCHEMABOUND VIEW:[dbo].[v]"]
+
+
+def test_the_fake_needs_the_partition_scheme_of_a_statement_and_keeps_the_place_of_every_index():
+    db, session = scratch()
+    table = "CREATE TABLE [dbo].[P] ([d] date NOT NULL, [n] int NOT NULL) ON [PS_Day]([d]);"
+
+    with pytest.raises(SqlError) as missing:
+        session.execute(table)
+    assert missing.value.number == 1921 and "Invalid partition scheme" in str(missing.value)
+    assert "TABLE:[dbo].[P]" not in db.model
+    db.partition_schemes.add("ps_day")  # the name of a scheme has no letter case
+    session.execute(table)
+    for statement in (
+        "CREATE NONCLUSTERED INDEX [IX_other] ON [dbo].[P] ([n]) ON [PS_Other]([n]);",
+        "ALTER TABLE [dbo].[P] ADD CONSTRAINT [UQ_P] UNIQUE NONCLUSTERED ([n]) ON [PS_Other]([n]);",
+    ):
+        with pytest.raises(SqlError) as other:
+            session.execute(statement)
+        assert other.value.number == 1921
+    session.execute("CREATE NONCLUSTERED INDEX [IX_aligned] ON [dbo].[P] ([n]);")
+    session.execute("CREATE NONCLUSTERED INDEX [IX_primary] ON [dbo].[P] ([n]) ON [PRIMARY];")
+    session.execute("CREATE NONCLUSTERED INDEX [IX_plain] ON [dbo].[T] ([id]) ON [PRIMARY];")
+
+    assert catalog_tables.partition_schemes(session) == ["ps_day"]
+    found = catalog_tables.read_model(session, ["TABLE:[dbo].[P]", "TABLE:[dbo].[T]"])
+    assert found.unsupported == ()
+    partitioned, plain = found.model["TABLE:[dbo].[P]"], found.model["TABLE:[dbo].[T]"]
+    assert isinstance(partitioned, Table) and isinstance(plain, Table)
+    day = Partition("PS_Day", "d")
+    assert partitioned.on == day
+    assert {index.name: index.on for index in partitioned.indexes} == {
+        "IX_aligned": day,
+        "IX_primary": ON_PRIMARY,
+    }
+    assert [index.on for index in plain.indexes] == [None] and plain.on is None
+    # the catalog rows hold the partitioning column that the engine adds to an index without it
+    (members,) = [batch for batch in session.batches if "azsqlcd:read_index_columns" in batch]
+    assert "ic.[partition_ordinal]" in members
+    assert [c.name for c in partitioned.index("IX_aligned").columns] == ["n"]

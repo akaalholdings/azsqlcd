@@ -1,0 +1,2 @@
+# one partition is an operation on the data, not the design of the table
+MODEL_STATEMENT migrations/0001__change.sql:3

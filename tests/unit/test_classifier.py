@@ -1173,7 +1173,7 @@ def test_a_rebuild_and_a_column_property_are_read_to_their_end(sql):
     "sql",
     [
         "ALTER TABLE [s].[t] REBUILD WITH (ONLINE = ON)",
-        "ALTER TABLE [s].[t] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE)",
+        "ALTER TABLE [s].[t] REBUILD PARTITION = 3 WITH (DATA_COMPRESSION = PAGE)",
         "ALTER TABLE [s].[t] REBUILD WITH (DATA_COMPRESSION = COLUMNSTORE)",
         "ALTER TABLE [s].[t] REBUILD WITH (DATA_COMPRESSION = PAGE, FILLFACTOR = 90)",
         "ALTER TABLE [s].[t] REBUILD WITH (DATA_COMPRESSION = PAGE ON PARTITIONS (1))",
@@ -1603,3 +1603,136 @@ def test_a_parenthesis_in_a_string_a_comment_or_a_quoted_name_is_not_counted(sql
 def test_the_parenthesis_finding_does_not_take_away_another_finding_of_the_batch():
     found = data("COMMIT;\nDELETE FROM [s].[t] WHERE [a] = (1;")
     assert sorted(codes(found)) == ["FORBIDDEN_TOKEN", "PAR001"]
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+ON_SCHEME = "ON [PS_OrderYear]([OrderDate])"
+PARTITIONED_FORMS = [
+    # as emit writes them: the place is the last clause; CREATE TABLE has its options after it
+    "CREATE TABLE [sales].[OrderLine] (\n    [OrderLineId] bigint NOT NULL,\n"
+    "    [OrderDate] date NOT NULL,\n"
+    f"    CONSTRAINT [PK_OrderLine] PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId]) {ON_SCHEME},\n"
+    f"    CONSTRAINT [UQ_OrderLine] UNIQUE NONCLUSTERED ([OrderLineId]) ON [PRIMARY]\n)\n{ON_SCHEME}",
+    f"CREATE TABLE [sales].[OrderLineStage] (\n    [OrderDate] date NOT NULL\n)\n{ON_SCHEME}\n"
+    "WITH (DATA_COMPRESSION = PAGE)",
+    "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [PK_OrderLine] PRIMARY KEY CLUSTERED ([OrderDate], "
+    f"[OrderLineId]) WITH (DATA_COMPRESSION = PAGE, ONLINE = ON) {ON_SCHEME}",
+    "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [UQ_OrderLine] UNIQUE NONCLUSTERED ([OrderDate], "
+    f"[OrderLineId]) WITH (STATISTICS_INCREMENTAL = ON) {ON_SCHEME}",
+    "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [UQ_OrderLine] UNIQUE NONCLUSTERED ([OrderLineId]) "
+    "ON [PRIMARY]",
+    "CREATE UNIQUE NONCLUSTERED INDEX [UX_OrderLine_Date_Line] ON [sales].[OrderLine] ([OrderDate], "
+    "[OrderLineId] DESC) INCLUDE ([Quantity]) WITH (ONLINE = ON, STATISTICS_INCREMENTAL = ON, "
+    f"DATA_COMPRESSION = ROW) {ON_SCHEME}",
+    "CREATE NONCLUSTERED INDEX [IX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId])\n"
+    f"    INCLUDE ([Quantity])\n    WITH (STATISTICS_INCREMENTAL = OFF)\n    {ON_SCHEME}",
+    "CREATE NONCLUSTERED INDEX [IX_OrderLine_Quantity] ON [sales].[OrderLine] ([Quantity]) "
+    f"WHERE [Quantity] > 100 AND [ProductId] = [Quantity] {ON_SCHEME}",
+    "CREATE NONCLUSTERED INDEX [IX_OrderLine_Quantity] ON [sales].[OrderLine] ([Quantity]) "
+    "WHERE [Quantity] > 100 ON [PRIMARY]",
+    "create clustered index CIX_OrderLine on sales.OrderLine (OrderDate) with (sort_in_tempdb = on) "
+    "on PS_OrderYear (OrderDate)",
+    "CREATE CLUSTERED COLUMNSTORE INDEX [CCI_FactOrderLine] ON [dw].[FactOrderLine] ORDER ([ProductKey]) "
+    f"WITH (MAXDOP = 2) {ON_SCHEME}",
+    f"CREATE CLUSTERED COLUMNSTORE INDEX [CCI_FactOrderLine] ON [dw].[FactOrderLine] {ON_SCHEME}",
+    "CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI_OrderLine] ON [sales].[OrderLine] ([ProductId], "
+    f"[Quantity]) WHERE [Quantity] > 0 {ON_SCHEME}",
+    "ALTER TABLE [sales].[OrderLineStage] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE)",
+    "alter table sales.OrderLineStage rebuild partition = all with (data_compression = none)",
+    "ALTER TABLE [sales].[OrderLineStage] REBUILD PARTITION = ALL WITH (ONLINE = ON (WAIT_AT_LOW_PRIORITY "
+    "(MAX_DURATION = 5 MINUTES, ABORT_AFTER_WAIT = SELF)), MAXDOP = 4, DATA_COMPRESSION = ROW)",
+]
+REBUILDS_ALL = [form for form in PARTITIONED_FORMS if " partition " in form.lower()]
+
+
+@pytest.mark.parametrize("sql", PARTITIONED_FORMS)
+def test_each_statement_on_a_partition_scheme_is_one_statement_of_the_closed_list(sql):
+    """gen writes these from the model (the place of a table, a key and an index; the rebuild of a
+    partitioned heap) and the parser reads them: a form that lint refused could not be deployed."""
+    for mode in ("tx", "nontx"):
+        for text in (sql, sql + ";"):
+            found = facts(text, mode=mode)
+            assert errors(found) == []
+            assert found.statement in ("ALTER TABLE", "CREATE TABLE", "CREATE INDEX")
+
+
+@pytest.mark.parametrize("sql", PARTITIONED_FORMS)
+@pytest.mark.parametrize("second", SECONDS)
+def test_a_second_statement_behind_the_place_of_a_table_or_an_index_is_refused(sql, second):
+    """ON [scheme]([column]) ends the statement. What follows it would run with no allow line."""
+    for mode in ("tx", "nontx"):
+        assert "MODEL_STATEMENT" in errors(facts(sql + second, mode=mode))
+
+
+@pytest.mark.parametrize("sql", [form for form in PARTITIONED_FORMS if form.endswith(")")])
+def test_a_query_in_parentheses_has_no_place_behind_the_partitioning_column(sql):
+    assert "MODEL_STATEMENT" in errors(facts(sql + "\n(SELECT 1)"))
+    assert "MODEL_STATEMENT" in errors(facts(sql + " (DELETE FROM [sales].[OrderLine])"))
+
+
+@pytest.mark.parametrize("sql", REBUILDS_ALL)
+def test_a_rebuild_of_all_partitions_is_read_to_its_end(sql):
+    assert "MODEL_STATEMENT" in errors(facts(sql + " WITH (ONLINE = ON)"))
+    assert "MODEL_STATEMENT" in errors(facts(sql + f" {ON_SCHEME}"))
+
+
+def test_the_place_of_a_table_or_an_index_changes_no_allow_code_of_its_statement():
+    """The allow codes belong to the statement class. A build on a partition scheme reads every
+    row like any other build; CREATE TABLE makes an empty table."""
+    create, index, key, unique = (PARTITIONED_FORMS[n] for n in (0, 5, 2, 4))
+    assert facts(create).creates_tables == ("[sales].[OrderLine]",)
+    assert items(facts(create)) == []
+    for sql in (index, key, unique):
+        assert items(facts(sql, mode="tx")) == [("LONG_LOCK", "[sales].[OrderLine]")]
+        assert items(facts(sql, mode="nontx")) == []
+        assert items(facts(sql, mode="tx", created=("[sales].[OrderLine]",))) == []
+    # an online build on a scheme in a nontx migration is asked to wait at low priority, as any other
+    assert codes(facts(index, mode="nontx")) == ["NTX004"]
+    assert codes(facts(PARTITIONED_FORMS[11], mode="nontx")) == []  # a columnstore build has no such wait
+
+
+def test_a_rebuild_of_all_partitions_reads_every_row_and_needs_long_lock_in_a_tx_migration():
+    sql = "ALTER TABLE [sales].[OrderLineStage] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);"
+    assert items(facts(sql, mode="tx")) == [("LONG_LOCK", "[sales].[OrderLineStage]")]
+    assert items(facts(sql, mode="nontx")) == []
+    assert items(facts(sql, mode="tx", created=("[sales].[OrderLineStage]",))) == []
+    online = sql.replace("PAGE", "PAGE, ONLINE = ON")
+    assert codes(facts(online, mode="nontx")) == ["NTX004"]
+    assert codes(facts(PARTITIONED_FORMS[-1], mode="nontx")) == []
+
+
+PARTITION_OPERATIONS = [
+    # one partition, or a compression for some partitions: the model holds one compression for all
+    "ALTER TABLE [s].[t] REBUILD PARTITION = 3 WITH (DATA_COMPRESSION = PAGE)",
+    "ALTER TABLE [s].[t] REBUILD PARTITION = ALL",
+    "ALTER TABLE [s].[t] REBUILD PARTITION ALL WITH (DATA_COMPRESSION = PAGE)",
+    "ALTER TABLE [s].[t] REBUILD PARTITION = [ALL] WITH (DATA_COMPRESSION = PAGE)",
+    "ALTER TABLE [s].[t] REBUILD PARTITION = ALL, PARTITION = ALL WITH (DATA_COMPRESSION = PAGE)",
+    "ALTER TABLE [s].[t] REBUILD PARTITION = ALL WITH (ONLINE = ON)",
+    "ALTER TABLE [s].[t] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE ON PARTITIONS (1 TO 3))",
+    "ALTER TABLE [s].[t] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = COLUMNSTORE)",
+    # partition functions and schemes are not objects of the model; their boundaries are operations
+    "CREATE PARTITION FUNCTION [PF_OrderYear] (date) AS RANGE RIGHT FOR VALUES ('2026-01-01')",
+    "CREATE PARTITION SCHEME [PS_OrderYear] AS PARTITION [PF_OrderYear] ALL TO ([PRIMARY])",
+    "ALTER PARTITION FUNCTION [PF_OrderYear]() SPLIT RANGE ('2027-01-01')",
+    "ALTER PARTITION FUNCTION [PF_OrderYear]() MERGE RANGE ('2020-01-01')",
+    "ALTER PARTITION SCHEME [PS_OrderYear] NEXT USED [PRIMARY]",
+    "DROP PARTITION SCHEME [PS_OrderYear]",
+    "DROP PARTITION FUNCTION [PF_OrderYear]",
+    "ALTER TABLE [s].[t] SWITCH PARTITION 1 TO [s].[u] PARTITION 1",
+    "TRUNCATE TABLE [s].[t] WITH (PARTITIONS (1 TO 3))",
+]
+
+
+@pytest.mark.parametrize("sql", PARTITION_OPERATIONS)
+def test_a_partition_operation_and_a_partition_function_or_scheme_are_no_model_statements(sql):
+    found = facts(sql)
+    assert codes(found) == ["MODEL_STATEMENT"]
+    assert found.needs_allow == ()
+
+
+@pytest.mark.parametrize("sql", PARTITION_OPERATIONS)
+def test_a_raw_batch_takes_a_partition_operation_as_it_takes_any_other_statement(sql):
+    """The rules of a raw batch do not change: one RAW item for the object of the directive."""
+    found = raw(sql)
+    assert (codes(found), items(found)) == ([], [("RAW", "TABLE:[audit].[Log]")])

@@ -26,6 +26,7 @@ from azsqlcd.catalog_tables import (
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.model import (
     INDEX_OPTION_VALUES,
+    ON_PRIMARY,
     AliasType,
     Check,
     Column,
@@ -38,6 +39,7 @@ from azsqlcd.model import (
     KeyColumn,
     Model,
     ModelObject,
+    Partition,
     PrimaryKey,
     Schema,
     Sequence,
@@ -151,6 +153,9 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "data_compression",
         "xml_compression",
         "compression_delay",
+        "partition_scheme",
+        "is_incremental",
+        "compression_kinds",
     ),
     "index_columns": (
         "object_id",
@@ -161,6 +166,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "is_included_column",
         "column_name",
         "column_store_order_ordinal",
+        "partition_ordinal",
     ),
     "foreign_keys": (
         "parent_object_id",
@@ -211,6 +217,7 @@ NOT_TEMPORAL: dict[str, Any] = dict.fromkeys(COLUMNS["tabulars"][11:])
 GENERATED_ALWAYS_TYPE = {None: 0, "ROW_START": 1, "ROW_END": 2}  # sys.columns.generated_always_type
 RETENTION_UNIT = {"DAYS": 3, "WEEKS": 4, "MONTHS": 5, "YEARS": 6}  # history_retention_period_unit
 HISTORY_ID = 100_000  # object_id of the history table of table n is n + HISTORY_ID
+PARTITIONS = 3  # sys.partitions rows of a heap or an index on a partition scheme, in rows_from_model
 
 type CatalogRows = dict[str, list[dict[str, Any]]]
 
@@ -265,6 +272,18 @@ def column_rows(object_id: int, column_id: int, column: Column) -> dict[str, Any
     return row | {"is_rowguidcol": int(column.rowguidcol), "is_sparse": int(column.sparse)}
 
 
+def place_facts(on: object, row: dict[str, Any]) -> dict[str, Any]:
+    """The row of a heap or an index with its data space: a partition scheme, or the one filegroup.
+
+    ON [PRIMARY] and no place are one fact in the catalog: a filegroup. Every partition of the
+    rows of this helper has the compression of the whole.
+    """
+    row |= {"compression_kinds": int(row["data_compression"] is not None)}
+    if isinstance(on, Partition):
+        return row | {"data_space_type": "PS", "partition_scheme": on.scheme, "partition_count": PARTITIONS}
+    return row | {"data_space_type": "FG", "partition_scheme": None}
+
+
 def index_row(
     object_id: int, index_id: int, item: PrimaryKey | Unique | Index, is_type: bool, engine_name: str
 ) -> dict[str, Any]:
@@ -292,6 +311,7 @@ def index_row(
         "data_compression": None if is_type else COMPRESSION[options.get("DATA_COMPRESSION", "NONE")],
         "xml_compression": None if is_type else int(options.get("XML_COMPRESSION") == "ON"),
         "compression_delay": None,
+        "is_incremental": int(options.get("STATISTICS_INCREMENTAL") == "ON"),
     }
     if isinstance(item, Index) and item.columnstore:
         row |= {"type": 5 if item.clustered else 6, "is_unique": 0, "fill_factor": 0}
@@ -305,16 +325,22 @@ def index_row(
         row |= {"is_primary_key": int(isinstance(item, PrimaryKey))}
         row |= {"is_unique_constraint": int(isinstance(item, Unique))}
         row |= {"constraint_is_system_named": int(item.name is None)}
-    return row
+    return place_facts(item.on, row)
 
 
-def heap_row(object_id: int, is_type: bool) -> dict[str, Any]:
+def heap_row(object_id: int, is_type: bool, on: Partition | None = None) -> dict[str, Any]:
     row: dict[str, Any] = dict.fromkeys(COLUMNS["indexes"], 0)
     row |= {"object_id": object_id, "name": None, "type_desc": "HEAP", "constraint_is_system_named": None}
     row |= {"filter_definition": None, "allow_row_locks": 1, "allow_page_locks": 1, "no_recompute": None}
-    row |= {"data_space_type": "FG", "partition_count": 0 if is_type else 1}
+    row |= {"partition_count": 0 if is_type else 1, "is_incremental": None}  # a heap has no statistics
     row |= {"data_compression": None if is_type else 0, "xml_compression": None if is_type else 0}
-    return row | {"compression_delay": None}
+    return place_facts(on, row | {"compression_delay": None})
+
+
+def index_column_row(object_id: int, index_id: int, position: int, name: str, **facts: Any) -> dict[str, Any]:
+    row: dict[str, Any] = dict.fromkeys(COLUMNS["index_columns"], 0)
+    row |= {"object_id": object_id, "index_id": index_id, "index_column_id": position, "column_name": name}
+    return row | facts
 
 
 def history_rows(
@@ -369,10 +395,15 @@ def tabular_rows(object_id: int, obj: Table | TableType, rows: CatalogRows) -> N
     keyed = [c for c in obj.constraints if isinstance(c, PrimaryKey | Unique)] + list(obj.indexes)
     keyed.sort(key=lambda item: not item.clustered)
     if not any(item.clustered for item in keyed):
-        heap = heap_row(object_id, is_type)
+        heap = heap_row(object_id, is_type, obj.on if isinstance(obj, Table) else None)
         if isinstance(obj, Table) and obj.compression is not None:
             heap["data_compression"] = COMPRESSION[obj.compression]
         rows["indexes"].append(heap)
+        if isinstance(obj, Table) and obj.on is not None:
+            # a partitioned heap has one row in sys.index_columns: its partitioning column
+            rows["index_columns"].append(
+                index_column_row(object_id, 0, 1, obj.on.column, partition_ordinal=1)
+            )
     for number, item in enumerate(keyed):
         index_id = 1 if item.clustered else number + 2
         rows["indexes"].append(
@@ -388,18 +419,27 @@ def tabular_rows(object_id: int, obj: Table | TableType, rows: CatalogRows) -> N
             members = [
                 (name, 0, 1, order.index(fold(name)) + 1 if fold(name) in order else 0) for name in listed
             ]
+        column = fold(item.on.column) if isinstance(item.on, Partition) else None
         for position, (name, descending, included, ordinal) in enumerate(members, 1):
             rows["index_columns"].append(
-                {
-                    "object_id": object_id,
-                    "index_id": index_id,
-                    "key_ordinal": 0 if included else position,
-                    "index_column_id": position,
-                    "is_descending_key": descending,
-                    "is_included_column": included,
-                    "column_name": name,
-                    "column_store_order_ordinal": ordinal,
-                }
+                index_column_row(
+                    object_id,
+                    index_id,
+                    position,
+                    name,
+                    key_ordinal=0 if included else position,
+                    is_descending_key=descending,
+                    is_included_column=included,
+                    column_store_order_ordinal=ordinal,
+                    partition_ordinal=int(fold(name) == column),
+                )
+            )
+        if isinstance(item.on, Partition) and column not in [fold(name) for name, *_ in members]:
+            # The engine adds the partitioning column to an index that does not hold it: a row
+            # that is no key column (key_ordinal 0) and no included column. Written from knowledge
+            # of the catalog, not measured: scripts/live_tables.py prints these rows (pass P4).
+            rows["index_columns"].append(
+                index_column_row(object_id, index_id, len(members) + 1, item.on.column, partition_ordinal=1)
             )
     for number, constraint in enumerate(obj.constraints):
         if isinstance(constraint, Check):
@@ -442,7 +482,10 @@ def rows_from_model(model: Model) -> CatalogRows:
     One dict for each row, keyed by the names of COLUMNS, so that a test can change one fact.
     A system-versioned table brings its history table: the catalog holds it, the model does not.
     Built-in schemas are added, as every database has them. A schema of the model that holds no
-    table-class object is given one module: an empty schema is not managed.
+    table-class object is given one module: an empty schema is not managed. A heap, a key or an
+    index on a partition scheme (Table.on, .on of the item) has the scheme as its data space,
+    PARTITIONS partition rows of one compression, and its partitioning column in index_columns;
+    ON [PRIMARY] and no place are both a filegroup.
     """
     rows: CatalogRows = {name: [] for name in COLUMNS}
     used = {fold(obj.schema) for obj in model.values() if not isinstance(obj, Schema)}
@@ -760,12 +803,15 @@ def test_the_table_of_engine_defaults_covers_every_option_of_the_model():
 
 
 def index_with(*options: tuple[str, str]) -> Table:
+    # STATISTICS_INCREMENTAL goes with a partition scheme only, so the table is on one
+    on = Partition("PS_a", "a") if "STATISTICS_INCREMENTAL" in dict(options) else None
     return Table(
         "dbo",
         "T",
         (Column("a", TypeRef("int"), False),),
-        (PrimaryKey("PK_T", True, (KeyColumn("a"),), options),),
-        (Index("IX_T", False, False, (KeyColumn("a"),), options=options),),
+        (PrimaryKey("PK_T", True, (KeyColumn("a"),), options, on),),
+        (Index("IX_T", False, False, (KeyColumn("a"),), options=options, on=on),),
+        on=on,
     )
 
 
@@ -783,7 +829,13 @@ def test_a_live_option_that_is_not_the_engine_default_is_compared_whether_the_fi
         value = next(v for v in sorted(INDEX_OPTION_VALUES[option] or ["80"]) if v != OPTION_DEFAULTS[option])
         if (option, value) == ("FILLFACTOR", "100"):
             continue
-        assert project_options(index_with((option, value)), index_with()) != index_with(), option
+        live = index_with((option, value))
+        declared = dataclasses.replace(
+            live,
+            constraints=tuple(dataclasses.replace(c, options=()) for c in live.constraints),
+            indexes=tuple(dataclasses.replace(i, options=()) for i in live.indexes),
+        )
+        assert project_options(live, declared) != declared, option
 
 
 @pytest.mark.parametrize(
@@ -805,6 +857,38 @@ def test_a_stated_default_does_not_hide_a_live_value_that_is_not_the_default():
     declared = index_with(("FILLFACTOR", "100"), ("PAD_INDEX", "OFF"))
 
     assert project_options(live, declared) == live != declared
+
+
+def test_statistics_incremental_is_not_given_to_a_live_index_that_is_on_no_partition_scheme():
+    # the file states STATISTICS_INCREMENTAL on an index on a scheme; the index of the database is
+    # on a filegroup. The option goes with a scheme only: the live index is compared without it
+    declared = index_with(("STATISTICS_INCREMENTAL", "OFF"))
+    live = Table(
+        "dbo",
+        "T",
+        declared.columns,
+        (PrimaryKey("PK_T", True, (KeyColumn("a"),)),),
+        (Index("IX_T", False, False, (KeyColumn("a"),)),),
+    )
+
+    projected = project_options(live, declared)
+
+    assert projected == live
+    assert [path for _, path in Model([declared]).diff_paths(Model([projected]))] == [
+        "constraints[pk_t].options[STATISTICS_INCREMENTAL] (absent in other)",
+        "constraints[pk_t].on",
+        "indexes[ix_t].options[STATISTICS_INCREMENTAL] (absent in other)",
+        "indexes[ix_t].on",
+        "on",
+    ]
+    # on a scheme, a stated default is the default of the catalog
+    aligned = index_with(("STATISTICS_INCREMENTAL", "ON"))
+    bare = dataclasses.replace(
+        aligned,
+        constraints=tuple(dataclasses.replace(c, options=()) for c in aligned.constraints),
+        indexes=tuple(dataclasses.replace(i, options=()) for i in aligned.indexes),
+    )
+    assert project_options(bare, declared) == declared
 
 
 @pytest.mark.parametrize("stated", [("FILLFACTOR", "90"), ("PAD_INDEX", "ON"), ("DATA_COMPRESSION", "PAGE")])
@@ -1304,9 +1388,9 @@ def test_the_capture_of_a_table_that_is_not_temporal_is_what_it_was_before():
     }
 
 
-def differing(stored: CatalogRows, live: CatalogRows) -> list[str]:
-    """The capture properties of the Price table that drift reports between two catalogs."""
-    before, after = read(stored).captures[PRICE_KEY], read(live).captures[PRICE_KEY]
+def differing(stored: CatalogRows, live: CatalogRows, key: str = PRICE_KEY) -> list[str]:
+    """The capture properties of one table (the Price table) that drift reports between two catalogs."""
+    before, after = read(stored).captures[key], read(live).captures[key]
     return [d.property for d in catalog.capture_differences(before, after)]
 
 
@@ -1420,8 +1504,14 @@ def test_a_temporal_table_with_another_property_outside_the_model_is_still_quara
         ("tabulars", "Order", {"is_edge": 1}, "graph"),
         ("tabulars", "Order", {"is_external": 1}, "external"),
         ("tabulars", "Order", {"has_fulltext_index": 1}, "full-text"),
-        ("indexes", "PK_Order", {"data_space_type": "PS"}, "partitioned"),
-        ("indexes", "PK_Order", {"partition_count": 4}, "partitioned"),
+        # a partitioned table whose scheme or partitioning column the catalog does not give
+        ("indexes", "PK_Order", {"data_space_type": "PS"}, "partition scheme or its partitioning column"),
+        ("indexes", "PK_Order", {"partition_count": 4}, "partition scheme or its partitioning column"),
+        ("indexes", "PK_Order", {"partition_scheme": "PS_OrderYear"}, "partitioning column"),
+        ("index_columns", "OrderId", {"partition_ordinal": 1}, "partition scheme or its partitioning column"),
+        ("indexes", "IX_Order_Status", {"is_incremental": 1}, "STATISTICS_INCREMENTAL"),
+        ("indexes", "IX_Order_Status", {"compression_kinds": 2},
+         "partitions do not all have the same compression"),
         ("indexes", "IX_Order_Status", {"type": 6, "type_desc": "NONCLUSTERED COLUMNSTORE"}, "COLUMNSTORE"),
         ("indexes", "IX_Order_Status", {"type": 3, "type_desc": "XML"}, "XML"),
         ("indexes", "IX_Order_Status", {"type": 4, "type_desc": "SPATIAL"}, "SPATIAL"),
@@ -1454,7 +1544,8 @@ def test_a_table_with_a_property_outside_the_model_is_quarantined(
     query: str, name: str, change: dict[str, Any], says: str
 ):
     rows = sales_rows()
-    only(rows, query, name=name).update(change)
+    where = {"column_name": name, "index_id": 1} if query == "index_columns" else {"name": name}
+    only(rows, query, **where).update(change)
 
     found = read(rows)
 
@@ -1632,22 +1723,296 @@ def test_two_constraints_that_come_to_one_fixed_name_put_the_table_outside_the_m
     ]
 
 
-@pytest.mark.parametrize("data_space", ["PS", "PS "])
-def test_a_partitioned_table_is_quarantined_whatever_padding_the_type_code_has(data_space: str):
-    # sys.data_spaces.type is char(2), as sys.objects.type: a driver can give it with padding
-    rows = sales_rows()
-    only(rows, "indexes", name="PK_Order")["data_space_type"] = data_space
+# ------------------------------------------------------------------ partitioned tables and indexes
+PS_ORDER_YEAR = Partition("PS_OrderYear", "OrderDate")
+
+
+def partitioned(fixture: str) -> tuple[Model, Table]:
+    """(the model, its table) of an object file of fixtures/ddl/ok that holds one partitioned table."""
+    text = (DDL_OK / f"{fixture}.sql").read_text(encoding="utf-8")
+    objects = parse_object_file(text, text.splitlines()[0].removeprefix("-- path: ").strip())
+    (table,) = (obj for obj in objects if isinstance(obj, Table))
+    return Model([Schema(table.schema), *objects]), table
+
+
+def table_of(found: CatalogRead, key: str) -> Table:
+    table = found.model[key]
+    assert isinstance(table, Table)
+    return table
+
+
+def test_a_partitioned_table_is_read_with_the_place_of_the_table_and_of_each_key_and_index():
+    model, declared = partitioned("table_partitioned_canonical_form")
+
+    found = read(rows_from_model(model))
+
+    assert found.unsupported == () and found.model.diff_paths(model) == []
+    table = table_of(found, declared.key)
+    assert table.on == PS_ORDER_YEAR
+    places = {label: item.on for label, item in table.placed_items()}
+    assert places == {
+        "PRIMARY KEY [PK_OrderLine]": ON_PRIMARY,  # not aligned: a filegroup, on a partitioned table
+        "UNIQUE [UQ_OrderLine_Date_Line]": PS_ORDER_YEAR,
+        "index [CIX_OrderLine]": PS_ORDER_YEAR,  # the clustered index is the table
+        "index [IX_OrderLine_Product]": PS_ORDER_YEAR,
+        "index [IX_OrderLine_Quantity]": ON_PRIMARY,
+    }
+    product = table.index("IX_OrderLine_Product")
+    assert product is not None and ("STATISTICS_INCREMENTAL", "ON") in product.options
+
+
+@pytest.mark.parametrize(
+    ("fixture", "clustered"),
+    [
+        ("table_partitioned_heap_canonical_form", None),
+        ("table_partitioned_clustered_columnstore", "CCI_FactOrderLine"),
+        ("table_partitioned_primary_key", "PK"),
+    ],
+)
+def test_a_partitioned_heap_columnstore_table_and_clustered_key_are_read(fixture: str, clustered: str | None):
+    model, declared = partitioned(fixture)
+    assert declared.on is not None
+
+    found = read(rows_from_model(model))
+
+    assert found.unsupported == () and found.model.diff_paths(model) == []
+    table = table_of(found, declared.key)
+    assert table.on == declared.on
+    item = table.clustered_item()
+    assert (item is None) == (clustered is None)
+    assert item is None or item.on == declared.on
+    assert found.captures[declared.key]["partition"] == {
+        "scheme": declared.on.scheme,
+        "column": declared.on.column,
+    }
+
+
+def test_the_partitioning_column_that_the_engine_adds_to_an_index_is_no_column_of_the_index():
+    # The engine adds the partitioning column to a nonunique index that does not hold it. If the
+    # reader took that row for a key or an included column, every export would differ from its file.
+    model, declared = partitioned("table_partitioned_canonical_form")
+    rows = rows_from_model(model)
+    product = only(rows, "indexes", name="IX_OrderLine_Product")
+    members = [row for row in rows["index_columns"] if row["index_id"] == product["index_id"]]
+    assert [
+        (m["column_name"], m["key_ordinal"], m["is_included_column"], m["partition_ordinal"]) for m in members
+    ] == [
+        ("ProductId", 1, 0, 0),
+        ("Quantity", 0, 1, 0),
+        ("OrderDate", 0, 0, 1),
+    ]
 
     found = read(rows)
 
-    assert ORDER_KEY not in found.model
-    assert [(u.object_key, u.reason) for u in found.unsupported if u.object_key == ORDER_KEY] == [
-        (ORDER_KEY, "it is partitioned")
-    ]
+    index = table_of(found, declared.key).index("IX_OrderLine_Product")
+    assert index is not None and index.on == PS_ORDER_YEAR
+    assert ([c.name for c in index.columns], index.included) == (["ProductId"], ("Quantity",))
+    capture = found.captures[declared.key]["index [IX_OrderLine_Product]"]
+    assert (capture["columns"], capture["included"]) == ([["ProductId", False]], ["Quantity"])
+    # the same for a nonclustered columnstore index: its list is what the statement lists
+    wide = Table(
+        "dw",
+        "Wide",
+        (Column("d", TypeRef("date"), False), Column("a", TypeRef("int"), False)),
+        indexes=(Index("NCCI", False, False, (), ("a",), columnstore=True, on=Partition("PS_Day", "d")),),
+    )
+    listed = read(rows_from_model(Model([Schema("dw"), wide])))
+    assert listed.unsupported == () and listed.model[wide.key] == wide
+
+
+def test_an_index_on_a_partition_scheme_of_a_table_that_is_not_partitioned_is_read():
+    model, declared = partitioned("table_partitioned_index_on_plain_table")
+
+    found = read(rows_from_model(model))
+
+    assert found.unsupported == () and found.model.diff_paths(model) == []
+    table = table_of(found, declared.key)
+    assert table.on is None
+    assert {label: item.on for label, item in table.placed_items()} == {
+        "PRIMARY KEY [PK_Shipment]": None,  # no ON [PRIMARY]: the table is not partitioned
+        "index [IX_Shipment_Carrier]": None,
+        "index [IX_Shipment_ShippedOn]": Partition("PS_ShipYear", "ShippedOn"),
+    }
+
+
+@pytest.mark.parametrize("data_space", ["PS", "PS "])
+def test_a_partitioned_table_is_read_whatever_padding_the_type_code_has(data_space: str):
+    # sys.data_spaces.type is char(2), as sys.objects.type: a driver can give it with padding
+    model, declared = partitioned("table_partitioned_canonical_form")
+    rows = rows_from_model(model)
+    for row in rows["indexes"]:
+        row["data_space_type"] = data_space if row["data_space_type"] == "PS" else "FG "
+
+    found = read(rows)
+
+    assert found.unsupported == () and found.model.diff_paths(model) == []
     padded = sales_rows()
     for row in padded["indexes"]:
         row["data_space_type"] = "FG "  # a padded file group is no partition scheme
-    assert ORDER_KEY in read(padded).model
+    assert order_of(read(padded)) == ORDER
+
+
+def test_the_capture_holds_the_scheme_and_the_column_of_the_table_and_of_each_index():
+    model, declared = partitioned("table_partitioned_canonical_form")
+
+    capture = read(rows_from_model(model)).captures[declared.key]
+
+    place = {"scheme": "PS_OrderYear", "column": "OrderDate"}
+    assert capture["partition"] == place
+    assert capture["index [CIX_OrderLine]"]["partition"] == place
+    assert capture["index [IX_OrderLine_Product]"]["partition"] == place
+    assert capture["index [IX_OrderLine_Product]"]["options"] == {"STATISTICS_INCREMENTAL": "ON"}
+    assert capture["constraint [UQ_OrderLine_Date_Line]"]["partition"] == place
+    # on a filegroup: nothing is written, as for an index of a table that is not partitioned
+    assert "partition" not in capture["index [IX_OrderLine_Quantity]"]
+    assert "partition" not in capture["constraint [PK_OrderLine]"]
+    assert json.loads(json.dumps(capture)) == capture
+    # the number of partitions and the boundaries are no design: SPLIT and MERGE are not drift
+    assert not any("count" in name or "boundar" in name for name in capture)
+
+
+def test_the_capture_of_a_table_that_is_not_partitioned_names_no_scheme_and_its_indexes_stay_as_they_were():
+    capture = read(sales_rows()).captures[ORDER_KEY]
+
+    # a property of its own, always there (as heap_compression): a heap that somebody partitions
+    # behind the tool has no index capture that could show it
+    assert capture["partition"] is None
+    for label, value in capture.items():
+        if label.startswith(("index ", "constraint ")):
+            assert "partition" not in value  # a stored capture of an older tool stays equal
+    assert (
+        "partition"
+        not in read(rows_from_model(Model([TableType("dbo", "T", ORDER.columns[:1])]))).captures[
+            "TYPE:[dbo].[T]"
+        ]
+    )
+
+
+def test_a_split_or_merge_of_the_partition_function_is_no_drift():
+    model, declared = partitioned("table_partitioned_canonical_form")
+    live = rows_from_model(model)
+    for row in live["indexes"]:
+        if row["data_space_type"] == "PS":
+            row["partition_count"] = 40
+
+    assert differing(rows_from_model(model), live, declared.key) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "change", "property_"),
+    [
+        # an aligned index that somebody created again on a filegroup
+        ("IX_OrderLine_Product", {"data_space_type": "FG", "partition_scheme": None, "partition_count": 1,
+                                  "is_incremental": 0}, "index [IX_OrderLine_Product]"),
+        ("IX_OrderLine_Product", {"partition_scheme": "PS_OrderMonth"}, "index [IX_OrderLine_Product]"),
+        ("IX_OrderLine_Product", {"is_incremental": 0}, "index [IX_OrderLine_Product]"),
+        ("UQ_OrderLine_Date_Line", {"partition_scheme": "PS_OrderMonth"},
+         "constraint [UQ_OrderLine_Date_Line]"),
+    ],
+)  # fmt: skip
+def test_drift_sees_an_index_or_a_key_that_is_in_another_place(
+    name: str, change: dict[str, Any], property_: str
+):
+    model, declared = partitioned("table_partitioned_canonical_form")
+    live = rows_from_model(model)
+    row = only(live, "indexes", name=name)
+    row.update(change)
+    if change.get("data_space_type") == "FG":
+        for member in live["index_columns"]:
+            if member["index_id"] == row["index_id"]:
+                member["partition_ordinal"] = 0
+
+    assert differing(rows_from_model(model), live, declared.key) == [property_]
+
+
+def test_drift_sees_a_heap_that_is_on_another_scheme_or_on_none():
+    model, declared = partitioned("table_partitioned_heap_canonical_form")
+    stored = rows_from_model(model)
+    moved = rows_from_model(model)
+    only(moved, "indexes", type=0)["partition_scheme"] = "PS_OrderMonth"
+    plain = rows_from_model(Model([Schema("sales"), dataclasses.replace(declared, on=None)]))
+
+    assert differing(stored, moved, declared.key) == ["partition"]
+    assert differing(stored, plain, declared.key) == ["partition"]
+    assert differing(plain, stored, declared.key) == ["partition"]  # partitioned behind the tool
+
+
+def test_an_index_of_a_partitioned_table_on_a_filegroup_is_not_the_index_that_the_file_puts_on_the_scheme():
+    # the read-back compares models: the place is a field of the index
+    model, declared = partitioned("table_partitioned_canonical_form")
+    rows = rows_from_model(model)
+    row = only(rows, "indexes", name="IX_OrderLine_Product")
+    row.update(data_space_type="FG", partition_scheme=None, partition_count=1, is_incremental=0)
+    for member in rows["index_columns"]:
+        if member["index_id"] == row["index_id"]:
+            member["partition_ordinal"] = 0
+
+    found = read(rows)
+
+    assert found.unsupported == ()
+    paths = Model([declared]).diff_paths(Model([found.model[declared.key]]), expressions=False)
+    assert [path for _, path in paths] == [
+        "indexes[ix_orderline_product].options[STATISTICS_INCREMENTAL] (absent in other)",
+        "indexes[ix_orderline_product].on",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fixture", "where", "says"),
+    [
+        ("table_partitioned_heap_canonical_form", {"type": 0},
+         "the heap: its partitions do not all have the same compression"),
+        ("table_partitioned_canonical_form", {"name": "CIX_OrderLine"},
+         "index [CIX_OrderLine]: its partitions do not all have the same compression"),
+        ("table_partitioned_canonical_form", {"name": "UQ_OrderLine_Date_Line"},
+         "index [UQ_OrderLine_Date_Line]: its partitions do not all have the same compression"),
+        ("table_partitioned_clustered_columnstore", {"name": "CCI_FactOrderLine"},
+         "index [CCI_FactOrderLine]: its partitions do not all have the same compression"),
+    ],
+)  # fmt: skip
+def test_a_table_whose_partitions_do_not_all_have_one_compression_stays_unmanaged(
+    fixture: str, where: dict[str, Any], says: str
+):
+    # the model holds one compression for a table or an index: MAX alone would read PAGE for a
+    # table of which one partition is PAGE, and a release would then "keep" a state that is not there
+    model, declared = partitioned(fixture)
+    rows = rows_from_model(model)
+    # two of the partitions are PAGE and one is not: the highest compression alone says PAGE
+    only(rows, "indexes", **where)["compression_kinds"] = 2
+
+    found = read(rows)
+
+    assert declared.key not in found.model and declared.key not in found.captures
+    (item,) = found.unsupported
+    assert (item.object_key, item.code) == (declared.key, UNSUPPORTED)
+    assert says in item.reason and "per-partition compression is outside the model" in item.reason
+
+
+def test_a_partition_scheme_that_the_catalog_does_not_name_puts_the_table_outside_the_model():
+    # no row of sys.partition_schemes for this principal: the table is never read as not partitioned
+    model, declared = partitioned("table_partitioned_heap_canonical_form")
+    rows = rows_from_model(model)
+    only(rows, "indexes", type=0).update(data_space_type=None, partition_scheme=None, partition_count=1)
+
+    (item,) = read(rows).unsupported
+
+    assert item.object_key == declared.key
+    assert item.reason == (
+        "the heap: it is partitioned, and the catalog does not give its partition scheme or its "
+        "partitioning column"
+    )
+
+
+def test_a_table_type_is_never_read_as_partitioned():
+    rows = rows_from_model(Model([TableType("dbo", "T", ORDER.columns[:1])]))
+    only(rows, "indexes", type=0).update(data_space_type="PS", partition_scheme="PS_OrderYear")
+    rows["index_columns"].append(
+        index_column_row(only(rows, "indexes", type=0)["object_id"], 0, 1, "OrderId", partition_ordinal=1)
+    )
+
+    found = read(rows)
+
+    assert [item.object_key for item in found.unsupported] == ["TYPE:[dbo].[T]"]
 
 
 def test_an_auto_created_or_hypothetical_index_is_not_part_of_the_table():
@@ -1774,6 +2139,7 @@ def test_a_capture_is_flat_json_with_one_property_for_each_sub_object():
         "heap_compression",
         "index [IX_Order_Status]",
         "kind",
+        "partition",
     ]
     assert capture["column [Note]"] == {
         "type": "nvarchar",

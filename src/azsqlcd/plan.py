@@ -171,6 +171,14 @@ class TableHooks(Protocol):
         """Names of pending index and constraint creates that exist live and are not recorded (A20)."""
         ...
 
+    def missing_partition_schemes(self, session: Session, work: Work) -> list[str]:
+        """Names of the partition schemes that a pending model statement creates a table, a key or an
+        index on and that the database does not hold, each once, as the statement writes it, in the
+        order of the names without case. A partition scheme is not an object of the model, so no
+        model statement creates one; a scheme that a raw batch of the pending migrations creates
+        before the statement is not missing."""
+        ...
+
     def refresh_set(self, session: Session, work: Work) -> list[str]:
         """Keys of the managed, unchanged modules to refresh after the change (A12), in refresh order."""
         ...
@@ -1328,9 +1336,10 @@ def compute_plan(
 
     Refused: every code of pending_work(), and FENCE_ENGINE_EDITION, FENCE_READ_ONLY,
     FENCE_DB_NAME, FENCE_CASE_SENSITIVE, FENCE_META_MISMATCH, NAME_COLLISION, DRIFT_TOUCHED,
-    DRIFT_BLOCK, LEGACY_FLAGS, INDEXED_VIEW, UNBIND_HEADER, TABLE_BLOCKER, FORBIDDEN_TOKEN, PARSEONLY_CANARY,
-    PARSEONLY_FAILED, ENV_NOT_CONFIGURED, TARGET_NOT_CONFIGURED; STATE_MISSING and the other codes
-    of state.read_state and catalog.capture_modules pass through. Locked (25): RUN_LIVE.
+    DRIFT_BLOCK, LEGACY_FLAGS, INDEXED_VIEW, UNBIND_HEADER, PARTITION_SCHEME_MISSING, TABLE_BLOCKER,
+    FORBIDDEN_TOKEN, PARSEONLY_CANARY, PARSEONLY_FAILED, ENV_NOT_CONFIGURED, TARGET_NOT_CONFIGURED;
+    STATE_MISSING and the other codes of state.read_state and catalog.capture_modules pass through.
+    Locked (25): RUN_LIVE.
     """
     environment, target = resolve_target(config, env, target_id)
     # A4: the applock is the only liveness authority. It is asked first: APPLOCK_TEST waits for
@@ -1442,7 +1451,8 @@ def compute_plan(
     if table_hooks is None:
         notes.append(
             "tables are not modelled: no table drift, no table read-back, no blocker or dependant scan, "
-            "no refresh of dependants and no row counts"
+            "no refresh of dependants, no row counts and no partition scheme check (a statement on a "
+            "partition scheme that the database does not hold fails when it runs)"
         )
         if config.project.table_model:
             notes.append("azsqlcd.toml has table_model = true, and this run has no table model")
@@ -1522,6 +1532,19 @@ def compute_plan(
     dependants: tuple[str, ...] = ()
     dependant_findings: dict[str, tuple[str, ...]] = {}
     if table_hooks is not None and work.pending:
+        # A partition scheme is a prerequisite that a DBA owns: no model statement creates one.
+        # Without it the unit would fail at the statement that names it, after the batches before it
+        missing = [names.quote(name) for name in table_hooks.missing_partition_schemes(session, work)]
+        if missing:
+            raise refused(
+                "PARTITION_SCHEME_MISSING",
+                f"the release creates a table, a key or an index on partition scheme {missing[0]}, and "
+                f"the database has no partition scheme with this name ({len(missing)} partition scheme(s) "
+                "in all). Partition functions and partition schemes are not managed: a DBA creates them "
+                "in this database, or a raw batch does that runs before the statement on the scheme. Then "
+                "plan again",
+                schemes=missing,
+            )
         # A12: the dependants are read now, while the old names of the tables still resolve
         dependants = tuple(sorted(table_hooks.dependants_to_check(session, work)))
         findings = table_hooks.blockers_and_dependants(session, work, config)

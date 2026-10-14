@@ -1,0 +1,18 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "OrderLine",
+  "constraint": {
+    "class": "Unique",
+    "name": "UQ_OrderLine",
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "OrderLineId", "descending": false}
+    ],
+    "options": [],
+    "on": "PRIMARY"
+  },
+  "for_column": null,
+  "with_check": null,
+  "exec_options": []
+}

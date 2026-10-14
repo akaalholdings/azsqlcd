@@ -13,13 +13,18 @@ from azsqlcd.diff import GenRefused, diff
 from azsqlcd.emit import emit_create_script, emit_operation
 from azsqlcd.lex import split_batches
 from azsqlcd.model import (
+    AddConstraint,
     AlterColumn,
+    CreateIndex,
     DropConstraint,
     DropTable,
+    Index,
     MaskColumn,
     Model,
     Operation,
+    PrimaryKey,
     Table,
+    Unique,
     UnmaskColumn,
 )
 from azsqlcd.parse import parse_statement
@@ -338,3 +343,112 @@ def test_the_mask_of_the_head_is_what_stops_a_hand_written_alter_column_that_rem
 
     assert result != head
     assert result.diff_paths(head) == [("TABLE:[sales].[Buyer]", "columns[mail].masked")]
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+PARTITIONED_CASES = [case for case in ACCEPTED if case.startswith("partitioned_")]
+PARTITION_REFUSALS = [
+    "refuse_alter_of_the_partitioning_column",
+    "refuse_drop_of_the_partitioning_column",
+    "refuse_partition_a_table_that_was_not",
+    "refuse_partition_scheme_change",
+    "refuse_partitioning_column_change",
+]
+
+
+def test_the_pairs_hold_every_change_of_a_partitioned_table_that_is_written_and_every_one_that_is_refused():
+    assert PARTITIONED_CASES == [
+        "partitioned_add_aligned_index",
+        "partitioned_add_column",
+        "partitioned_alter_other_column",
+        "partitioned_clustered_index_dropped_to_heap",
+        "partitioned_clustered_key_replaced_in_place",
+        "partitioned_drop_index",
+        "partitioned_heap_compression_change",
+        "partitioned_index_and_key_change_their_place",
+        "partitioned_index_compression_and_statistics_change",
+        "partitioned_rename_of_the_partitioning_column",
+        "partitioned_tables_new_and_dropped",
+    ]
+    assert set(PARTITION_REFUSALS) <= set(loader.CASES)
+    for case in PARTITION_REFUSALS:
+        with pytest.raises(GenRefused) as caught:
+            diff(loader.model(case, "base"), loader.model(case, "head"))
+        assert {refusal.code for refusal in caught.value.refusals} == {"PARTITION_CHANGE"}
+
+
+def scheme_of(model: Model, key: str) -> str | None:
+    table = model[key]
+    assert isinstance(table, Table)
+    return table.on.scheme if table.on is not None else None
+
+
+@pytest.mark.parametrize("case", PARTITIONED_CASES)
+def test_no_generated_statement_moves_a_table_and_each_new_key_and_index_states_its_place(case: str):
+    base, head = loader.model(case, "base"), loader.model(case, "head")
+    state = base
+    for op in as_written(diff(base, head, loader.renames(case))):
+        before, state = state, replay(state, [op])
+        # a table that the statement does not create or drop is on the scheme that it was on
+        for key in set(before) & set(state):
+            if isinstance(before[key], Table):
+                assert scheme_of(before, key) == scheme_of(state, key), emit_operation(op)
+        placed = op.index if isinstance(op, CreateIndex) else getattr(op, "constraint", None)
+        if isinstance(op, CreateIndex | AddConstraint) and isinstance(placed, Index | PrimaryKey | Unique):
+            if scheme_of(state, f"TABLE:[{op.schema}].[{op.table}]") is not None:
+                assert placed.on is not None, emit_operation(op)  # never left to the engine
+    assert state == head
+
+
+def test_an_index_written_by_hand_without_its_on_clause_is_proven_as_the_aligned_index_of_the_engine():
+    case = "partitioned_add_aligned_index"
+    base, head = loader.model(case, "base"), loader.model(case, "head")
+    generated = [emit_operation(op) for op in diff(base, head)]
+    assert generated[0].endswith("([ProductId]) ON [PS_OrderYear]([OrderDate]);")
+    left_out = generated[0].replace(" ON [PS_OrderYear]([OrderDate])", "")
+    assert replay(base, statements(left_out, generated[1])) == head
+    # ON [PRIMARY] is another index: the proof fails and names the place
+    on_primary = generated[0].replace("ON [PS_OrderYear]([OrderDate])", "ON [PRIMARY]")
+    assert replay(base, statements(on_primary, generated[1])).diff_paths(head) == [
+        ("TABLE:[sales].[OrderLine]", "indexes[ix_orderline_product].on")
+    ]
+    # and on a table that is not partitioned, leaving the clause out leaves the index off the scheme
+    plain = generated[1].replace(" ON [PS_ShipYear]([ShippedOn])", "")
+    assert replay(base, statements(generated[0], plain)).diff_paths(head) == [
+        ("TABLE:[sales].[Shipment]", "indexes[ix_shipment_shippedon].on")
+    ]
+
+
+def test_a_hand_written_statement_that_the_engine_refuses_on_a_partitioned_table_fails_the_proof():
+    base = loader.model("partitioned_add_aligned_index", "base")
+    unique = "CREATE UNIQUE NONCLUSTERED INDEX [UX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId])"
+    with pytest.raises(ReplayError) as caught:
+        replay(base, statements(unique))
+    assert (caught.value.op_index, caught.value.object_key) == (0, "TABLE:[sales].[OrderLine]")
+    assert "the partitioning column [OrderDate] must be one of its key columns" in caught.value.message
+    for statement, says in (
+        (
+            "ALTER TABLE [sales].[OrderLine] ALTER COLUMN [OrderDate] datetime2(0) NOT NULL",
+            "ALTER COLUMN [OrderDate]",
+        ),
+        ("ALTER TABLE [sales].[OrderLine] DROP COLUMN [OrderDate]", "DROP COLUMN [OrderDate]"),
+    ):
+        with pytest.raises(ReplayError) as caught:
+            replay(base, statements(statement))
+        assert caught.value.message == f"{says}: it is the partitioning column of the table"
+
+
+def test_a_refused_partition_change_is_proven_when_a_person_writes_the_rebuild_and_not_with_a_wrong_scheme():
+    case = "refuse_partition_scheme_change"
+    base, head = loader.model(case, "base"), loader.model(case, "head")
+    rebuild = (
+        "DROP INDEX [CIX_OrderLine] ON [sales].[OrderLine]",
+        "CREATE CLUSTERED INDEX [CIX_OrderLine] ON [sales].[OrderLine] ([OrderDate], [OrderLineId])"
+        " ON [{}]([OrderDate])",
+    )
+    assert replay(base, statements(rebuild[0], rebuild[1].format("PS_OrderMonth"))) == head
+    wrong = replay(base, statements(rebuild[0], rebuild[1].format("PS_OrderWeek")))
+    assert wrong.diff_paths(head) == [
+        ("TABLE:[sales].[OrderLine]", "indexes[cix_orderline].on.scheme"),
+        ("TABLE:[sales].[OrderLine]", "on.scheme"),
+    ]

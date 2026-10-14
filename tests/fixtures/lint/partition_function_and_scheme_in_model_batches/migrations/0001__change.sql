@@ -1,0 +1,7 @@
+-- azsqlcd:migration 0001__change
+-- azsqlcd:mode tx
+CREATE PARTITION FUNCTION [PF_OrderYear] (date) AS RANGE RIGHT FOR VALUES ('2026-01-01');
+GO
+CREATE PARTITION SCHEME [PS_OrderYear] AS PARTITION [PF_OrderYear] ALL TO ([PRIMARY]);
+GO
+ALTER PARTITION FUNCTION [PF_OrderYear]() SPLIT RANGE ('2027-01-01');

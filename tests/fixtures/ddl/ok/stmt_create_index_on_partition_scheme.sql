@@ -1,0 +1,1 @@
+CREATE UNIQUE NONCLUSTERED INDEX [UX_OrderLine_Date_Line] ON [sales].[OrderLine] ([OrderDate], [OrderLineId] DESC) INCLUDE ([Quantity]) WITH (ONLINE = ON, STATISTICS_INCREMENTAL = ON, DATA_COMPRESSION = ROW) ON [PS_OrderYear]([OrderDate]);

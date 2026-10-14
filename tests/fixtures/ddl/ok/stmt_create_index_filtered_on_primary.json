@@ -1,0 +1,19 @@
+{
+  "class": "CreateIndex",
+  "schema": "sales",
+  "table": "OrderLine",
+  "index": {
+    "class": "Index",
+    "name": "IX_OrderLine_Quantity",
+    "unique": false,
+    "clustered": false,
+    "columns": [
+      {"class": "KeyColumn", "name": "Quantity", "descending": false}
+    ],
+    "included": [],
+    "filter": {"class": "Expression", "tokens": ["[Quantity]", ">", "100"]},
+    "options": [],
+    "on": "PRIMARY"
+  },
+  "exec_options": []
+}

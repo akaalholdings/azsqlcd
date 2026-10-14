@@ -724,6 +724,104 @@ def test_gen_refuses_every_refused_fixture_pair_with_the_codes_of_the_fixture(tm
     assert [f"{item['code']} {item['object']}" for item in error.detail["refusals"]] == expected
 
 
+PARTITION_REFUSALS = [
+    "refuse_partition_a_table_that_was_not",
+    "refuse_partition_scheme_change",
+    "refuse_partitioning_column_change",
+    "refuse_alter_of_the_partitioning_column",
+    "refuse_drop_of_the_partitioning_column",
+]
+
+
+@pytest.mark.parametrize("case", PARTITION_REFUSALS)
+def test_gen_writes_no_statement_that_moves_a_table_and_says_that_a_person_writes_the_rebuild(
+    tmp_path: Path, case: str
+):
+    """A move of a table to, off or between partition schemes writes every row again. gen never
+    writes it: the refusal names the table and what differs, and its hint says how to hand-write."""
+    repo = pair_repo(tmp_path, case)
+    error = refusal(lambda: gen.generate(repo, "main", "change"))
+    assert error.reason_code == "GEN_REFUSED"
+    assert {item["code"] for item in error.detail["refusals"]} == {"PARTITION_CHANGE"}
+    for item in error.detail["refusals"]:
+        assert item["hint"] == diff.REFUSALS["PARTITION_CHANGE"]
+        assert "Hand-write the migration" in item["hint"] and "ON [scheme]([column])" in item["hint"]
+        assert f"PARTITION_CHANGE {item['object']}: {item['message']}" in error.message
+    assert not list((repo / "migrations").glob("*.sql"))  # nothing was written
+
+
+def test_gen_writes_the_place_of_each_key_and_index_from_the_model_under_the_allow_line_of_its_build(
+    tmp_path: Path,
+):
+    """The ON clause comes from the object file: on the scheme, or ON [PRIMARY] for an index that is
+    not aligned. A build on a table that exists needs LONG_LOCK, on a scheme as anywhere."""
+    case = "partitioned_index_and_key_change_their_place"
+    text = gen.generate(pair_repo(tmp_path, case), "main", "change").text
+    assert text is not None
+    assert text.splitlines()[8:] == [
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: TODO",
+        "ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [UQ_OrderLine_Date_Line] UNIQUE NONCLUSTERED "
+        "([OrderDate], [OrderLineId]) ON [PS_OrderYear]([OrderDate]);",
+        "GO",
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: TODO",
+        "CREATE NONCLUSTERED INDEX [IX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId]) ON [PRIMARY];",
+        "GO",
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: TODO",
+        "CREATE NONCLUSTERED INDEX [IX_OrderLine_Quantity] ON [sales].[OrderLine] ([Quantity]) "
+        "ON [PS_Quantity]([Quantity]);",
+        "GO",
+    ]
+
+
+def test_the_compression_change_of_a_partitioned_heap_is_a_rebuild_of_all_partitions_under_long_lock(
+    tmp_path: Path,
+):
+    """ALTER TABLE ... REBUILD WITH (...) is not valid for a partitioned table: the engine wants
+    PARTITION = ALL. Every row is written again, so the statement needs LONG_LOCK."""
+    text = gen.generate(pair_repo(tmp_path, "partitioned_heap_compression_change"), "main", "change").text
+    assert text is not None
+    assert text.splitlines()[2:] == [
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLineArchive] reason: TODO",
+        "ALTER TABLE [sales].[OrderLineArchive] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = NONE);",
+        "GO",
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLineStage] reason: TODO",
+        "ALTER TABLE [sales].[OrderLineStage] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);",
+        "GO",
+    ]
+
+
+def test_the_drop_of_the_clustered_index_of_a_partitioned_table_is_written_under_long_lock(tmp_path: Path):
+    """The table becomes a heap: the engine writes every row again and rebuilds every nonclustered
+    index. lint cannot see that an index is clustered; gen writes the allow line from the model."""
+    text = gen.generate(
+        pair_repo(tmp_path, "partitioned_clustered_index_dropped_to_heap"), "main", "change"
+    ).text
+    assert text is not None
+    assert text.splitlines()[2:] == [
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: TODO",
+        "DROP INDEX [CIX_OrderLine] ON [sales].[OrderLine];",
+        "GO",
+    ]
+    # the drop of a clustered key, and the first statement of a drop and create of the clustered item
+    text = gen.generate(
+        pair_repo(tmp_path / "key", "partitioned_clustered_key_replaced_in_place"), "main", "change"
+    ).text
+    assert text is not None
+    assert text.splitlines()[2:4] == [
+        "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: TODO",
+        "ALTER TABLE [sales].[OrderLine] DROP CONSTRAINT [PK_OrderLine];",
+    ]
+
+
+def test_a_new_partitioned_table_is_created_on_its_scheme_and_its_indexes_need_no_long_lock(tmp_path: Path):
+    text = gen.generate(pair_repo(tmp_path, "partitioned_tables_new_and_dropped"), "main", "change").text
+    assert text is not None
+    assert ")\nON [PS_OrderYear]([OrderDate]);\nGO\n" in text
+    assert "ON [sales].[OrderLine] ([Quantity]) ON [PRIMARY];" in text
+    assert "LONG_LOCK" not in text  # every index of the migration is on a table that it creates
+    assert "PARTITION FUNCTION" not in text and "PARTITION SCHEME" not in text  # a DBA owns them
+
+
 def test_a_rename_value_that_cannot_be_read_is_refused_before_git_is_read(tmp_path: Path):
     error = refusal(lambda: gen.generate(tmp_path / "no repository", "main", "x", ["column:[a].[b]=[c]"]))
     assert error.reason_code == "RENAME_INVALID"

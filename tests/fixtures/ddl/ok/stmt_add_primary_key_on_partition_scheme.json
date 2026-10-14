@@ -1,0 +1,19 @@
+{
+  "class": "AddConstraint",
+  "schema": "sales",
+  "table": "OrderLine",
+  "constraint": {
+    "class": "PrimaryKey",
+    "name": "PK_OrderLine",
+    "clustered": true,
+    "columns": [
+      {"class": "KeyColumn", "name": "OrderDate", "descending": false},
+      {"class": "KeyColumn", "name": "OrderLineId", "descending": false}
+    ],
+    "options": [["DATA_COMPRESSION", "PAGE"]],
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  },
+  "for_column": null,
+  "with_check": null,
+  "exec_options": [["ONLINE", "ON"]]
+}

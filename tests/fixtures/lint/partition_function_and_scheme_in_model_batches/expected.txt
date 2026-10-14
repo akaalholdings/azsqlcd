@@ -1,0 +1,4 @@
+# partition functions and schemes are not objects of the model: a DBA owns them
+MODEL_STATEMENT migrations/0001__change.sql:3
+MODEL_STATEMENT migrations/0001__change.sql:5
+MODEL_STATEMENT migrations/0001__change.sql:7

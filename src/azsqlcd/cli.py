@@ -1420,13 +1420,14 @@ def _read_failure(error: SqlError) -> ToolError:
 
 
 def _told_detail(failure: ToolError) -> list[str]:
-    """The lines of a refusal that the message only counts: each object, blocker or batch.
+    """The lines of a refusal that the message only counts: each object, blocker, partition scheme
+    or batch.
 
     By the rule of every module that builds a ToolError, a detail holds names, property names,
     hashes and redacted engine messages; never definition or batch text (A25).
     """
     lines: list[str] = []
-    for name in ("objects", "blockers", "failures"):
+    for name in ("objects", "blockers", "schemes", "failures"):
         found = failure.detail.get(name)
         for item in found if isinstance(found, list) else []:
             told = item if isinstance(item, str) else json.dumps(item, sort_keys=True, default=str)

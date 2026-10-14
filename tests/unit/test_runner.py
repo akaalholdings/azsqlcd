@@ -1789,6 +1789,9 @@ class Hooks:
     def sub_object_collisions(self, session: Any, work: Work, state: State) -> list[str]:
         return []
 
+    def missing_partition_schemes(self, session: Any, work: Work) -> list[str]:
+        return self.answers.get("missing_schemes", [])
+
     def refresh_set(self, session: Any, work: Work) -> list[str]:
         return self.answers.get("refresh", [])
 
@@ -2452,6 +2455,26 @@ def test_a_dependant_with_other_findings_under_the_lock_makes_the_plan_stale():
     error = failure(b, st, db, expect=approved, table_hooks=broken_now)
     assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "STALE_PLAN")
     assert db.sent("BEGIN TRANSACTION") == [] and db.sent(ADD_C) == []
+
+
+def test_a_partition_scheme_that_is_gone_after_the_plan_job_refuses_the_deploy_before_any_statement():
+    """The plan job found every partition scheme of the release, and the scheme was dropped before
+    the deploy. The plan under the lock asks again: the release is refused, not failed in its unit."""
+    b, st, db = a_table_release()
+    approved = compute_plan(
+        b,
+        CONFIG,
+        "dev",
+        "sales-dev",
+        a_table_release()[2],
+        tool_version="0.1.0",
+        tool_digest=TOOL_DIGEST,
+        table_hooks=Hooks(),
+    )
+    error = failure(b, st, db, expect=approved, table_hooks=Hooks(missing_schemes=["PS_OrderYear"]))
+    assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "PARTITION_SCHEME_MISSING")
+    assert error.detail == {"schemes": ["[PS_OrderYear]"]}
+    assert db.sent("BEGIN TRANSACTION") == [] and db.sent(ADD_C) == [] and error.report.run_id is None
 
 
 # ------------------------------------------------------------------ indexed views

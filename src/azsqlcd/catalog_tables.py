@@ -41,6 +41,19 @@ sys.masked_columns.masking_function as the engine stores it, and its capture has
 value 'masking_function'. A column without a mask has neither, so a mask that is removed, added
 or changed outside the tool is a difference of 'column [c]'. A masked column of a table type
 stays outside the model.
+
+Partitioned tables and indexes: a heap or an index whose data space is a partition scheme
+(sys.partition_schemes through sys.indexes.data_space_id) has a Partition: the name of the scheme and
+the one partitioning column (sys.index_columns.partition_ordinal = 1). Table.on is the place of the
+heap or of the clustered index. A key or an index of a partitioned table that is on a filegroup has
+ON_PRIMARY, and on any other table None: the canonical states of the model. The scheme and its
+function are not read: no boundary, no number of partitions, so SPLIT, MERGE and SWITCH change
+neither the model nor a capture. The capture of a table has the property 'partition' (None, or
+scheme and column), always there as 'heap_compression' is; the capture of a key or an index has
+'partition' only when it is on a scheme, so the capture of every other index is what it was. The
+model holds one compression for a heap or an index: an object whose partitions do not all have the
+same compression stays outside the model. STATISTICS_INCREMENTAL is sys.stats.is_incremental of
+the statistics of the index.
 """
 
 from __future__ import annotations
@@ -58,6 +71,7 @@ from azsqlcd.catalog import KEY_CHUNK, MODULE_TYPES, flag, object_id_sql, type_l
 from azsqlcd.errors import refused
 from azsqlcd.lex import significant, tokenize
 from azsqlcd.model import (
+    ON_PRIMARY,
     AliasType,
     Check,
     Column,
@@ -72,6 +86,8 @@ from azsqlcd.model import (
     Model,
     ModelObject,
     Options,
+    Partition,
+    Place,
     PrimaryKey,
     Schema,
     Sequence,
@@ -119,6 +135,7 @@ OPTION_DEFAULTS = {
     "IGNORE_DUP_KEY": "OFF",
     "OPTIMIZE_FOR_SEQUENTIAL_KEY": "OFF",
     "PAD_INDEX": "OFF",
+    "STATISTICS_INCREMENTAL": "OFF",
     "STATISTICS_NORECOMPUTE": "OFF",
     "XML_COMPRESSION": "OFF",
 }
@@ -374,13 +391,17 @@ def _indexes_sql(scope: _Scope) -> str | None:
     constraint_is_system_named, is_hypothetical, auto_created, has_filter, filter_definition,
     fill_factor, is_padded, ignore_dup_key, allow_row_locks, allow_page_locks,
     optimize_for_sequential_key, no_recompute, is_disabled, data_space_type, partition_count,
-    data_compression, xml_compression, compression_delay).
+    data_compression, xml_compression, compression_delay, partition_scheme, is_incremental,
+    compression_kinds).
 
     name is NULL for a heap. constraint_is_system_named is NULL for an index that is not the
-    index of a PRIMARY KEY or UNIQUE constraint. no_recompute (sys.stats) and data_space_type
-    (sys.data_spaces.type: FG, PS, ...) can be NULL. partition_count, data_compression (the
-    highest of the partitions) and xml_compression come from sys.partitions; the last two are NULL
-    when the index has no partition row.
+    index of a PRIMARY KEY or UNIQUE constraint. no_recompute and is_incremental (sys.stats) and
+    data_space_type (sys.data_spaces.type: FG, PS, ...) can be NULL. partition_count,
+    data_compression (the highest of the partitions) and xml_compression come from sys.partitions;
+    the last two are NULL when the index has no partition row. partition_scheme is the name of the
+    partition scheme (sys.partition_schemes) that is the data space of the heap or index, NULL on a
+    filegroup. compression_kinds is the number of different (data_compression, xml_compression)
+    among its partitions: above 1 when the partitions do not all have the same compression.
     """
     if not _has_tabulars(scope):
         return None
@@ -394,27 +415,35 @@ def _indexes_sql(scope: _Scope) -> str | None:
         "i.[is_padded], i.[ignore_dup_key], i.[allow_row_locks], i.[allow_page_locks], "
         "i.[optimize_for_sequential_key], st.[no_recompute], i.[is_disabled], ds.[type], "
         f"(SELECT COUNT(*) {partitions}), (SELECT MAX(pt.[data_compression]) {partitions}), "
-        f"(SELECT MAX(CAST(pt.[xml_compression] AS int)) {partitions}), i.[compression_delay] "
+        f"(SELECT MAX(CAST(pt.[xml_compression] AS int)) {partitions}), i.[compression_delay], "
+        "sch.[name], st.[is_incremental], "
+        f"(SELECT COUNT(*) FROM (SELECT DISTINCT pt.[data_compression], pt.[xml_compression] {partitions}) "
+        "AS kinds) "
         f"FROM {_parents(scope)} JOIN sys.indexes AS i ON i.[object_id] = p.[object_id] "
         "LEFT JOIN sys.key_constraints AS kc "
         "ON kc.[parent_object_id] = i.[object_id] AND kc.[unique_index_id] = i.[index_id] "
         "LEFT JOIN sys.stats AS st ON st.[object_id] = i.[object_id] AND st.[stats_id] = i.[index_id] "
-        "LEFT JOIN sys.data_spaces AS ds ON ds.[data_space_id] = i.[data_space_id];"
+        "LEFT JOIN sys.data_spaces AS ds ON ds.[data_space_id] = i.[data_space_id] "
+        "LEFT JOIN sys.partition_schemes AS sch ON sch.[data_space_id] = i.[data_space_id];"
     )
 
 
 def _index_columns_sql(scope: _Scope) -> str | None:
     """Tag azsqlcd:read_index_columns. One row for each column of an index:
     (object_id, index_id, key_ordinal, index_column_id, is_descending_key, is_included_column,
-    column_name, column_store_order_ordinal). key_ordinal is 0 for a column that is not a key
-    column. column_store_order_ordinal is above 0 for an ORDER column of a columnstore index.
+    column_name, column_store_order_ordinal, partition_ordinal). key_ordinal is 0 for a column
+    that is not a key column. column_store_order_ordinal is above 0 for an ORDER column of a
+    columnstore index. partition_ordinal is 1 for the partitioning column of a heap (index_id 0)
+    or an index on a partition scheme and 0 for every other column. The engine adds the
+    partitioning column to an index that does not hold it: that row has key_ordinal 0 and is no
+    included column, and it is no column of the index in the model.
     """
     if not _has_tabulars(scope):
         return None
     return (
         "/* azsqlcd:read_index_columns */ SELECT ic.[object_id], ic.[index_id], ic.[key_ordinal], "
         "ic.[index_column_id], ic.[is_descending_key], ic.[is_included_column], c.[name], "
-        "ic.[column_store_order_ordinal] "
+        "ic.[column_store_order_ordinal], ic.[partition_ordinal] "
         f"FROM {_parents(scope)} JOIN sys.index_columns AS ic ON ic.[object_id] = p.[object_id] "
         "JOIN sys.columns AS c ON c.[object_id] = ic.[object_id] AND c.[column_id] = ic.[column_id];"
     )
@@ -505,8 +534,8 @@ _QUERIES: dict[str, tuple[Callable[[_Scope], str | None], int]] = {
     "columns": (_columns_sql, 29),
     "defaults": (_defaults_sql, 5),
     "checks": (_checks_sql, 7),
-    "indexes": (_indexes_sql, 26),
-    "index_columns": (_index_columns_sql, 8),
+    "indexes": (_indexes_sql, 29),
+    "index_columns": (_index_columns_sql, 9),
     "foreign_keys": (_foreign_keys_sql, 13),
     "alias_types": (_alias_types_sql, 8),
     "sequences": (_sequences_sql, 14),
@@ -582,13 +611,14 @@ def _type_ref(
 def _options(row: tuple[Any, ...]) -> Options:
     """The options of an index row, as declared: only what is not the default of the engine."""
     fill_factor, padded, ignore_dup, row_locks, page_locks, sequential, no_recompute = row[13:20]
-    compression, xml_compression = row[23], row[24]
+    compression, xml_compression, incremental = row[23], row[24], row[27]
     if compression not in (None, *_COMPRESSION):
         raise _Reject("a rowstore index with a compression that is not NONE, ROW or PAGE")
     found = {
         "FILLFACTOR": str(int(fill_factor)) if int(fill_factor) not in (0, 100) else None,
         "PAD_INDEX": "ON" if flag(padded) else None,
         "IGNORE_DUP_KEY": "ON" if flag(ignore_dup) else None,
+        "STATISTICS_INCREMENTAL": "ON" if _on(incremental) else None,
         "STATISTICS_NORECOMPUTE": "ON" if _on(no_recompute) else None,
         "ALLOW_ROW_LOCKS": None if flag(row_locks) else "OFF",
         "ALLOW_PAGE_LOCKS": None if flag(page_locks) else "OFF",
@@ -782,26 +812,59 @@ def _columns(parts: _Parts, column_rows: Rows, default_rows: Rows) -> tuple[Colu
     return tuple(columns)
 
 
+def _partition(row: tuple[Any, ...], members: Rows) -> Partition | None:
+    """The partition scheme and the partitioning column of a heap or index row; None on a filegroup.
+
+    Also refuses per-partition compression. The model never reads a partitioned object as one that
+    is not: when one catalog fact says "partitioned" and the scheme or the column is not there (a
+    principal that cannot see the scheme), the table stays outside the model.
+    """
+    name, data_space, partition_count, scheme, kinds = row[2], row[21], row[22], row[26], row[28]
+    what = "the heap" if name is None else f"index {names.quote(name)}"
+    if int(kinds or 0) > 1:
+        raise _Reject(
+            f"{what}: its partitions do not all have the same compression; "
+            "per-partition compression is outside the model"
+        )
+    columns = [r[6] for r in members if int(r[8] or 0) > 0]
+    # sys.data_spaces.type is char(2); a driver can give a char value with padding
+    on_scheme = data_space is not None and str(data_space).strip() == "PS"
+    if not (on_scheme or scheme is not None or columns or int(partition_count) > 1):
+        return None
+    if not on_scheme or scheme is None or len(columns) != 1:
+        raise _Reject(
+            f"{what}: it is partitioned, and the catalog does not give its partition scheme or its "
+            "partitioning column"
+        )
+    return Partition(scheme, columns[0])
+
+
 def _keys_and_indexes(
     parts: _Parts, index_rows: Rows, index_column_rows: Rows
-) -> tuple[list[Constraint], list[Index], str | None]:
-    """(keys, indexes, DATA_COMPRESSION of the heap: ROW, PAGE or None)."""
+) -> tuple[list[Constraint], list[Index], str | None, Partition | None]:
+    """(keys, indexes, DATA_COMPRESSION of the heap: ROW, PAGE or None, the place of the table)."""
     heap: str | None = None
     columns_of: dict[Any, Rows] = defaultdict(list)
     for row in index_column_rows:
         columns_of[row[1]].append(row)
+    # never part of the table: a tuning tool made it, not a release
+    real = [row for row in index_rows if int(row[3]) == 0 or not (flag(row[9]) or flag(row[10]))]
+    schemes = {row[1]: _partition(row, columns_of[row[1]]) for row in real}
+    # the heap (index_id 0) or the clustered index (index_id 1) is the table
+    table_on = next((schemes[index_id] for index_id in (0, 1) if index_id in schemes), None)
     constraints: list[Constraint] = []
     indexes: list[Index] = []
-    for row in sorted(index_rows, key=lambda r: r[1]):
+    for row in sorted(real, key=lambda r: r[1]):
         index_id, name, type_code, type_desc, unique, primary, unique_constraint, system = row[1:9]
-        hypothetical, auto_created, has_filter, filter_text = row[9:13]
-        disabled, data_space, partition_count, compression, xml_compression = row[20:25]
+        has_filter, filter_text = row[11:13]
+        disabled, compression, xml_compression = row[20], row[23], row[24]
         kind = int(type_code)
-        if kind != 0 and (flag(hypothetical) or flag(auto_created)):
-            continue  # never part of the table: a tuning tool made it, not a release
-        # sys.data_spaces.type is char(2); a driver can give a char value with padding
-        if (data_space is not None and str(data_space).strip() == "PS") or int(partition_count) > 1:
-            raise _Reject("it is partitioned")
+        # the canonical state of a key or an index on a filegroup: ON [PRIMARY] is a state of its
+        # own only on a partitioned table
+        on: Place | None = schemes[index_id] or (ON_PRIMARY if table_on is not None else None)
+        place: dict[str, Any] = (
+            {"partition": {"scheme": on.scheme, "column": on.column}} if isinstance(on, Partition) else {}
+        )
         if kind == 0:
             if xml_compression:
                 raise _Reject("a heap with XML compression")
@@ -815,8 +878,10 @@ def _keys_and_indexes(
                 raise _Reject("a key constraint on a columnstore index")
             ordered = sorted((r for r in members if r[7]), key=lambda r: r[7])
             order = tuple(KeyColumn(r[6]) for r in ordered)
-            # a clustered columnstore index holds every column of the table: it has no list
-            listed = () if kind == 5 else tuple(r[6] for r in sorted(members, key=lambda r: r[3]))
+            # A clustered columnstore index holds every column of the table: it has no list. The
+            # partitioning column that the engine added to a nonclustered one is not in its list.
+            stated = [r for r in members if flag(r[5]) or not int(r[8] or 0)]
+            listed = () if kind == 5 else tuple(r[6] for r in sorted(stated, key=lambda r: r[3]))
             options = _columnstore_options(row)
             filtered = flag(has_filter)
             parts.put(
@@ -830,11 +895,12 @@ def _keys_and_indexes(
                     "is_disabled": flag(disabled),
                     "included": sorted(listed, key=fold),
                     "filter": filter_text if filtered else None,
+                    **place,
                 },
             )
             what = f"index {names.quote(name)} of {parts.key}"
             where = _expression(filter_text, what) if filtered else None
-            indexes.append(Index(name, False, kind == 5, order, listed, where, options, True))
+            indexes.append(Index(name, False, kind == 5, order, listed, where, options, True, on=on))
             continue
         if kind not in _ROWSTORE:
             raise _Reject(f"an index of the type {type_desc}")
@@ -847,6 +913,7 @@ def _keys_and_indexes(
             "columns": [[c.name, c.descending] for c in key_columns],
             "options": dict(options),
             "is_disabled": flag(disabled),
+            **place,  # written only on a partition scheme: every other capture stays as it was
         }
         if flag(primary) or flag(unique_constraint):
             what = "PRIMARY KEY" if flag(primary) else "UNIQUE"
@@ -856,7 +923,7 @@ def _keys_and_indexes(
             final = parts.name(what, name, parts.is_type or flag(system), fixed)
             parts.put(f"constraint {names.quote(final)}", {"kind": what, **shape})
             cls = PrimaryKey if flag(primary) else Unique
-            constraints.append(cls(parts.model_name(final), kind == 1, key_columns, options))
+            constraints.append(cls(parts.model_name(final), kind == 1, key_columns, options, on))
             continue
         filtered = flag(has_filter)
         parts.put(
@@ -869,8 +936,8 @@ def _keys_and_indexes(
             },
         )
         where = _expression(filter_text, f"index {names.quote(name)} of {parts.key}") if filtered else None
-        indexes.append(Index(name, flag(unique), kind == 1, key_columns, included, where, options))
-    return constraints, indexes, heap
+        indexes.append(Index(name, flag(unique), kind == 1, key_columns, included, where, options, on=on))
+    return constraints, indexes, heap, table_on
 
 
 def _checks(parts: _Parts, check_rows: Rows) -> list[Constraint]:
@@ -996,11 +1063,16 @@ def _tabular(head: tuple[Any, ...], child: dict[str, Rows]) -> _Built:
         versioned,
     )
     columns = _columns(parts, child["columns"], child["defaults"])
-    constraints, indexes, heap = _keys_and_indexes(parts, child["indexes"], child["index_columns"])
+    constraints, indexes, heap, table_on = _keys_and_indexes(parts, child["indexes"], child["index_columns"])
+    if is_type and table_on is not None:
+        raise _Reject("a table type on a partition scheme")
     if not is_type:
-        # a property of its own, always there: a capture that an older tool stored does not hold
-        # it, and what a stored capture does not hold takes no part in a comparison
+        # properties of their own, always there: a capture that an older tool stored does not hold
+        # them, and what a stored capture does not hold takes no part in a comparison
         parts.capture["heap_compression"] = heap
+        parts.capture["partition"] = (
+            None if table_on is None else {"scheme": table_on.scheme, "column": table_on.column}
+        )
     constraints += _checks(parts, child["checks"])
     constraints += _foreign_keys(parts, child["foreign_keys"])
     if is_type:
@@ -1016,7 +1088,7 @@ def _tabular(head: tuple[Any, ...], child: dict[str, Rows]) -> _Built:
             "history_table": history_table,
             "retention": None if retention is None else list(retention),
         }
-    table = Table(schema, name, columns, tuple(constraints), tuple(indexes), temporal, heap)
+    table = Table(schema, name, columns, tuple(constraints), tuple(indexes), temporal, heap, table_on)
     return table, parts.capture, parts.system_named
 
 
@@ -1049,6 +1121,19 @@ def _alias_type(row: tuple[Any, ...]) -> _Built:
 # capture and the model keep the value, so read-back and the baseline report still compare START
 # WITH with the file; only drift (tables.Hooks.table_drift) leaves it out.
 NOT_IN_DRIFT: dict[str, frozenset[str]] = {"SEQUENCE": frozenset({"start_value"})}
+
+
+def with_stored_defaults(capture: dict[str, Any]) -> dict[str, Any]:
+    """A stored capture of a table, with the value that an older tool left out but could know.
+
+    No earlier tool held a partitioned table (its reader refused each one), so a table capture
+    without 'partition' was taken of a table that was not partitioned. Without this, a heap moved
+    onto a scheme behind the tool is no drift: its keys and indexes stay on [PRIMARY] and their
+    captures do not change.
+    """
+    if capture.get("kind") == "TABLE" and "partition" not in capture:
+        return {**capture, "partition": None}
+    return capture
 
 
 def _sequence(row: tuple[Any, ...]) -> _Built:
@@ -1323,7 +1408,12 @@ def project_options(live_object: ModelObject, declared_object: ModelObject) -> M
             return item
         columnstore = isinstance(item, Index) and item.columnstore
         defaults = COLUMNSTORE_OPTION_DEFAULTS if columnstore else OPTION_DEFAULTS
-        return replace(item, options=_declared(item.options, other.options, defaults))
+        stated = other.options
+        if not isinstance(item.on, Partition):
+            # the option goes with an index on a partition scheme only: a live index on a
+            # filegroup cannot get it, in any spelling. The place is the difference
+            stated = tuple(option for option in stated if option[0] != "STATISTICS_INCREMENTAL")
+        return replace(item, options=_declared(item.options, stated, defaults))
 
     constraints: list[Constraint] = []
     for constraint in live_object.constraints:
@@ -1436,6 +1526,21 @@ def blockers(session: Session, table_key: str, column: str | None) -> list[str]:
         else:
             raise RuntimeError(f"the blocker query gave the kind {what!r}")
     return sorted(found)
+
+
+def partition_schemes(session: Session) -> list[str]:
+    """The names of the partition schemes of the database, as the catalog spells them. Read-only.
+
+    Tag azsqlcd:partition_schemes. Rows: (name).
+
+    A partition scheme is no object of the model: a DBA owns it. The tool only asks whether the
+    scheme that a pending statement names is there (tables.Hooks.missing_partition_schemes). Every
+    name is read and no name travels into the batch; compare with model.fold.
+    """
+    found = rows(
+        session, "/* azsqlcd:partition_schemes */ SELECT sch.[name] FROM sys.partition_schemes AS sch;"
+    )
+    return sorted((str(name) for (name,) in found), key=fold)
 
 
 def recorded_sub_objects(table_key: str, capture: dict[str, Any]) -> set[str]:

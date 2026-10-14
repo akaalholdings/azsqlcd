@@ -224,6 +224,34 @@ def test_an_allow_line_with_a_code_outside_the_closed_list_allows_nothing():
     assert "not an allow code" in found[0].message
 
 
+def test_allow_long_lock_on_a_drop_of_an_index_or_a_constraint_is_left_to_the_proof():
+    """The drop of the clustered index or key writes every row again; the lexer cannot see that an
+    index is clustered, so the proof asks for LONG_LOCK (gen). Lint must not call that line unused,
+    in a tx migration on a table that the migration did not create."""
+    allow = "-- azsqlcd:allow LONG_LOCK [sales].[Line] reason: 2000 rows\n"
+
+    def errors(*bodies: str, mode: str = "tx") -> list[str]:
+        return shown([f for f in lint_repo(repo(*bodies, mode=mode)) if f.severity == "error"])
+
+    for drop in (
+        "DROP INDEX [CIX_Line] ON [sales].[Line];",
+        "ALTER TABLE [sales].[Line] DROP CONSTRAINT [PK_Line];",
+    ):
+        assert errors(allow + drop) == []
+        assert errors(allow.replace("[Line]", "[Other]") + drop) == [f"ALLOW_UNUSED {MIGRATION}:3"]
+        # no allow line is no finding of lint: only the model knows whether the item is clustered
+        assert errors(drop) == []
+        # as for any other LONG_LOCK: none in a nontx migration, none on a table of the same migration
+        assert errors(allow + drop, mode="nontx") == [f"ALLOW_UNUSED {MIGRATION}:3"]
+        create = "CREATE TABLE [sales].[Line] ([Id] int NOT NULL);\nGO\n"
+        assert errors(create + allow + drop) == [f"ALLOW_UNUSED {MIGRATION}:5"]
+    # a drop of a column is no drop of a key
+    assert errors(allow + "ALTER TABLE [sales].[Line] DROP COLUMN [Note];") == [
+        f"ALLOW_UNUSED {MIGRATION}:3",
+        f"DROP_COLUMN {MIGRATION}:4",
+    ]
+
+
 def test_an_allow_code_that_the_lexer_cannot_match_is_left_to_the_rule_that_can():
     """SET_NOT_NULL and REPLACEMENT_EDGE belong to the model proof, OLD_MODULE to the base revision.
     Lint of one revision cannot call them unused. It still wants a reason."""

@@ -1,0 +1,75 @@
+{
+  "class": "CreateTable",
+  "table": {
+    "class": "Table",
+    "schema": "sales",
+    "name": "OrderLine",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "OrderLineId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "OrderDate",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Quantity",
+        "type": {"class": "TypeRef", "name": "int", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_OrderLine",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "OrderDate", "descending": false},
+          {"class": "KeyColumn", "name": "OrderLineId", "descending": false}
+        ],
+        "options": [],
+        "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+      },
+      {
+        "class": "Unique",
+        "name": "UQ_OrderLine",
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "OrderLineId", "descending": false}
+        ],
+        "options": [],
+        "on": "PRIMARY"
+      }
+    ],
+    "indexes": [],
+    "temporal": null,
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  }
+}

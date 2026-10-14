@@ -1,0 +1,3 @@
+# a table, a key and an index on a partition scheme are statements of the closed list; a build
+# on a table that the migration did not create needs LONG_LOCK as any other build
+# near-miss: MODEL_STATEMENT, LCK001

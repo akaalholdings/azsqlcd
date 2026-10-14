@@ -18,6 +18,14 @@ Recursive descent over lex tokens. Rules that hold everywhere:
     of a column, the one place where the engine reads it. In a migration: ALTER COLUMN [c] ADD
     MASKED WITH (FUNCTION = '...') and ALTER COLUMN [c] DROP MASKED. The function is kept as text.
     NF004 asks for the spelling in which the engine stores it ('default()', not 'DEFAULT( )').
+  * Partition schemes: ON [scheme]([column]) with one partitioning column, after CREATE TABLE
+    (...), after a PRIMARY KEY or UNIQUE constraint and after an index, rowstore or columnstore.
+    ON [PRIMARY] is read in the same places. A statement of a migration keeps the clause that it
+    states (model.Partition, model.ON_PRIMARY, or None for no clause); the replay knows the table.
+    CREATE TABLE and a table file give each key and index the place that the engine gives it
+    (model.place_on). ALTER TABLE ... REBUILD PARTITION = ALL is read; one partition is not.
+    Partition functions and schemes are not objects of the model: CREATE and ALTER of one are
+    refused.
 
 Public API: ParseError, parse_object_file, parse_statement, TYPE_SYNONYMS, EXECUTION_OPTIONS.
 """
@@ -35,6 +43,7 @@ from azsqlcd.model import (
     COLUMNSTORE_OPTION_VALUES,
     FK_ACTIONS,
     INDEX_OPTION_VALUES,
+    ON_PRIMARY,
     RESERVED_WORDS,
     AddColumn,
     AddConstraint,
@@ -70,6 +79,8 @@ from azsqlcd.model import (
     ModelObject,
     Operation,
     Options,
+    Partition,
+    Place,
     PrimaryKey,
     RebuildTable,
     Rename,
@@ -87,6 +98,7 @@ from azsqlcd.model import (
     fold,
     is_reserved,
     mask_spelling,
+    place_on,
 )
 
 
@@ -129,7 +141,6 @@ EXECUTION_OPTIONS = frozenset({"ONLINE", "RESUMABLE", "MAX_DURATION", "MAXDOP", 
 
 _REFUSED_INDEX_OPTIONS = {
     "DROP_EXISTING": "DROP_EXISTING (drop the index, then create it)",
-    "STATISTICS_INCREMENTAL": "partitioned tables (STATISTICS_INCREMENTAL)",
 }
 _REFUSED_TABLE_OPTIONS = {
     "LEDGER": "ledger tables",
@@ -628,21 +639,34 @@ class _Parser:
                 return tuple(sorted(found.items())), tuple(sorted(executed.items()))
             self.fail("',' or ')'")
 
-    def filegroup(self) -> None:
+    def place(self) -> Place:
+        """[PRIMARY] or "default", the one filegroup of Azure SQL Database, or [scheme]([column])."""
         tok = self.peek()
-        name = "PRIMARY" if self.accept("PRIMARY") else self.ident("a filegroup")
-        if self.is_op("("):
-            self.unsupported("partition schemes (ON scheme(column))", tok)
-        if fold(name) not in ("primary", "default"):
-            feature = f"filegroup {names.quote(name)} (Azure SQL Database has [PRIMARY] only)"
-            self.unsupported(feature, tok)
+        name = "PRIMARY" if self.accept("PRIMARY") else self.ident("a filegroup or a partition scheme")
+        primary = fold(name) in ("primary", "default")
+        if not self.is_op("("):
+            if not primary:
+                feature = (
+                    f"filegroup {names.quote(name)} (Azure SQL Database has [PRIMARY] only; a partition "
+                    "scheme is written ON [scheme]([column]))"
+                )
+                self.unsupported(feature, tok)
+            return ON_PRIMARY
+        if primary:
+            message = f"{names.quote(name)} is a filegroup: it takes no partitioning column"
+            raise self.error("SYNTAX", message, tok)
+        self.i += 1
+        column = self.ident("the partitioning column")
+        if self.is_op(","):
+            raise self.error("SYNTAX", "a partition scheme takes one partitioning column", self.peek())
+        self.op(")")
+        return Partition(name, column)
 
-    def storage(self) -> None:
-        """ON [PRIMARY] is read and not modelled: Azure SQL Database has no other filegroup."""
+    def storage(self) -> Place | None:
+        """[ON [PRIMARY] | ON [scheme]([column])] -> the place as written; None for no clause."""
         if self.kw() == "FILESTREAM_ON":
             self.unsupported("FILESTREAM", self.peek())
-        if self.accept("ON"):
-            self.filegroup()
+        return self.place() if self.accept("ON") else None
 
     # -------------------------------------------------------------- constraints and indexes
     def constraint_name(self, in_type: bool) -> str:
@@ -687,9 +711,16 @@ class _Parser:
         else:
             self.fail("'(' and the key columns")
         options, exec_options = self.with_options(True, execution)
-        self.storage()
+        on = self.storage()
+        if in_type:
+            if isinstance(on, Partition):
+                raise self.error("SYNTAX", "a table type cannot be on a partition scheme", tok)
+            on = None  # ON [PRIMARY] says nothing there
         cls = PrimaryKey if word == "PRIMARY" else Unique
-        return cls(name, clustered, columns, options), exec_options
+        try:
+            return cls(name, clustered, columns, options, on), exec_options
+        except ValueError as e:
+            raise self.error("SYNTAX", str(e), tok) from e
 
     def foreign_key(self, name: str, column: str | None) -> ForeignKey:
         tok = self.peek()
@@ -727,6 +758,7 @@ class _Parser:
         self, name: str, unique: bool, clustered: bool, column: str | None, execution: frozenset[str]
     ) -> tuple[Index, Options]:
         """( key columns ) [INCLUDE] [WHERE] [WITH] [ON]. column is set for a column-level index."""
+        at = self.peek()
         if self.is_op("("):
             columns = self.paren_list(self.key_column)
         elif column is not None:
@@ -738,8 +770,11 @@ class _Parser:
             included = self.paren_list(lambda: self.ident("an included column"))
         where = self.filter() if self.accept("WHERE") else None
         options, exec_options = self.with_options(True, execution)
-        self.storage()
-        return Index(name, unique, clustered, columns, included, where, options), exec_options
+        on = self.storage()
+        try:
+            return Index(name, unique, clustered, columns, included, where, options, on=on), exec_options
+        except ValueError as e:
+            raise self.error("SYNTAX", str(e), at) from e
 
     def columnstore_tail(
         self, name: str, clustered: bool, at: Tok | None, execution: frozenset[str]
@@ -771,9 +806,9 @@ class _Parser:
             values=COLUMNSTORE_OPTION_VALUES,
             statement="a columnstore index",
         )
-        self.storage()
+        on = self.storage()
         try:
-            return Index(name, False, clustered, order, included, where, options, True), exec_options
+            return Index(name, False, clustered, order, included, where, options, True, on), exec_options
         except ValueError as e:
             raise self.error("SYNTAX", str(e), at) from e
 
@@ -1054,6 +1089,7 @@ class _Parser:
         columns, constraints, indexes, period = self.body(in_type=False)
         versioning: _Versioning | None = None
         compression: str | None = None
+        written: Place | None = None
         seen: set[str] = set()
         while True:
             here = self.peek()
@@ -1070,13 +1106,28 @@ class _Parser:
             seen.add(word)
             if word == "TEXTIMAGE_ON":
                 self.i += 1
-                self.filegroup()
+                if self.place() != ON_PRIMARY:
+                    raise self.error("SYNTAX", "TEXTIMAGE_ON takes a filegroup, not a partition scheme", here)
             else:
-                self.storage()
+                written = self.storage()
         temporal = self.temporal(columns, period, versioning)
+        # The ON clause of CREATE TABLE is the place of the table. A key or an index of the body
+        # that states none is where the engine puts it: with the table. A clustered one that
+        # states another place than the table is refused by the Table.
+        on = written if isinstance(written, Partition) else None
         try:
             table = Table(
-                schema, name, tuple(columns), tuple(constraints), tuple(indexes), temporal, compression
+                schema,
+                name,
+                tuple(columns),
+                tuple(
+                    replace(c, on=place_on(on, c.on)) if isinstance(c, PrimaryKey | Unique) else c
+                    for c in constraints
+                ),
+                tuple(replace(i, on=place_on(on, i.on)) for i in indexes),
+                temporal,
+                compression,
+                on,
             )
         except ValueError as e:
             raise self.error("SYNTAX", str(e), tok) from e
@@ -1283,6 +1334,8 @@ class _Parser:
         if not self.accept("AS", "TABLE"):
             self.fail("FROM <data type> or AS TABLE")
         columns, constraints, indexes, _ = self.body(in_type=True)
+        # ON [PRIMARY] behind an index of a table type says nothing, as behind its keys
+        indexes = [replace(i, on=None) if i.on == ON_PRIMARY else i for i in indexes]
         try:
             table_type = TableType(schema, name, tuple(columns), tuple(constraints), tuple(indexes))
         except ValueError as e:
@@ -1436,12 +1489,23 @@ class _Parser:
         return AddColumn(schema, table, column, with_values)
 
     def rebuild(self, schema: str, table: str) -> RebuildTable:
-        """REBUILD WITH ( DATA_COMPRESSION = ... [, execution options] ). A rebuild that states no
-        compression is index maintenance: it changes nothing that the model holds."""
+        """REBUILD [PARTITION = ALL] WITH ( DATA_COMPRESSION = ... [, execution options] ). A rebuild
+        that states no compression is index maintenance: it changes nothing that the model holds.
+        One compression holds for the whole table, so the rebuild of one partition is not read."""
         tok = self.peek()
         self.expect("REBUILD")
+        all_partitions = False
         if self.kw() == "PARTITION":
-            self.unsupported("partitioned tables (REBUILD PARTITION)", self.peek())
+            at = self.peek()
+            self.i += 1
+            self.op("=")
+            if not self.accept("ALL"):
+                feature = (
+                    "partitioned tables (REBUILD PARTITION = <number>: the model holds one compression for "
+                    "the whole table; write REBUILD PARTITION = ALL)"
+                )
+                self.unsupported(feature, at)
+            all_partitions = True
         execution = _REBUILD_EXECUTION if self.migration else frozenset()
         options, exec_options = self.with_options(
             True, execution, values=_TABLE_OPTION_VALUES, refused=_REFUSED_TABLE_OPTIONS, statement="REBUILD"
@@ -1452,7 +1516,7 @@ class _Parser:
                 "compression is maintenance and not a model statement"
             )
             raise self.error("SYNTAX", message, tok)
-        return RebuildTable(schema, table, dict(options)["DATA_COMPRESSION"], exec_options)
+        return RebuildTable(schema, table, dict(options)["DATA_COMPRESSION"], exec_options, all_partitions)
 
     def alter_column(
         self, schema: str, table: str
@@ -1595,7 +1659,8 @@ def parse_statement(text: str) -> Operation:
     """One migration model batch -> its operation.
 
     The closed grammar: CREATE / DROP TABLE; ALTER TABLE with one of ADD column, ALTER COLUMN,
-    DROP COLUMN, ADD CONSTRAINT, DROP CONSTRAINT, SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE =
+    DROP COLUMN, ADD CONSTRAINT, DROP CONSTRAINT, REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION =
+    ...), SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE =
     [schema].[table] [, DATA_CONSISTENCY_CHECK = ON | OFF] [, HISTORY_RETENTION_PERIOD = ...]));
     CREATE / DROP INDEX; CREATE / ALTER / DROP
     SEQUENCE; CREATE / DROP SCHEMA, TYPE, SYNONYM; EXEC sys.sp_rename with three N'' literals.
@@ -1612,8 +1677,9 @@ def parse_object_file(text: str, path: str) -> list[ModelObject]:
 
     path is relative to the repository root with forward slashes ('schema/tables/sales.Order.sql')
     and must equal names.path_for() of the object. A table file is CREATE TABLE, then GO, then
-    the CREATE INDEX statements of that table; they come back in Table.indexes. Every other file
-    is one statement. Raises ParseError; raises ValueError when path is not a table-class path.
+    the CREATE INDEX statements of that table; they come back in Table.indexes, each at the place
+    that the engine gives it on that table (model.place_on). Every other file is one statement.
+    Raises ParseError; raises ValueError when path is not a table-class path.
     """
     kind, _ = names.key_for_path(path)
     if kind not in names.TABLE_CLASS_KINDS:
@@ -1650,7 +1716,8 @@ def parse_object_file(text: str, path: str) -> list[ModelObject]:
                 message = f"index {names.quote(operation.index.name)} is on {on}; this file holds {obj.key}"
                 raise parser.error("SYNTAX", message, first)
             try:
-                obj = replace(obj, indexes=(*obj.indexes, operation.index))
+                index = replace(operation.index, on=place_on(obj.on, operation.index.on))
+                obj = replace(obj, indexes=(*obj.indexes, index))
             except ValueError as e:
                 raise parser.error("SYNTAX", str(e), first) from e
         else:

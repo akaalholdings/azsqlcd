@@ -40,8 +40,11 @@ from unit.test_runner import (
     M1,
     OLD,
     RUN_ID,
+    TABLE,
+    TABLE_ROW,
     TOML,
     Db,
+    Hooks,
     a_release,
     bundle,
     key,
@@ -1373,6 +1376,36 @@ def test_a_refusal_prints_each_object_with_property_and_hashes_and_never_the_tex
     stored, live = told["differences"][0]["stored_sha256"], told["differences"][0]["live_sha256"]
     assert re.fullmatch(r"[0-9a-f]{64}", stored) and re.fullmatch(r"[0-9a-f]{64}", live) and stored != live
     assert "hot-fix" not in "\n".join(err) + ci.text()
+
+
+@pytest.mark.parametrize("command", ["plan", "deploy"])
+def test_a_partition_scheme_that_the_database_does_not_hold_is_named_in_the_log_and_in_the_summary(
+    command, tmp_path, ci, capsys, monkeypatch
+):
+    """The operator of a refused plan reads stderr or the summary of the job. Both name the code,
+    each scheme and who creates it; nothing was parsed or sent."""
+    b = bundle(mig(M1, ADD_C))
+    db = Db(b, recorded(objects={TABLE: TABLE_ROW}), user_objects=[("sales", "Order", "U")])
+    monkeypatch.setattr(cli, "_hooks", lambda *_: Hooks(missing_schemes=["PS_OrderYear", "PS_ShipYear"]))
+    second = parse_only_session()
+    out = ["--inline-plan"] if command == "deploy" else []
+    argv = [command, *on_disk(tmp_path, b), *target(), *out, "--out", str(tmp_path / "out"), "--ci", "github"]
+
+    code, _ = call(argv, db, second)
+
+    err = capsys.readouterr().err.splitlines()
+    assert code == 22 and ci.outputs()["reason_code"] == "PARTITION_SCHEME_MISSING"
+    assert err[0].startswith(
+        "PARTITION_SCHEME_MISSING: the release creates a table, a key or an index on partition scheme "
+        "[PS_OrderYear], and the database has no partition scheme with this name (2 partition scheme(s)"
+    )
+    assert err[1:3] == ["  [PS_OrderYear]", "  [PS_ShipYear]"]  # every scheme, one on each line
+    assert err[-1] == f"azsqlcd {command}: exit 22"
+    summary = ci.summary.read_text(encoding="utf-8")
+    assert f"### azsqlcd {command}: exit 22 PARTITION_SCHEME_MISSING" in summary
+    assert "on partition scheme \\[PS_OrderYear\\]" in summary
+    assert "not managed: a DBA creates them in this database, or a raw batch does" in summary
+    assert second.batches == [] and db.sent(ADD_C) == [] and db.sent("BEGIN TRANSACTION") == []
 
 
 def test_a_syntax_error_of_the_engine_is_told_for_each_batch_with_file_and_line(tmp_path, ci, capsys):

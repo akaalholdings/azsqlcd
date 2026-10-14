@@ -1,0 +1,20 @@
+{
+  "class": "CreateIndex",
+  "schema": "dw",
+  "table": "FactOrderLine",
+  "index": {
+    "class": "Index",
+    "name": "CCI_FactOrderLine",
+    "unique": false,
+    "clustered": true,
+    "columns": [
+      {"class": "KeyColumn", "name": "ProductKey", "descending": false}
+    ],
+    "included": [],
+    "filter": null,
+    "options": [],
+    "columnstore": true,
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  },
+  "exec_options": [["MAXDOP", "2"]]
+}

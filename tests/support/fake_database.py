@@ -24,6 +24,9 @@ State (plain attributes; a test may read and set them)
                setup script ran. state_tables holds their declarations, read from that script
     name, server, collation, engine_edition, updateability, case_sensitive, service_objective
     indexed_views    object keys of views that have an index (no DDL of the fake makes one)
+    partition_schemes    names of the partition schemes that exist: plain names, compared without
+               letter case. No DDL of the fake makes one: a test adds what a DBA created. The place
+               of a table and of each key and index is in `model` (Table.on, .on of a key or index)
 
 Sessions
     db.session() opens a session on the shared state; pass db.session as session_factory. Each
@@ -55,6 +58,9 @@ Questions
     recorded()         state.read_state on a session of its own
 
 What the fake engine checks, beyond replay.apply
+    a table, a key or an index on a partition scheme needs the scheme in partition_schemes (error
+    1921, "Invalid partition scheme '<name>' specified."; the number is from memory of the engine
+    text and was not measured on Azure SQL Database);
     a module needs its schema; a name is taken once in a schema; ALTER and DROP need the module;
     a view and an inline function need the objects they name with two parts (error 208), other
     modules resolve late; a schema-bound module blocks DROP TABLE, DROP / ALTER COLUMN and
@@ -82,6 +88,7 @@ from azsqlcd import lex, names, parse, replay, state
 from azsqlcd.catalog import APPLOCK_RESOURCE, INDEXED_VIEW, MODULE_TYPES
 from azsqlcd.lex import LexError, Tok
 from azsqlcd.model import (
+    AddConstraint,
     AlterColumn,
     Check,
     CreateIndex,
@@ -91,6 +98,7 @@ from azsqlcd.model import (
     DropTable,
     ForeignKey,
     Model,
+    Partition,
     PrimaryKey,
     Rename,
     Schema,
@@ -275,6 +283,7 @@ class FakeDatabase:
         self.tables: dict[str, list[dict[str, Any]]] | None = None
         self.state_tables: dict[str, Table] = {}  # schema azsqlcd, as the setup script declares it
         self.indexed_views: set[str] = set()
+        self.partition_schemes: set[str] = set()
         self.batches: list[str] = []
         self.ddl: list[str] = []
         self.unknown: list[str] = []
@@ -616,6 +625,7 @@ class FakeDatabase:
                 f"the fake cannot read a DDL batch ({error.code}, line {error.line}): {head(batch)}"
             ) from None
         self._refuse_bound(op)
+        self._refuse_missing_scheme(op)
         if isinstance(op, DropSchema) and any(fold(m.schema) == fold(op.name) for m in self.modules.values()):
             raise _engine(
                 f"Cannot drop schema '{op.name}' because it is being referenced by an object.", 3729
@@ -639,6 +649,20 @@ class FakeDatabase:
             ]
             for name in triggers:
                 del self.modules[name]
+
+    def _refuse_missing_scheme(self, op: object) -> None:
+        """A statement that puts a table, a key or an index on a partition scheme needs the scheme."""
+        places: list[object] = []
+        if isinstance(op, CreateTable):
+            places = [op.table.on, *(item.on for _, item in op.table.placed_items())]
+        elif isinstance(op, CreateIndex):
+            places = [op.index.on]
+        elif isinstance(op, AddConstraint) and isinstance(op.constraint, PrimaryKey | Unique):
+            places = [op.constraint.on]
+        existing = {fold(name) for name in self.partition_schemes}
+        for on in places:
+            if isinstance(on, Partition) and fold(on.scheme) not in existing:
+                raise _engine(f"Invalid partition scheme '{on.scheme}' specified.", 1921)
 
     def _refuse_bound(self, op: object) -> None:
         """A schema-bound module blocks what would change the object under it."""
@@ -771,6 +795,9 @@ class FakeDatabase:
 
     def _q_numbered_procedures(self, toks: list[Tok]) -> Rows:
         return []
+
+    def _q_partition_schemes(self, toks: list[Tok]) -> Rows:
+        return [(name,) for name in sorted(self.partition_schemes)]
 
     def _q_history_tables(self, toks: list[Tok]) -> Rows:
         """(history schema, history table, schema, table) of each system-versioned table of the model.

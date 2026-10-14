@@ -18,7 +18,18 @@ from typing import Any
 
 import pytest
 
-from azsqlcd.model import Check, Index, Model, PrimaryKey, Table, TableType, Temporal
+from azsqlcd.model import (
+    ON_PRIMARY,
+    Check,
+    Index,
+    Model,
+    Partition,
+    PrimaryKey,
+    Table,
+    TableType,
+    Temporal,
+    Unique,
+)
 from azsqlcd.parse import ParseError, parse_object_file, parse_statement
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "ddl"
@@ -41,9 +52,12 @@ def parse_fixture(text: str) -> Any:
 
 
 # Fields of the wider table coverage (NOT FOR REPLICATION, ROWGUIDCOL, SPARSE, heap compression,
-# columnstore). A golden holds one only when it is not the default, as the canonical form does: the
-# golden of an object that does not use the feature stays what it was.
-LATER_FIELDS = frozenset({"not_for_replication", "rowguidcol", "sparse", "compression", "columnstore"})
+# columnstore) and of partitioning (the place, REBUILD PARTITION = ALL). A golden holds one only
+# when it is not the default, as the canonical form does: the golden of an object that does not use
+# the feature stays what it was.
+LATER_FIELDS = frozenset(
+    {"not_for_replication", "rowguidcol", "sparse", "compression", "columnstore", "on", "all_partitions"}
+)
 
 
 def as_written(value: Any) -> Any:
@@ -420,6 +434,153 @@ def test_the_primary_filegroup_is_read_and_is_not_part_of_the_model():
         ' ON "default" TEXTIMAGE_ON [PRIMARY]'
     )
     assert plain == stored
+
+
+# ------------------------------------------------------------------ partition schemes
+PS = Partition("PS_OrderYear", "OrderDate")
+LINE = "CREATE TABLE [sales].[OrderLine] ([OrderLineId] bigint NOT NULL, [OrderDate] date NOT NULL{})"
+LINE_PATH = "schema/tables/sales.OrderLine.sql"
+
+
+def test_a_table_and_each_key_and_index_hold_the_partition_scheme_and_the_column_that_they_state():
+    found = table(
+        LINE.format(
+            ", CONSTRAINT [PK] PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId])"
+            " ON [PS_OrderYear]([OrderDate])"
+            ", CONSTRAINT [UQ] UNIQUE NONCLUSTERED ([OrderLineId]) ON [PRIMARY]"
+        )
+        + " ON [PS_OrderYear]([OrderDate])\nGO\n"
+        "CREATE NONCLUSTERED INDEX [IX_Aligned] ON [sales].[OrderLine] ([OrderLineId])"
+        " ON PS_OrderYear (OrderDate)\nGO\n"
+        "CREATE NONCLUSTERED INDEX [IX_Other] ON [sales].[OrderLine] ([OrderLineId])"
+        ' ON "PS_Line"([OrderLineId])'
+        "\nGO\nCREATE NONCLUSTERED INDEX [IX_Plain] ON [sales].[OrderLine] ([OrderDate]) ON [PRIMARY]",
+        LINE_PATH,
+    )
+    assert found.on == PS and (found.on.scheme, found.on.column) == ("PS_OrderYear", "OrderDate")
+    key, unique = found.constraints
+    assert isinstance(key, PrimaryKey) and isinstance(unique, Unique)
+    assert (key.on, unique.on) == (PS, ON_PRIMARY)
+    assert [index.on for index in found.indexes] == [PS, Partition("PS_Line", "OrderLineId"), ON_PRIMARY]
+
+
+def test_a_key_or_an_index_without_an_on_clause_is_where_the_engine_puts_it_on_the_scheme_of_the_table():
+    stated = "ON [PS_OrderYear]([OrderDate])"
+    keys = (
+        ", CONSTRAINT [PK] PRIMARY KEY CLUSTERED ([OrderDate]){}, INDEX [IX] NONCLUSTERED ([OrderLineId]){}"
+    )
+    batch = "\nGO\nCREATE NONCLUSTERED INDEX [IX_2] ON [sales].[OrderLine] ([OrderLineId]){}"
+    written = table(
+        LINE.format(keys.format(f" {stated}", f" {stated}")) + stated + batch.format(stated), LINE_PATH
+    )
+    left_out = table(LINE.format(keys.format("", "")) + stated + batch.format(""), LINE_PATH)
+    assert left_out == written
+    assert [index.on for index in left_out.indexes] == [PS, PS]
+    # ON [PRIMARY] is another place: the index is not aligned
+    primary = table(LINE.format(keys.format("", " ON [PRIMARY]")) + stated, LINE_PATH)
+    assert primary.indexes[0].on == ON_PRIMARY and primary != table(
+        LINE.format(keys.format("", "")) + stated, LINE_PATH
+    )
+
+
+def test_on_primary_says_nothing_on_a_table_that_is_not_partitioned_and_an_index_can_still_be_partitioned():
+    plain = table(
+        LINE.format("") + "\nGO\nCREATE NONCLUSTERED INDEX [IX] ON [sales].[OrderLine] ([OrderDate])",
+        LINE_PATH,
+    )
+    stored = table(
+        LINE.format("") + " ON [PRIMARY]\nGO\n"
+        "CREATE NONCLUSTERED INDEX [IX] ON [sales].[OrderLine] ([OrderDate]) ON [PRIMARY]",
+        LINE_PATH,
+    )
+    assert stored == plain and stored.on is None and stored.indexes[0].on is None
+    partitioned = table(
+        LINE.format("") + "\nGO\n"
+        "CREATE NONCLUSTERED INDEX [IX] ON [sales].[OrderLine] ([OrderDate]) ON [PS_OrderYear]([OrderDate])",
+        LINE_PATH,
+    )
+    assert partitioned.on is None and partitioned.indexes[0].on == PS
+
+
+@pytest.mark.parametrize(
+    ("tail", "code", "says"),
+    [
+        (" ON [PS_OrderYear]([OrderDate], [OrderLineId])", "SYNTAX", "one partitioning column"),
+        (" ON [PS_OrderYear]([Missing])", "SYNTAX", "[Missing] of the table is not a column of the table"),
+        (" ON [PS_OrderYear]", "UNSUPPORTED", "a partition scheme is written ON [scheme]([column])"),
+        (" ON [PRIMARY]([OrderDate])", "SYNTAX", "[PRIMARY] is a filegroup"),
+        (' ON "default"([OrderDate])', "SYNTAX", "is a filegroup"),
+        (
+            " ON [PS_OrderYear]([OrderDate]) ON [PS_OrderYear]([OrderDate])",
+            "SYNTAX",
+            "the end of the statement",
+        ),
+        (
+            " ON [PS_OrderYear]([OrderDate]) TEXTIMAGE_ON [PS_OrderYear]([OrderDate])",
+            "SYNTAX",
+            "TEXTIMAGE_ON",
+        ),
+        (
+            " ON [PS_OrderYear]([OrderDate]) WITH (DATA_COMPRESSION = PAGE ON PARTITIONS (1))",
+            "UNSUPPORTED",
+            "ON PARTITIONS",
+        ),
+    ],
+)
+def test_an_on_clause_outside_the_one_form_is_refused(tail: str, code: str, says: str):
+    error = rejected(LINE.format("") + tail, LINE_PATH)
+    assert (error.code, says in error.message) == (code, True), error.message
+
+
+def test_a_table_type_takes_no_partition_scheme_and_on_primary_there_is_read_as_before():
+    path = "schema/types/dbo.IdList.sql"
+    (plain,) = parse_object_file(
+        "CREATE TYPE [dbo].[IdList] AS TABLE ([Id] int NOT NULL, PRIMARY KEY CLUSTERED ([Id]))", path
+    )
+    (stored,) = parse_object_file(
+        "CREATE TYPE [dbo].[IdList] AS TABLE ([Id] int NOT NULL, PRIMARY KEY CLUSTERED ([Id]) ON [PRIMARY])",
+        path,
+    )
+    assert stored == plain
+    for element in (
+        "PRIMARY KEY CLUSTERED ([Id]) ON [ps]([Id])",
+        "INDEX [IX] NONCLUSTERED ([Id]) ON [ps]([Id])",
+    ):
+        error = rejected(f"CREATE TYPE [dbo].[IdList] AS TABLE ([Id] int NOT NULL, {element})", path)
+        assert (error.code, "a table type cannot be on a partition scheme" in error.message) == (
+            "SYNTAX",
+            True,
+        )
+
+
+def test_statistics_incremental_is_read_where_an_index_or_a_key_is_on_a_partition_scheme():
+    found = table(
+        LINE.format(
+            ", CONSTRAINT [PK] PRIMARY KEY NONCLUSTERED ([OrderDate]) WITH (STATISTICS_INCREMENTAL = ON)"
+            " ON [PS_OrderYear]([OrderDate])"
+            ", INDEX [IX] NONCLUSTERED ([OrderLineId]) WITH (statistics_incremental = off)"
+            " ON [PS_OrderYear]([OrderDate])"
+        )
+        + " ON [PS_OrderYear]([OrderDate])",
+        LINE_PATH,
+    )
+    assert found.constraints[0].options == (("STATISTICS_INCREMENTAL", "ON"),)  # type: ignore[union-attr]
+    assert found.indexes[0].options == (("STATISTICS_INCREMENTAL", "OFF"),)
+    # not on a scheme: the option has no meaning, on [PRIMARY] and on a table that is not partitioned
+    for where in (" ON [PRIMARY]", ""):
+        error = rejected(
+            LINE.format(
+                f", INDEX [IX] NONCLUSTERED ([OrderLineId]) WITH (STATISTICS_INCREMENTAL = ON){where}"
+            ),
+            LINE_PATH,
+        )
+        assert (
+            error.code,
+            "STATISTICS_INCREMENTAL goes with an index on a partition scheme" in error.message,
+        ) == (
+            "SYNTAX",
+            True,
+        )
 
 
 # ------------------------------------------------------------------ table types

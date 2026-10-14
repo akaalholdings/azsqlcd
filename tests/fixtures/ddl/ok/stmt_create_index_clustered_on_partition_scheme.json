@@ -1,0 +1,19 @@
+{
+  "class": "CreateIndex",
+  "schema": "sales",
+  "table": "OrderLine",
+  "index": {
+    "class": "Index",
+    "name": "CIX_OrderLine",
+    "unique": false,
+    "clustered": true,
+    "columns": [
+      {"class": "KeyColumn", "name": "OrderDate", "descending": false}
+    ],
+    "included": [],
+    "filter": null,
+    "options": [],
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  },
+  "exec_options": [["SORT_IN_TEMPDB", "ON"]]
+}

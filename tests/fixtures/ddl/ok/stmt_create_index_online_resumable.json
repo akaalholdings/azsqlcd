@@ -13,7 +13,8 @@
     ],
     "included": ["TotalDue", "CurrencyCode"],
     "filter": {"class": "Expression", "tokens": ["[Status]", "=", "'O'", "AND", "[ShippedUtc]", "IS", "NULL"]},
-    "options": [["DATA_COMPRESSION", "PAGE"], ["FILLFACTOR", "90"], ["OPTIMIZE_FOR_SEQUENTIAL_KEY", "OFF"]]
+    "options": [["DATA_COMPRESSION", "PAGE"], ["FILLFACTOR", "90"], ["OPTIMIZE_FOR_SEQUENTIAL_KEY", "OFF"]],
+    "on": "PRIMARY"
   },
   "exec_options": [["MAXDOP", "4"], ["MAX_DURATION", "60"], ["ONLINE", "ON"], ["RESUMABLE", "ON"], ["WAIT_AT_LOW_PRIORITY", "MAX_DURATION = 5 MINUTES, ABORT_AFTER_WAIT = SELF"]]
 }

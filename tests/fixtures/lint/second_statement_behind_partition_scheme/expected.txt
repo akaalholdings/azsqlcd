@@ -1,0 +1,2 @@
+# the place of the index ends the statement: the closed rule has no place for a name after it
+MODEL_STATEMENT migrations/0001__change.sql:6

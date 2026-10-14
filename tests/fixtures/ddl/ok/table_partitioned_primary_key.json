@@ -1,0 +1,78 @@
+[
+  {
+    "class": "Table",
+    "schema": "sales",
+    "name": "OrderEvent",
+    "columns": [
+      {
+        "class": "Column",
+        "name": "OrderEventId",
+        "type": {"class": "TypeRef", "name": "bigint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "OrderDate",
+        "type": {"class": "TypeRef", "name": "date", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      },
+      {
+        "class": "Column",
+        "name": "Kind",
+        "type": {"class": "TypeRef", "name": "tinyint", "schema": null, "length": null, "precision": null, "scale": null},
+        "nullable": false,
+        "identity": null,
+        "default": null,
+        "computed": null,
+        "collation": null,
+        "generated": null,
+        "hidden": false,
+        "masked": null
+      }
+    ],
+    "constraints": [
+      {
+        "class": "PrimaryKey",
+        "name": "PK_OrderEvent",
+        "clustered": true,
+        "columns": [
+          {"class": "KeyColumn", "name": "OrderEventId", "descending": false},
+          {"class": "KeyColumn", "name": "OrderDate", "descending": true}
+        ],
+        "options": [],
+        "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+      }
+    ],
+    "indexes": [
+      {
+        "class": "Index",
+        "name": "IX_OrderEvent_Kind",
+        "unique": false,
+        "clustered": false,
+        "columns": [
+          {"class": "KeyColumn", "name": "Kind", "descending": false}
+        ],
+        "included": [],
+        "filter": null,
+        "options": [],
+        "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+      }
+    ],
+    "temporal": null,
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  }
+]

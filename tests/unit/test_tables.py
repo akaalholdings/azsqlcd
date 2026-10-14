@@ -33,10 +33,12 @@ from azsqlcd.catalog_tables import SystemNamed, Unsupported, read_model
 from azsqlcd.config import Config, load_config
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.model import (
+    ON_PRIMARY,
     AliasType,
     Check,
     Column,
     Computed,
+    CreateIndex,
     DefaultConstraint,
     Expression,
     ForeignKey,
@@ -44,6 +46,7 @@ from azsqlcd.model import (
     KeyColumn,
     Model,
     ModelObject,
+    Partition,
     PrimaryKey,
     Schema,
     Sequence,
@@ -51,6 +54,7 @@ from azsqlcd.model import (
     Table,
     TableType,
     TypeRef,
+    Unique,
 )
 from azsqlcd.parse import parse_object_file
 from azsqlcd.plan import ModuleChange, TableFindings, Work
@@ -83,6 +87,7 @@ from unit.test_catalog_tables import (
     SALES,
     CatalogRows,
     only,
+    partitioned,
     price,
     price_rows,
     rows_from_model,
@@ -1123,6 +1128,93 @@ def test_the_index_of_an_engine_named_key_of_the_model_is_not_called_unrecorded(
     assert "is not recorded" in blocker
 
 
+# ------------------------------------------------------------------ partition schemes
+ORDER_LINE_MODEL, ORDER_LINE = partitioned("table_partitioned_canonical_form")
+HOSTILE_SCHEME = "PS'; DROP TABLE [azsqlcd].[run]; --"
+ON_SCHEMES = mig(
+    M1,
+    "CREATE TABLE [sales].[Day] (\n    [d] date NOT NULL,\n    [n] int NOT NULL,\n"
+    "    CONSTRAINT [PK_Day] PRIMARY KEY NONCLUSTERED ([d]) ON [PS_Key]([d])\n)\nON [PS_Table]([d]);",
+    "CREATE NONCLUSTERED INDEX [IX_Order_Customer] ON [sales].[Order] ([CustomerId]) "
+    "ON [PS_Index]([CustomerId]);",
+    "ALTER TABLE [sales].[Customer] ADD CONSTRAINT [UQ_Customer] UNIQUE NONCLUSTERED ([CustomerId]) "
+    "ON [ps_constraint]([CustomerId]);",
+    "CREATE CLUSTERED COLUMNSTORE INDEX [CCI_Fact] ON [sales].[Fact] ON [PS_Table]([d]);",
+)
+
+
+def scheme_database(*schemes: str) -> FakeSession:
+    db = database()
+    db.respond("azsqlcd:partition_schemes", [[(name,) for name in schemes]])
+    return db
+
+
+def test_every_pending_statement_that_names_a_partition_scheme_is_checked_against_the_database():
+    db = scheme_database("ps_table", "PS_Constraint", "PS_Other")  # a scheme has a name without case
+
+    missing = hooks().missing_partition_schemes(db, pending(ON_SCHEMES))
+
+    # each once, as the statement writes it, in name order: PS_Table is named twice and is there
+    assert missing == ["PS_Index", "PS_Key"]
+    # one read, and no name of the release travels into the batch
+    (batch,) = db.sent("azsqlcd:partition_schemes")
+    assert batch == "/* azsqlcd:partition_schemes */ SELECT sch.[name] FROM sys.partition_schemes AS sch;"
+
+
+def test_a_statement_on_a_filegroup_or_without_a_place_names_no_scheme_and_sends_no_batch():
+    work = pending(
+        DROP_NOTE,
+        mig(
+            M2,
+            "CREATE NONCLUSTERED INDEX [IX_a] ON [sales].[Order] ([Status]) ON [PRIMARY];",
+            # on a partitioned table the engine puts this index on the scheme of the table, which exists
+            "CREATE NONCLUSTERED INDEX [IX_b] ON [sales].[OrderLine] ([ProductId]);",
+            "ALTER TABLE [sales].[Customer] ADD CONSTRAINT [UQ_Customer] UNIQUE NONCLUSTERED ([CustomerId]);",
+        ),
+    )
+    db = scheme_database()
+
+    assert hooks().missing_partition_schemes(db, work) == []
+    assert db.sent("azsqlcd:partition_schemes") == []
+
+
+def test_a_scheme_that_an_earlier_batch_of_the_release_creates_is_not_missing():
+    create = (
+        "-- azsqlcd:raw TABLE:[dba].[Partitioning] reason: the partition scheme of the new table\n"
+        "CREATE PARTITION SCHEME [{name}] AS PARTITION [PF_Day] ALL TO ([PRIMARY]);"
+    )
+    index = "CREATE NONCLUSTERED INDEX [IX_{n}] ON [sales].[Order] ([Status]) ON [{name}]([Status]);"
+    work = pending(
+        mig(M1, create.format(name="PS_Early"), index.format(n=1, name="ps_early")),
+        mig(M2, index.format(n=2, name="PS_Late"), create.format(name="PS_Late")),
+    )
+
+    missing = hooks().missing_partition_schemes(scheme_database(), work)
+
+    # the statement on PS_Late runs before the batch that creates the scheme
+    assert missing == ["PS_Late"]
+
+
+def test_a_model_batch_outside_the_grammar_stops_the_scheme_check_with_file_and_line():
+    work = pending(mig(M1, "ALTER TABLE [sales].[Order]\nREBUILD;"))
+
+    error = refusal(hooks().missing_partition_schemes, scheme_database(), work)
+
+    assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "MIGRATION_INVALID")
+    assert error.detail == {"file": M1, "line": 4}
+
+
+def test_a_hostile_scheme_name_is_compared_in_python_and_never_sent():
+    index = Index("IX_h", False, False, (KeyColumn("Status"),), on=Partition(HOSTILE_SCHEME, "Status"))
+    statement = emit.emit_operation(CreateIndex("sales", "Order", index))
+    db = scheme_database()
+
+    missing = hooks().missing_partition_schemes(db, pending(mig(M1, statement)))
+
+    assert missing == [HOSTILE_SCHEME]
+    assert all("DROP TABLE" not in batch for batch in db.batches)
+
+
 # ------------------------------------------------------------------ A20
 def collisions(work: Work, present: list[int], stored: State | None = None) -> tuple[list[str], FakeSession]:
     db = database(present=present)
@@ -1222,8 +1314,9 @@ def test_the_hooks_have_the_methods_that_plan_and_runner_call():
         "read_back",
     }
     # dependants_to_check (OM-02) and dependant_findings (RO-2): the hooks have them; the protocol of
-    # the plan gets them with the sweep
-    sweep = {"dependants_to_check", "dependant_findings"}
+    # the plan gets them with the sweep. missing_partition_schemes: the hooks have it for the plan,
+    # which refuses a release on a scheme that the database does not hold
+    sweep = {"dependants_to_check", "dependant_findings", "missing_partition_schemes"}
     assert known <= wanted <= known | sweep
     assert all(callable(getattr(Hooks, name)) for name in wanted | sweep)
 
@@ -1306,6 +1399,55 @@ def test_a_plan_with_the_hooks_refuses_a_blocker_a_drifted_table_and_a_taken_nam
         "NAME_COLLISION",
         ["INDEX [sales].[Order].[IX_dba]"],
     )
+
+
+def test_a_plan_with_the_hooks_refuses_a_release_on_a_scheme_that_the_database_does_not_have():
+    on_scheme = "CREATE NONCLUSTERED INDEX [IX_p] ON [sales].[Order] ([Status]) ON [PS_Status]([Status]);"
+    create = mig(M1, on_scheme)
+
+    error = refusal(planned, migration=create)
+
+    assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "PARTITION_SCHEME_MISSING")
+    assert error.exit_code == 22
+    assert "[PS_Status]" in error.message and "DBA" in error.message  # the scheme and what to do
+    assert [name.strip("[]") for name in error.detail["schemes"]] == ["PS_Status"]
+
+
+def test_a_plan_with_the_hooks_passes_a_release_on_a_scheme_that_the_database_has():
+    # FakeSession answers the first rule that matches: the scheme rule is set before planned() runs
+    on_scheme = "CREATE NONCLUSTERED INDEX [IX_p] ON [sales].[Order] ([Status]) ON [PS_Status]([Status]);"
+    b = bundle(
+        Model(
+            [
+                SALES,
+                with_parts(
+                    ORDER,
+                    indexes=(
+                        Index(
+                            "IX_p", False, False, (KeyColumn("Status"),), on=Partition("PS_Status", "Status")
+                        ),
+                    ),
+                ),
+                CUSTOMER,
+            ]
+        ),
+        mig(M1, on_scheme),
+    )
+    db = database()
+    db.respond("azsqlcd:partition_schemes", [[("ps_status",)]])
+    db.respond("azsqlcd:fence_facts", [[(5, "READ_WRITE", "sales", "SQL_Latin1_General_CP1_CI_AS", 0)]])
+    db.respond("azsqlcd:read_state.steps", [[(1, 1, "baseline", None, None, "ok", None)]])
+    db.respond("azsqlcd:list_user_objects", [[("sales", "Order", "U"), ("sales", "Customer", "U")]])
+    db.respond("azsqlcd:service_objective", [[("S3",)]])
+    db.respond("azsqlcd:table_facts", [[(ORDER_KEY, 10, 3)]])
+    cfg = config()
+
+    result = plan.compute_plan(
+        b, cfg, "dev", "sales-dev", db, tool_version="0.1.0", tool_digest="d" * 64, table_hooks=Hooks(b, cfg)
+    )
+
+    assert result.outcome == "work" and len(db.sent("azsqlcd:partition_schemes")) == 1
+    assert plan.Touched(ORDER_KEY, recorded().objects[ORDER_KEY].catalog_sha256) in result.touched
 
 
 # ------------------------------------------------------------------ export
@@ -1987,3 +2129,220 @@ def test_export_writes_the_mask_into_the_table_file():
     text = exported.files["schema/tables/sales.Order.sql"].decode("utf-8")
     assert "[Note] nvarchar(50) MASKED WITH (FUNCTION = 'partial(1, \"XXXX\", 0)') NULL" in text
     assert exported.unmanaged == ()
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+ORDER_LINE_KEY = ORDER_LINE.key
+PLACE = {"scheme": "PS_OrderYear", "column": "OrderDate"}
+
+
+def placed(table: Table, name: str, on: object) -> Table:
+    """The table with one index in another place. STATISTICS_INCREMENTAL goes with a scheme only."""
+
+    def moved(index: Index) -> Index:
+        if index.name != name:
+            return index
+        options = index.options if isinstance(on, Partition) else ()
+        return dataclasses.replace(index, on=on, options=options)
+
+    return dataclasses.replace(table, indexes=tuple(moved(index) for index in table.indexes))
+
+
+def not_partitioned(table: Table) -> Table:
+    """The table on a filegroup, with every key and index on it: nothing states a place."""
+    keys = tuple(
+        dataclasses.replace(c, on=None) if isinstance(c, PrimaryKey | Unique) else c
+        for c in table.constraints
+    )
+
+    def plain(index: Index) -> Index:
+        options = tuple(option for option in index.options if option[0] != "STATISTICS_INCREMENTAL")
+        return dataclasses.replace(index, on=None, options=options)
+
+    return dataclasses.replace(table, constraints=keys, indexes=tuple(map(plain, table.indexes)), on=None)
+
+
+def line_model(table: Table = ORDER_LINE) -> Model:
+    return Model([SALES, table])
+
+
+def test_a_partitioned_table_reads_back_and_its_capture_holds_the_scheme_and_the_column():
+    captures = read_back(ORDER_LINE_MODEL, ORDER_LINE_MODEL)
+
+    assert captures == captures_of(ORDER_LINE_MODEL)
+    capture = captures[ORDER_LINE_KEY]
+    assert capture["partition"] == PLACE
+    assert capture["index [IX_OrderLine_Product]"]["partition"] == PLACE
+    assert "partition" not in capture["index [IX_OrderLine_Quantity]"]  # ON [PRIMARY]
+
+
+@pytest.mark.parametrize(
+    ("live", "paths"),
+    [
+        # an aligned index that sits on [PRIMARY] in the database
+        (
+            placed(ORDER_LINE, "IX_OrderLine_Product", ON_PRIMARY),
+            [
+                "indexes[ix_orderline_product].options[STATISTICS_INCREMENTAL] (absent in other)",
+                "indexes[ix_orderline_product].on",
+            ],
+        ),
+        # an index that the file puts on [PRIMARY] and that the engine aligned (created with no ON clause)
+        (placed(ORDER_LINE, "IX_OrderLine_Quantity", ORDER_LINE.on), ["indexes[ix_orderline_quantity].on"]),
+        (
+            placed(ORDER_LINE, "IX_OrderLine_Product", Partition("PS_OrderMonth", "OrderDate")),
+            ["indexes[ix_orderline_product].on.scheme"],
+        ),
+    ],
+    ids=["aligned index on PRIMARY", "index of PRIMARY on the scheme", "another scheme"],
+)
+def test_read_back_fails_when_an_index_is_not_in_the_place_that_the_file_states(
+    live: Table, paths: list[str]
+):
+    error = mismatch(line_model(live), ORDER_LINE_MODEL)
+
+    assert [(p["object"], p["properties"]) for p in error.detail["objects"]] == [(ORDER_LINE_KEY, paths)]
+
+
+def test_read_back_fails_when_the_file_says_partitioned_and_the_table_of_the_database_is_not():
+    error = mismatch(line_model(not_partitioned(ORDER_LINE)), ORDER_LINE_MODEL)
+
+    (problem,) = error.detail["objects"]
+    assert problem["object"] == ORDER_LINE_KEY
+    assert "on" in problem["properties"] and "indexes[cix_orderline].on" in problem["properties"]
+    # ... and the other way round: a table that somebody partitioned is not the table of the file
+    other = mismatch(ORDER_LINE_MODEL, line_model(not_partitioned(ORDER_LINE)))
+    assert "on" in other.detail["objects"][0]["properties"]
+
+
+def test_drift_sees_an_index_that_was_moved_to_another_place_behind_the_tool():
+    stored = recorded(ORDER_LINE_MODEL)
+    h = hooks(ORDER_LINE_MODEL)
+    assert h.table_drift(database(ORDER_LINE_MODEL, stored), stored, [ORDER_LINE_KEY]) == {}
+
+    for live, properties in (
+        (placed(ORDER_LINE, "IX_OrderLine_Product", ON_PRIMARY), ["index [IX_OrderLine_Product]"]),
+        (placed(ORDER_LINE, "IX_OrderLine_Quantity", ORDER_LINE.on), ["index [IX_OrderLine_Quantity]"]),
+        (
+            not_partitioned(ORDER_LINE),
+            [
+                "constraint [UQ_OrderLine_Date_Line]",
+                "index [CIX_OrderLine]",
+                "index [IX_OrderLine_Product]",
+                "partition",
+            ],
+        ),
+    ):
+        drift = h.table_drift(database(line_model(live), stored), stored, [ORDER_LINE_KEY])
+
+        assert [d.property for d in drift[ORDER_LINE_KEY]] == properties
+
+
+def test_a_capture_that_an_older_tool_stored_does_not_drift_on_the_new_property():
+    # the capture of a table that is not partitioned gets 'partition': None. A stored capture
+    # without the property takes no part in the comparison of it
+    stored = recorded()
+    for row in stored.objects.values():
+        row.capture.pop("partition", None)
+
+    assert hooks().table_drift(database(stored=stored), stored, list(MODEL)) == {}
+
+
+def test_a_heap_that_an_older_tool_recorded_and_that_was_partitioned_behind_the_tool_is_drift():
+    # an older tool refused every partitioned table, so its capture of a table without 'partition'
+    # says: not partitioned. A heap moved onto a scheme (CREATE CLUSTERED INDEX ... ON scheme, then
+    # DROP INDEX) leaves its nonclustered items on [PRIMARY], with captures that do not change: only
+    # 'partition' of the table shows the move
+    plain = not_partitioned(ORDER_LINE)
+    heap = dataclasses.replace(plain, indexes=tuple(i for i in plain.indexes if not i.clustered))
+    assert heap.clustered_item() is None
+    moved = dataclasses.replace(
+        heap,
+        on=Partition("PS_OrderYear", "OrderDate"),
+        constraints=tuple(
+            dataclasses.replace(c, on=ON_PRIMARY) if isinstance(c, PrimaryKey | Unique) else c
+            for c in heap.constraints
+        ),
+        indexes=tuple(dataclasses.replace(i, on=ON_PRIMARY) for i in heap.indexes),
+    )
+    stored = recorded(line_model(heap))
+    for row in stored.objects.values():
+        row.capture.pop("partition", None)
+
+    assert (
+        hooks(line_model(heap)).table_drift(database(line_model(heap), stored), stored, [ORDER_LINE_KEY])
+        == {}
+    )
+    drift = hooks(line_model(heap)).table_drift(database(line_model(moved), stored), stored, [ORDER_LINE_KEY])
+    assert [d.property for d in drift[ORDER_LINE_KEY]] == ["partition"]
+    # the same for a snapshot of a reference database that an older tool exported
+    snapshot = json.loads(json.dumps(export(line_model(heap)).snapshot))
+    for capture in snapshot["captures"].values():
+        capture.pop("partition", None)
+    baseline = compare_with_snapshot(database(line_model(moved)), snapshot, list(line_model(heap)))
+    assert baseline.items[1] == BaselineItem(ORDER_LINE_KEY, DIFFERS, ("partition",))
+
+
+def test_the_baseline_compare_sees_the_place_of_a_table_and_of_an_index():
+    assert compare(ORDER_LINE_MODEL, ORDER_LINE_MODEL).items == tuple(
+        BaselineItem(key, EQUAL) for key in ORDER_LINE_MODEL
+    )
+    moved = compare(line_model(placed(ORDER_LINE, "IX_OrderLine_Product", ON_PRIMARY)), ORDER_LINE_MODEL)
+    plain = compare(line_model(not_partitioned(ORDER_LINE)), ORDER_LINE_MODEL)
+
+    assert moved.items[1] == BaselineItem(ORDER_LINE_KEY, DIFFERS, ("index [IX_OrderLine_Product]",))
+    assert "partition" in plain.items[1].properties
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "table_partitioned_canonical_form",
+        "table_partitioned_heap_canonical_form",
+        "table_partitioned_clustered_columnstore",
+        "table_partitioned_index_on_plain_table",
+        "table_partitioned_statistics_incremental",
+    ],
+)
+def test_export_writes_a_partitioned_table_as_a_file_with_its_on_clauses(fixture: str):
+    model, table = partitioned(fixture)
+
+    exported = export(model)
+
+    assert exported.unmanaged == ()
+    path = names.path_for("TABLE", table.schema, table.name)
+    text = exported.files[path].decode("utf-8")
+    (parsed,) = parse_object_file(text, path)
+    assert parsed == read_model(session_for(rows_from_model(model))).model[table.key]
+    # the model of the file that was deployed, but for an option that it states at the engine default
+    assert Model([catalog_tables.project_options(parsed, table)]).diff_paths(Model([table])) == []
+    assert emit.token_roundtrip_differences(text, path) == []
+    places = [on for on in (table.on, *(item.on for _, item in table.placed_items())) if on is not None]
+    for on in places:
+        clause = "ON [PRIMARY]" if on == ON_PRIMARY else f"ON [{on.scheme}]([{on.column}])"
+        assert clause in text
+    assert exported.snapshot["captures"][table.key]["partition"] == (
+        None if table.on is None else {"scheme": table.on.scheme, "column": table.on.column}
+    )
+
+
+def test_export_writes_no_on_clause_for_a_table_that_is_not_partitioned():
+    exported = export(MODEL)
+
+    assert not any(b" ON [PRIMARY]" in data or b"\nON [" in data for data in exported.files.values())
+
+
+def test_export_leaves_a_table_with_per_partition_compression_unmanaged_and_says_why():
+    rows = rows_from_model(ORDER_LINE_MODEL)
+    only(rows, "indexes", name="CIX_OrderLine")["compression_kinds"] = 2
+
+    exported = export(rows)
+
+    assert "schema/tables/sales.OrderLine.sql" not in exported.files
+    (item,) = exported.unmanaged
+    assert (item.object_key, item.code) == (ORDER_LINE_KEY, catalog_tables.UNSUPPORTED)
+    assert item.reason == (
+        "index [CIX_OrderLine]: its partitions do not all have the same compression; "
+        "per-partition compression is outside the model"
+    )
+    assert item.reason in exported.report_md and "it is partitioned" not in exported.report_md

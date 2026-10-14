@@ -992,10 +992,17 @@ def without_one_part(model: Model) -> Iterator[Model]:
                 try:
                     smaller = replace(obj, **{part: items[:i] + items[i + 1 :]})
                 except ValueError:
-                    # a temporal table without a period column or without its key is no table of the model
-                    assert obj.temporal is not None
+                    # a temporal table without a period column or without its key is no table of the
+                    # model, and neither is a table or an index without its partitioning column
+                    assert obj.temporal is not None or part == "columns"
+                    assert obj.temporal is not None or items[i].name in partitioning_columns(obj)
                     continue
                 yield model.replace(smaller)
+
+
+def partitioning_columns(owner: Table) -> set[str]:
+    places = [owner.on, *(item.on for _, item in owner.placed_items())]
+    return {place.column for place in places if isinstance(place, M.Partition)}
 
 
 def fits_together(model: Model) -> bool:
@@ -1373,3 +1380,295 @@ def test_drop_schema_is_blocked_by_the_history_table_of_a_table_of_another_schem
     ) as caught:
         run(world, "DROP SCHEMA [hist]")
     assert caught.value.object_key == "SCHEMA:[hist]" and "TABLE:[s].[V]" in caught.value.message
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+PS = M.Partition("PS_OrderYear", "OrderDate")
+LINE_COLUMNS = (
+    "[Id] bigint NOT NULL, [OrderDate] date NOT NULL, [Quantity] int NOT NULL, [Note] varchar(20) NULL"
+)
+ON_PS = " ON [PS_OrderYear]([OrderDate])"
+# a partitioned heap, a table that is not partitioned, and a partitioned table with a clustered key
+PARTITIONED = model_of(
+    "CREATE SCHEMA [s]",
+    f"CREATE TABLE [s].[Heap] ({LINE_COLUMNS}){ON_PS}",
+    f"CREATE TABLE [s].[Plain] ({LINE_COLUMNS}, CONSTRAINT [PK_Plain] PRIMARY KEY CLUSTERED ([Id]), "
+    "INDEX [IX_Plain] NONCLUSTERED ([Quantity]))",
+    f"CREATE TABLE [s].[Keyed] ({LINE_COLUMNS}, "
+    f"CONSTRAINT [PK_Keyed] PRIMARY KEY CLUSTERED ([OrderDate], [Id]){ON_PS}, "
+    f"INDEX [IX_Keyed] NONCLUSTERED ([Quantity]){ON_PS}, "
+    f"INDEX [IX_Keyed_Note] NONCLUSTERED ([Note]) ON [PRIMARY]){ON_PS}",
+)
+INDEX = "CREATE NONCLUSTERED INDEX [IX_New] ON [s].[{}] ([Quantity]){}"
+UNIQUE = "ALTER TABLE [s].[{}] ADD CONSTRAINT [UQ_New] UNIQUE NONCLUSTERED ([OrderDate], [Quantity]){}"
+
+
+def place_of(model: Model, name: str, item: str) -> object:
+    owner = table(model, name)
+    found = owner.index(item) or owner.constraint(item)
+    assert isinstance(found, M.Index | M.PrimaryKey | M.Unique)
+    return found.on
+
+
+@pytest.mark.parametrize(
+    ("name", "clause", "place"),
+    [
+        # a partitioned table: no clause is the scheme of the table, as the engine places the index
+        ("Heap", "", PS),
+        ("Heap", " ON [PRIMARY]", M.ON_PRIMARY),
+        ("Heap", ON_PS, PS),
+        ("Heap", " ON [PS_Quantity]([Quantity])", M.Partition("PS_Quantity", "Quantity")),
+        ("Keyed", "", PS),
+        ("Keyed", " ON [PRIMARY]", M.ON_PRIMARY),
+        # a table that is not partitioned: ON [PRIMARY] says what no clause says
+        ("Plain", "", None),
+        ("Plain", " ON [PRIMARY]", None),
+        ("Plain", ON_PS, PS),
+    ],
+)
+def test_a_new_index_or_key_gets_the_place_that_the_engine_gives_it_on_that_table(name, clause, place):
+    assert place_of(run(PARTITIONED, INDEX.format(name, clause)), name, "IX_New") == place
+    assert place_of(run(PARTITIONED, UNIQUE.format(name, clause)), name, "UQ_New") == place
+    if clause != " ON [PS_Quantity]([Quantity])":
+        columnstore = f"CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [s].[{name}] ([Quantity]){clause}"
+        assert place_of(run(PARTITIONED, columnstore), name, "NCCI") == place
+    # the table itself stays where it is
+    assert table(run(PARTITIONED, INDEX.format(name, clause)), name).on == table(PARTITIONED, name).on
+
+
+@pytest.mark.parametrize(
+    ("statement", "says"),
+    [
+        # error 1908 of the engine: without a clause the index is on the scheme of the table
+        (
+            "CREATE UNIQUE NONCLUSTERED INDEX [UX] ON [s].[Heap] ([Id])",
+            "index [UX] is unique: the partitioning column [OrderDate] must be one of its key columns",
+        ),
+        (
+            "CREATE UNIQUE NONCLUSTERED INDEX [UX] ON [s].[Plain] ([Id]) INCLUDE ([OrderDate])" + ON_PS,
+            "index [UX] is unique: the partitioning column [OrderDate] must be one of its key columns",
+        ),
+        (
+            "ALTER TABLE [s].[Heap] ADD CONSTRAINT [PK_Heap] PRIMARY KEY NONCLUSTERED ([Id])",
+            "PRIMARY KEY [PK_Heap] is unique: the partitioning column [OrderDate] must be one of its key",
+        ),
+        (
+            "ALTER TABLE [s].[Heap] ADD CONSTRAINT [PK_Heap] PRIMARY KEY CLUSTERED ([Id])",
+            "PRIMARY KEY [PK_Heap] is unique: the partitioning column [OrderDate] must be one of its key",
+        ),
+        (
+            "ALTER TABLE [s].[Keyed] ADD CONSTRAINT [UQ] UNIQUE NONCLUSTERED ([Id]) ON [PS_Id]([Quantity])",
+            "UNIQUE [UQ] is unique: the partitioning column [Quantity] must be one of its key columns",
+        ),
+        (
+            "CREATE NONCLUSTERED INDEX [IX] ON [s].[Plain] ([Id]) ON [PS_OrderYear]([OrderDay])",
+            "the partitioning column [OrderDay] of index [IX] is not a column of the table",
+        ),
+        (
+            "CREATE CLUSTERED INDEX [CIX] ON [s].[Heap] ([Id]) ON [PS_OrderYear]([OrderDay])",
+            "the partitioning column [OrderDay] of the table is not a column of the table",
+        ),
+    ],
+)
+def test_a_place_that_the_engine_refuses_is_blocked_so_that_the_proof_does_not_pass_it(statement, says):
+    with pytest.raises(ReplayError) as caught:
+        run(PARTITIONED, statement)
+    assert says in caught.value.message
+    assert caught.value.object_key.startswith("TABLE:[s].")
+
+
+def test_a_unique_index_passes_with_the_partitioning_column_in_its_key_or_off_the_scheme():
+    assert (
+        place_of(
+            run(PARTITIONED, "CREATE UNIQUE NONCLUSTERED INDEX [UX] ON [s].[Heap] ([Id], [OrderDate])"),
+            "Heap",
+            "UX",
+        )
+        == PS
+    )
+    primary = run(PARTITIONED, "CREATE UNIQUE NONCLUSTERED INDEX [UX] ON [s].[Heap] ([Id]) ON [PRIMARY]")
+    assert place_of(primary, "Heap", "UX") == M.ON_PRIMARY
+    # not unique: the engine adds the partitioning column to the index by itself
+    assert place_of(run(PARTITIONED, INDEX.format("Heap", "")), "Heap", "IX_New") == PS
+
+
+def test_a_clustered_index_without_an_on_clause_is_built_where_the_table_is_and_a_drop_leaves_it_there():
+    clustered = run(PARTITIONED, "CREATE CLUSTERED INDEX [CIX] ON [s].[Heap] ([Id])")
+    assert table(clustered, "Heap").on == PS and place_of(clustered, "Heap", "CIX") == PS
+    assert run(clustered, "DROP INDEX [CIX] ON [s].[Heap]") == PARTITIONED
+    heap = run(
+        PARTITIONED,
+        "DROP INDEX [IX_Keyed] ON [s].[Keyed]",
+        "ALTER TABLE [s].[Keyed] DROP CONSTRAINT [PK_Keyed]",
+    )
+    assert table(heap, "Keyed").on == PS and table(heap, "Keyed").clustered_item() is None
+    assert place_of(heap, "Keyed", "IX_Keyed_Note") == M.ON_PRIMARY
+    columnstore = run(heap, "CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [s].[Keyed]")
+    assert table(columnstore, "Keyed").on == PS and place_of(columnstore, "Keyed", "CCI") == PS
+
+
+def test_a_table_moves_only_by_a_clustered_index_or_key_that_states_the_new_place():
+    """The hand-written rebuild that the proof follows: on a heap, CREATE CLUSTERED INDEX or ADD
+    CONSTRAINT ... CLUSTERED with an ON clause is where the rows go. The other keys and indexes
+    stay where they are, so they are stated against the new place of the table."""
+    on_scheme = run(
+        PARTITIONED,
+        "ALTER TABLE [s].[Plain] DROP CONSTRAINT [PK_Plain]",
+        "ALTER TABLE [s].[Plain] ADD CONSTRAINT [PK_Plain] PRIMARY KEY CLUSTERED ([Id], [OrderDate])" + ON_PS,
+    )
+    assert table(on_scheme, "Plain") == table(
+        model_of(
+            f"CREATE TABLE [s].[Plain] ({LINE_COLUMNS}, "
+            f"CONSTRAINT [PK_Plain] PRIMARY KEY CLUSTERED ([Id], [OrderDate]){ON_PS}, "
+            f"INDEX [IX_Plain] NONCLUSTERED ([Quantity]) ON [PRIMARY]){ON_PS}"
+        ),
+        "Plain",
+    )
+    off_scheme = run(
+        PARTITIONED,
+        "ALTER TABLE [s].[Keyed] DROP CONSTRAINT [PK_Keyed]",
+        "ALTER TABLE [s].[Keyed] ADD CONSTRAINT [PK_Keyed] PRIMARY KEY CLUSTERED ([OrderDate], [Id])"
+        " ON [PRIMARY]",
+    )
+    assert table(off_scheme, "Keyed") == table(
+        model_of(
+            f"CREATE TABLE [s].[Keyed] ({LINE_COLUMNS}, "
+            "CONSTRAINT [PK_Keyed] PRIMARY KEY CLUSTERED ([OrderDate], [Id]), "
+            f"INDEX [IX_Keyed] NONCLUSTERED ([Quantity]){ON_PS}, INDEX [IX_Keyed_Note] NONCLUSTERED ([Note]))"
+        ),
+        "Keyed",
+    )
+    # another scheme, another partitioning column
+    other = run(
+        PARTITIONED,
+        "CREATE CLUSTERED INDEX [CIX] ON [s].[Heap] ([Quantity]) ON [PS_Quantity]([Quantity])",
+        "DROP INDEX [CIX] ON [s].[Heap]",
+    )
+    assert table(other, "Heap").on == M.Partition("PS_Quantity", "Quantity")
+    assert table(other, "Heap").clustered_item() is None
+    # a heap goes on a scheme by a clustered index that comes and goes; a columnstore one moves it too
+    heap = model_of("CREATE SCHEMA [s]", f"CREATE TABLE [s].[Heap] ({LINE_COLUMNS})")
+    moved = run(
+        heap,
+        "CREATE CLUSTERED INDEX [CIX] ON [s].[Heap] ([OrderDate])" + ON_PS,
+        "DROP INDEX [CIX] ON [s].[Heap]",
+    )
+    assert table(moved, "Heap") == table(PARTITIONED, "Heap")
+    columnstore = run(heap, "CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [s].[Heap]" + ON_PS)
+    assert table(columnstore, "Heap").on == PS
+    # no statement moves a table that has its clustered index, and a nonclustered one moves nothing
+    with pytest.raises(ReplayError, match="has the clustered index or key"):
+        run(PARTITIONED, "CREATE CLUSTERED INDEX [CIX] ON [s].[Plain] ([OrderDate])" + ON_PS)
+    assert table(run(PARTITIONED, INDEX.format("Plain", ON_PS)), "Plain").on is None
+
+
+@pytest.mark.parametrize(
+    ("statement", "says"),
+    [
+        (
+            "ALTER TABLE [s].[Heap] ALTER COLUMN [OrderDate] datetime2(3) NOT NULL",
+            "ALTER COLUMN [OrderDate]: it is the partitioning column of the table",
+        ),
+        (
+            "ALTER TABLE [s].[Heap] DROP COLUMN [OrderDate]",
+            "DROP COLUMN [OrderDate]: it is the partitioning column of the table",
+        ),
+        (
+            "ALTER TABLE [s].[Keyed] ALTER COLUMN [OrderDate] date NULL",
+            "ALTER COLUMN [OrderDate]: it is the partitioning column of the table and index [IX_Keyed]",
+        ),
+        (
+            "ALTER TABLE [s].[Shipped] ALTER COLUMN [ShippedOn] datetime2(0) NOT NULL",
+            "ALTER COLUMN [ShippedOn]: it is the partitioning column of index [IX_Shipped]",
+        ),
+        (
+            "ALTER TABLE [s].[Shipped] DROP COLUMN [ShippedOn]",
+            "DROP COLUMN [ShippedOn]: it is the partitioning column of index [IX_Shipped]",
+        ),
+    ],
+)
+def test_alter_column_and_drop_column_of_a_partitioning_column_are_blocked(statement: str, says: str):
+    # [IX_Shipped] is partitioned on a column that is not in its key: the engine holds the column in the index
+    shipped = (
+        "CREATE TABLE [s].[Shipped] ([Id] int NOT NULL, [ShippedOn] date NOT NULL, "
+        "INDEX [IX_Shipped] NONCLUSTERED ([Id]) ON [PS_ShipYear]([ShippedOn]))"
+    )
+    model = PARTITIONED.add(table(model_of(shipped), "Shipped"))
+    with pytest.raises(ReplayError) as caught:
+        run(model, statement)
+    assert caught.value.message == says
+
+
+def test_a_column_that_is_no_partitioning_column_changes_as_on_any_table_and_so_does_one_that_was():
+    after = run(
+        PARTITIONED,
+        "ALTER TABLE [s].[Heap] ALTER COLUMN [Note] varchar(50) NOT NULL",
+        "ALTER TABLE [s].[Heap] ADD [Added] int NULL",
+        "ALTER TABLE [s].[Heap] DROP COLUMN [Quantity]",
+        "ALTER TABLE [s].[Heap] ADD CONSTRAINT [CK_Heap] CHECK ([Id] > 0)",
+        "ALTER TABLE [s].[Heap] DROP CONSTRAINT [CK_Heap]",
+    )
+    assert [c.name for c in table(after, "Heap").columns] == ["Id", "OrderDate", "Note", "Added"]
+    assert table(after, "Heap").on == PS
+    # an index on a scheme of its own: once it is dropped its partitioning column is a column like any other
+    model = run(
+        PARTITIONED, "CREATE NONCLUSTERED INDEX [IX_Q] ON [s].[Plain] ([Id]) ON [PS_Quantity]([Quantity])"
+    )
+    with pytest.raises(ReplayError, match="it is the partitioning column of index"):
+        run(model, "DROP INDEX [IX_Plain] ON [s].[Plain]", "ALTER TABLE [s].[Plain] DROP COLUMN [Quantity]")
+    freed = run(
+        model,
+        "DROP INDEX [IX_Plain] ON [s].[Plain]",
+        "DROP INDEX [IX_Q] ON [s].[Plain]",
+        "ALTER TABLE [s].[Plain] DROP COLUMN [Quantity]",
+    )
+    assert table(freed, "Plain").column("Quantity") is None
+
+
+def test_a_rename_of_the_partitioning_column_is_followed_by_the_table_its_keys_and_its_indexes():
+    renamed = run(PARTITIONED, "EXEC sys.sp_rename N'[s].[Keyed].[OrderDate]', N'OrderedOn', N'COLUMN'")
+    place = M.Partition("PS_OrderYear", "OrderedOn")
+    owner = table(renamed, "Keyed")
+    assert owner.on == place and owner.on.column == "OrderedOn"
+    assert place_of(renamed, "Keyed", "PK_Keyed") == place and place_of(renamed, "Keyed", "IX_Keyed") == place
+    assert place_of(renamed, "Keyed", "IX_Keyed_Note") == M.ON_PRIMARY
+    assert table(renamed, "Heap").on == PS  # another table keeps its column
+
+
+def test_a_rebuild_changes_the_compression_of_a_partitioned_table_in_both_written_forms():
+    every = "ALTER TABLE [s].[{}] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE)"
+    plain = "ALTER TABLE [s].[{}] REBUILD WITH (DATA_COMPRESSION = PAGE)"
+    heap = run(PARTITIONED, every.format("Heap"))
+    assert table(heap, "Heap").compression == "PAGE" and table(heap, "Heap").on == PS
+    assert heap == run(PARTITIONED, plain.format("Heap"))
+    keyed = run(PARTITIONED, every.format("Keyed"))
+    key = table(keyed, "Keyed").constraint("PK_Keyed")
+    assert isinstance(key, PrimaryKey) and key.options == (("DATA_COMPRESSION", "PAGE"),) and key.on == PS
+    assert keyed == run(PARTITIONED, plain.format("Keyed"))
+
+
+def test_versioning_off_and_on_keep_the_place_of_a_partitioned_temporal_table():
+    versioned = (
+        "CREATE TABLE [s].[Rate] ([Id] int NOT NULL, [Day] date NOT NULL, "
+        "[From] datetime2(7) GENERATED ALWAYS AS ROW START NOT NULL, "
+        "[To] datetime2(7) GENERATED ALWAYS AS ROW END NOT NULL, "
+        "CONSTRAINT [PK_Rate] PRIMARY KEY CLUSTERED ([Id], [Day]) ON [PS_Day]([Day]), "
+        "PERIOD FOR SYSTEM_TIME ([From], [To])) ON [PS_Day]([Day]) "
+        "WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [s].[Rate_History]))"
+    )
+    model = model_of("CREATE SCHEMA [s]", versioned)
+    off = run(model, "ALTER TABLE [s].[Rate] SET (SYSTEM_VERSIONING = OFF)")
+    assert table(off, "Rate").on == M.Partition("PS_Day", "Day")
+    on = "ALTER TABLE [s].[Rate] SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [s].[Rate_History]))"
+    assert run(off, on) == model
+
+
+def test_a_new_partitioned_table_is_created_where_its_statement_says_with_its_keys():
+    created = run(
+        model_of("CREATE SCHEMA [s]"),
+        f"CREATE TABLE [s].[Keyed] ({LINE_COLUMNS}, "
+        f"CONSTRAINT [PK_Keyed] PRIMARY KEY CLUSTERED ([OrderDate], [Id])){ON_PS}",
+        "CREATE NONCLUSTERED INDEX [IX_Keyed] ON [s].[Keyed] ([Quantity])",
+        "CREATE NONCLUSTERED INDEX [IX_Keyed_Note] ON [s].[Keyed] ([Note]) ON [PRIMARY]",
+    )
+    assert table(created, "Keyed") == table(PARTITIONED, "Keyed")

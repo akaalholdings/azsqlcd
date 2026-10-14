@@ -357,6 +357,9 @@ Only this script creates the state schema (A2). `deploy` and `baseline` stop wit
    grant data rights on a schema to the deploy user where migrations hold data batches:
    `GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA::[<schema>] TO [azsqlcd-<project>-<env>-deploy];`
 6. Repeat for every target of every environment.
+7. A repository with partitioned tables: a DBA creates each partition function and partition
+   scheme in every target before the first release that uses it (section 7, "Partitioned
+   tables"). `setup-sql` creates none.
 
 ## 7. Onboarding a database
 
@@ -564,6 +567,81 @@ because the change exists already (`docs/known-gaps.md`, N2-F5). The pipeline ru
 test, so a migration that failed in test was usually applied in dev: add the replacement in the
 pull request of the withdrawal. The message of `CATCHUP_REQUIRED` says the same. The later migrations must not need the withdrawn one:
 `docs/known-gaps.md`, section 13.
+
+### Partitioned tables
+
+Not run on a database yet: `docs/known-gaps.md`, section 14.
+
+A table, a `PRIMARY KEY` or `UNIQUE` constraint and an index can be on a partition scheme. The
+table file names the scheme and the one partitioning column. The tool does not manage the
+partition function or the partition scheme: a DBA creates them, moves their boundaries (`SPLIT`,
+`MERGE`) and switches partitions (`SWITCH`).
+
+The form of the file. The table states `ON [scheme]([column])` after its column list. Every key
+and every index of a partitioned table states its place as the last clause:
+`ON [scheme]([column])` when it is on a scheme, `ON [PRIMARY]` when it is not. `export` writes
+this form; `lint` gives `NF000` for a file that leaves a clause out.
+
+```sql
+CREATE TABLE [sales].[OrderLine] (
+    [OrderLineId] bigint NOT NULL,
+    [OrderDate] date NOT NULL,
+    [ProductId] int NOT NULL,
+    CONSTRAINT [PK_OrderLine] PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId]) ON [PS_OrderYear]([OrderDate]),
+    CONSTRAINT [UQ_OrderLine_Id] UNIQUE NONCLUSTERED ([OrderLineId]) ON [PRIMARY]
+)
+ON [PS_OrderYear]([OrderDate]);
+GO
+CREATE NONCLUSTERED INDEX [IX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId])
+    ON [PS_OrderYear]([OrderDate]);
+```
+
+Rules:
+
+- The partitioning column is a column of the table. A `PRIMARY KEY`, a `UNIQUE` constraint and a
+  unique index on a scheme hold it in their key.
+- A table that is not partitioned has no `ON` clause. An index of it can be on a scheme and then
+  states `ON [scheme]([column])`.
+- One compression for a table or an index. A table whose partitions do not all have the same
+  compression stays unmanaged: `export` lists it with the reason.
+- `STATISTICS_INCREMENTAL = ON` is an option of an index or a key on a scheme.
+
+Before a release. The partition function and the partition scheme must exist, with the name of
+the file, in the database of every environment (dev, sandbox, test, preprod, prod) before the
+release reaches it. If a scheme is missing the plan refuses the release with 22
+`PARTITION_SCHEME_MISSING`, names the scheme, and nothing runs. The plan identity must see
+`sys.partition_schemes`; `setup-sql` grants `VIEW DEFINITION` to it.
+
+A change. `gen` writes the changes of a partitioned table as for any table: columns,
+constraints, indexes, the place of a nonclustered index. `gen` does not move a table. For a
+table that goes on a scheme, off one, to another scheme or to another partitioning column it
+refuses with `PARTITION_CHANGE`, and a person writes the migration: the clustered key or index
+is dropped and created again with the new `ON` clause. The nonclustered keys and indexes stay
+where they are, so each one that the file puts on the scheme is dropped and created too. For
+the table above, when it was not partitioned before:
+
+```sql
+-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: <why the lock is acceptable>
+ALTER TABLE [sales].[OrderLine] DROP CONSTRAINT [PK_OrderLine];
+GO
+-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: <why the lock is acceptable>
+ALTER TABLE [sales].[OrderLine] ADD CONSTRAINT [PK_OrderLine] PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId]) ON [PS_OrderYear]([OrderDate]);
+GO
+DROP INDEX [IX_OrderLine_Product] ON [sales].[OrderLine];
+GO
+-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: <why the lock is acceptable>
+CREATE NONCLUSTERED INDEX [IX_OrderLine_Product] ON [sales].[OrderLine] ([ProductId]) ON [PS_OrderYear]([OrderDate]);
+GO
+```
+
+A heap gets a clustered index with the place, and the index is dropped again. The drop of a
+clustered index or key makes the table a heap and writes every row again, so it needs its allow
+`LONG_LOCK` line too: `lint` cannot see that an index is clustered, `verify` asks for the line
+(`PRF003`) and `gen` writes it. `ON [PRIMARY]` in
+place of the scheme ends the partitioning. Change the table file to the new form in the same
+pull request, then `azsqlcd gen --resum`; `azsqlcd verify` proves that the migration gives the
+model of the file. `docs/runbook.md`, "Partitioned tables", lists the findings. The engine
+writes the rows again and holds a long lock for each build: plan the time.
 
 ## 8. Operation
 

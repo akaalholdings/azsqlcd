@@ -1,0 +1,18 @@
+{
+  "class": "CreateIndex",
+  "schema": "sales",
+  "table": "OrderLine",
+  "index": {
+    "class": "Index",
+    "name": "NCCI_OrderLine",
+    "unique": false,
+    "clustered": false,
+    "columns": [],
+    "included": ["ProductId", "Quantity"],
+    "filter": {"class": "Expression", "tokens": ["[Quantity]", ">", "0"]},
+    "options": [],
+    "columnstore": true,
+    "on": {"class": "Partition", "scheme": "PS_OrderYear", "column": "OrderDate"}
+  },
+  "exec_options": []
+}

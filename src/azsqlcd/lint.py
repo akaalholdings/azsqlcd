@@ -134,9 +134,9 @@ _EXEC = ("EXEC", "EXECUTE")
 _TRAN = ("TRAN", "TRANSACTION")
 _MODEL_HINT = (
     "a model batch is one statement of: CREATE or DROP TABLE, ALTER TABLE ADD / ALTER COLUMN / DROP / "
-    "REBUILD WITH (DATA_COMPRESSION = ...) / SET (SYSTEM_VERSIONING = ...), CREATE or DROP INDEX, "
-    "CREATE, ALTER or DROP SEQUENCE, CREATE or DROP SCHEMA, TYPE, SYNONYM, EXEC sys.sp_rename. DML goes "
-    "in a '-- azsqlcd:data' batch, other DDL in a '-- azsqlcd:raw' batch"
+    "REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = ...) / SET (SYSTEM_VERSIONING = ...), CREATE or "
+    "DROP INDEX, CREATE, ALTER or DROP SEQUENCE, CREATE or DROP SCHEMA, TYPE, SYNONYM, EXEC sys.sp_rename. "
+    "DML goes in a '-- azsqlcd:data' batch, other DDL in a '-- azsqlcd:raw' batch"
 )
 
 # word -> the next words that make the pair forbidden; () = the word alone is forbidden
@@ -241,9 +241,9 @@ _VERSIONING_HINT = (
     "WEEKS | MONTHS | YEARS)); any other table option goes in a '-- azsqlcd:raw' batch"
 )
 _REBUILD_HINT = (
-    "the closed list holds REBUILD WITH (DATA_COMPRESSION = NONE | ROW | PAGE [, ONLINE = ON | OFF] "
-    "[, MAXDOP = <n>] [, SORT_IN_TEMPDB = ON | OFF]), each option once; any other rebuild goes in a "
-    "'-- azsqlcd:raw' batch"
+    "the closed list holds REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE "
+    "[, ONLINE = ON | OFF] [, MAXDOP = <n>] [, SORT_IN_TEMPDB = ON | OFF]), each option once; any other "
+    "rebuild (one partition, a compression for some partitions) goes in a '-- azsqlcd:raw' batch"
 )
 # ALTER COLUMN [c] ADD | DROP <property>: the properties that are read whole, as their words.
 _COLUMN_PROPERTIES = (("ROWGUIDCOL",), ("SPARSE",), ("PERSISTED",), ("NOT", "FOR", "REPLICATION"))
@@ -325,6 +325,10 @@ class BatchFacts:
     needs_allow: tuple[Item, ...]
     findings: tuple[Finding, ...]  # errors and warnings that no allow line removes
     creates_tables: tuple[str, ...]  # '[schema].[name]' of each table that the batch creates
+    # tables whose allow LONG_LOCK the batch may carry and lint cannot ask for: DROP INDEX and DROP
+    # CONSTRAINT of a clustered index or key write every row again, and only the model knows which
+    # item is clustered (the proof asks for the line, gen writes it)
+    may_lock: tuple[str, ...] = ()
 
 
 type TableFileCheck = Callable[[str, str], list[Finding]]
@@ -476,12 +480,14 @@ class _Classifier:
             self.depth.append(depth)
             depth += _is_op(t, "(")
         self.items: list[Item] = []
+        self.may_lock: list[str] = []
         self.findings: list[Finding] = []
         # one finding per token and severity: the first rule that reads it wins. A warning never
         # takes the place of an error on its token (LFP-02).
         self.reported: set[tuple[int, str]] = set()
         self.outside = False  # a rule that reads a statement whole found it outside the closed list
         self.property_verb = -1  # index of ADD or DROP in ALTER COLUMN c ADD | DROP <property>
+        self.rebuild_words = range(0)  # REBUILD [PARTITION = ALL]: read by rebuild(), not by the closed rule
 
     # -------------------------------------------------------------- token access
     def word(self, i: int) -> str:
@@ -864,7 +870,7 @@ class _Classifier:
             action = self.alter_table(mode, created)
         elif w0 == "DROP" and w1 in ("TABLE", "SEQUENCE", "TYPE", "SCHEMA", "INDEX", "SYNONYM"):
             statement = f"DROP {w1}"
-            self.drop(w1)
+            self.drop(w1, mode, created)
         elif w0 in _EXEC:
             procedure, j = _dotted(self.sig, 1)
             if tuple(p.casefold() for p in procedure) in (("sp_rename",), ("sys", "sp_rename")):
@@ -888,6 +894,11 @@ class _Classifier:
             self.unreadable(0)
         elif mode == "tx" and not any(_same(_show(table), other) for other in created):
             self.item("LONG_LOCK", _show(table), 0)
+
+    def maybe_long_lock(self, table: tuple[str, ...], mode: str, created: Collection[str]) -> None:
+        """A drop of an index or a key: LONG_LOCK when it is the clustered one, which the proof decides."""
+        if table and mode == "tx" and not any(_same(_show(table), other) for other in created):
+            self.may_lock.append(_show(table))
 
     def alter_table(self, mode: str, created: Collection[str]) -> int:
         """ALTER TABLE: ADD, ALTER COLUMN, DROP, REBUILD or SET. Returns the index of that action word."""
@@ -919,7 +930,7 @@ class _Classifier:
             else:
                 self.item("ALTER_COLUMN_LOSSY", _show((*table, self.sig[j + 2].value)), 0)
         elif action == "DROP":
-            self.drop_list(table, j + 1)
+            self.drop_list(table, j + 1, mode, created)
         elif action == "REBUILD":
             self.rebuild(table, j, mode, created)
         elif action == "SET":
@@ -1048,13 +1059,19 @@ class _Classifier:
         self.ends_at(j + 3 + len(words))
 
     def rebuild(self, table: tuple[str, ...], j: int, mode: str, created: Collection[str]) -> None:
-        """ALTER TABLE t REBUILD WITH (DATA_COMPRESSION = NONE | ROW | PAGE, ...) with REBUILD at j,
-        as the whole statement. The engine writes every row again: LONG_LOCK in a tx migration."""
-        end = self.close(j + 2) if self.word(j + 1) == "WITH" else None
-        if end is None or not self.rebuild_options(j + 3, end):
+        """ALTER TABLE t REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE, ...)
+        with REBUILD at j, as the whole statement. The engine writes every row again: LONG_LOCK in a
+        tx migration. PARTITION = ALL is the form for a partitioned table; one partition
+        (PARTITION = <n>) is an operation on the data and is outside the list."""
+        k = j + 1  # index of WITH
+        if self.word(k) == "PARTITION" and self.op(k + 1, "=") and self.word(k + 2) == "ALL":
+            k += 3
+        end = self.close(k + 1) if self.word(k) == "WITH" else None
+        if end is None or not self.rebuild_options(k + 2, end):
             self.outside = True
             self.report("MODEL_STATEMENT", j, f"ALTER TABLE ... REBUILD: {_REBUILD_HINT}")
             return
+        self.rebuild_words = range(j, k)
         self.long_lock(table, mode, created)
         self.ends_at(end)
 
@@ -1121,7 +1138,7 @@ class _Classifier:
                     "alter it",
                 )
 
-    def drop_list(self, table: tuple[str, ...], j: int) -> None:
+    def drop_list(self, table: tuple[str, ...], j: int, mode: str, created: Collection[str]) -> None:
         """ALTER TABLE t DROP <element>, ...; CONSTRAINT is the default. An element is
         [COLUMN | CONSTRAINT] [IF EXISTS] name, a constraint name with WITH (...) after it, or
         PERIOD FOR SYSTEM_TIME. After an element only ',', one ';' or the end has a place: what the
@@ -1153,6 +1170,7 @@ class _Classifier:
                     self.report(
                         "DROP_CONSTRAINT", j, f"DROP CONSTRAINT {name}: the rule is no longer enforced"
                     )
+                    self.maybe_long_lock(table, mode, created)
                     # DROP CONSTRAINT [pk] WITH (ONLINE = ON, MAXDOP = 1): the options of a clustered key
                     options = self.close(j + 2) if self.word(j + 1) == "WITH" else None
                     if options is not None:
@@ -1162,10 +1180,13 @@ class _Classifier:
                 return
             j = after + 1
 
-    def drop(self, kind: str) -> None:
+    def drop(self, kind: str, mode: str, created: Collection[str]) -> None:
         """DROP TABLE | SEQUENCE | TYPE | SCHEMA | INDEX | SYNONYM [IF EXISTS] name, ..."""
         if kind == "INDEX":
             self.report("DROP_INDEX", 0, "DROP INDEX: check that no query needs the index")
+            _, j = _dotted(self.sig, 4 if self.word(2) == "IF" and self.word(3) == "EXISTS" else 2)
+            if self.word(j) == "ON":
+                self.maybe_long_lock(_dotted(self.sig, j + 1)[0], mode, created)
         if kind in ("INDEX", "SYNONYM"):
             return
         j = 4 if self.word(2) == "IF" and self.word(3) == "EXISTS" else 2
@@ -1235,7 +1256,7 @@ class _Classifier:
         typed = {"ADD": ("ADD", ","), "ALTER": ("COLUMN",)}.get(act, ())
         state, opener = ("name", "EXEC") if rename else ("", "")
         for j in range(1, len(self.sig)):
-            if self.depth[j] > 0 or (j == action and act == "REBUILD"):
+            if self.depth[j] > 0 or j in self.rebuild_words:
                 continue
             t = self.sig[j]
             if t.kind == "op":
@@ -1315,16 +1336,21 @@ def classify_batch(
         c.online_build()
     else:
         c.resumable()
-    return BatchFacts(statement, tuple(c.items), tuple(c.findings), creates)
+    return BatchFacts(statement, tuple(c.items), tuple(c.findings), creates, tuple(c.may_lock))
 
 
 # ------------------------------------------------------------------ allow lines
 def _allow_findings(path: str, batch: chain.MigrationBatch, facts: BatchFacts) -> list[Finding]:
     """Each item needs an allow line of its batch with the same code and object; each allow line
-    needs an item and a reason."""
+    needs an item and a reason. A LONG_LOCK line on a table of facts.may_lock is used: the proof
+    decides it."""
     allows = [d for d in batch.directives if isinstance(d, chain.Allow)]
     out: list[Finding] = []
-    used: set[int] = set()
+    used = {
+        n
+        for n, a in enumerate(allows)
+        if a.code == "LONG_LOCK" and any(_same(a.object, table) for table in facts.may_lock)
+    }
     for item in facts.needs_allow:
         matching = [n for n, a in enumerate(allows) if a.code == item.code and _same(a.object, item.object)]
         used.update(matching)

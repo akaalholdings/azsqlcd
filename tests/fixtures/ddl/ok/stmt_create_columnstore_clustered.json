@@ -2,6 +2,6 @@
   "class": "CreateIndex",
   "schema": "dw",
   "table": "FactSale",
-  "index": {"class": "Index", "name": "CCI_FactSale", "unique": false, "clustered": true, "columns": [], "included": [], "filter": null, "options": [], "columnstore": true},
+  "index": {"class": "Index", "name": "CCI_FactSale", "unique": false, "clustered": true, "columns": [], "included": [], "filter": null, "options": [], "columnstore": true, "on": "PRIMARY"},
   "exec_options": [["MAXDOP", "2"], ["ONLINE", "ON"]]
 }

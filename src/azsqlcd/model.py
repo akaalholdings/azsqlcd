@@ -21,7 +21,8 @@ Public API:
     CreateSynonym, DropSynonym, CreateTable, DropTable, AddColumn, AlterColumn, DropColumn,
     AddConstraint, DropConstraint, CreateIndex, DropIndex, Rename, RenameKind,
     SetSystemVersioning, MaskColumn, UnmaskColumn, AlterColumnProperty, RebuildTable, Operation,
-    COLUMN_PROPERTIES, TABLE_COMPRESSIONS, COLUMNSTORE_OPTION_VALUES
+    COLUMN_PROPERTIES, TABLE_COMPRESSIONS, COLUMNSTORE_OPTION_VALUES,
+    Partition, ON_PRIMARY, Place, place_on
 
 Wider table coverage: Identity.not_for_replication, Check.not_for_replication,
 ForeignKey.not_for_replication, Column.rowguidcol, Column.sparse, Table.compression (the
@@ -39,6 +40,19 @@ sys.masked_columns.masking_function, for example default(), email(), random(1, 1
 partial(1, "XXXX", 0). That is the text between the quotes of the statement, a single quote still
 written twice (the engine stores it so). It is compared as text, letter case included, and it is
 written to the canonical form only when the column has a mask.
+
+Partitioned tables and indexes: Table.on, PrimaryKey.on, Unique.on and Index.on hold the place of
+the rows of a table and of each key and index. A Partition is ON [scheme]([column]): the NAME of
+the partition scheme and the one partitioning column. The scheme and its function are not objects
+of the model; a DBA owns them and their boundaries. Table.on is the place of the heap or of the
+clustered key or index, and None when the table is not partitioned. A key or an index holds:
+  * on a table that is not partitioned: None (the one filegroup, [PRIMARY]) or a Partition;
+  * on a partitioned table: a Partition or ON_PRIMARY, never None. The engine puts an index that
+    states no place on the scheme of the table, so a file that leaves the place out would not say
+    what the catalog holds. The clustered key or index is the table: it has the place of the table.
+An operation holds what its statement states: there None is "no ON clause", and the replay gives
+the key or index the place that the engine gives it (place_on). The fields are written to the
+canonical form only when they are not None, so an object that is not partitioned keeps its JSON.
 """
 
 from __future__ import annotations
@@ -48,7 +62,7 @@ import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Final, Literal, cast
 
 from azsqlcd import names
 from azsqlcd.lex import TRIVIA, LexError, tokenize
@@ -132,6 +146,7 @@ INDEX_OPTION_VALUES: Mapping[str, tuple[str, ...] | None] = {
     "IGNORE_DUP_KEY": ("ON", "OFF"),
     "OPTIMIZE_FOR_SEQUENTIAL_KEY": ("ON", "OFF"),
     "PAD_INDEX": ("ON", "OFF"),
+    "STATISTICS_INCREMENTAL": ("ON", "OFF"),  # only with an index on a partition scheme
     "STATISTICS_NORECOMPUTE": ("ON", "OFF"),
     "XML_COMPRESSION": ("ON", "OFF"),
 }
@@ -439,31 +454,86 @@ class KeyColumn(_Node):
 
 
 @dataclass(frozen=True, eq=False)
+class Partition(_Node):
+    """ON [scheme]([column]): a partition scheme, by name, and the one partitioning column."""
+
+    scheme: str
+    column: str
+
+    def __post_init__(self) -> None:
+        if not self.scheme or not self.column:
+            raise ValueError("a partition scheme has a name and its partitioning column has a name")
+
+
+# ON [PRIMARY] of a key or an index of a partitioned table: it is not on a partition scheme.
+ON_PRIMARY: Final = "PRIMARY"
+Place = Partition | Literal["PRIMARY"]
+
+
+def place_on(table_on: Partition | None, written: Place | None) -> Place | None:
+    """The place, as a table of the model holds it, of a key or an index whose statement states
+    `written` (None = no ON clause) on a table at `table_on`.
+
+    The rule of the engine: without an ON clause the index goes where the table is, so on a
+    partitioned table it is on the scheme of the table. ON [PRIMARY] is a state of its own only on
+    a partitioned table; on any other table it says what no clause says.
+    """
+    if written is None:
+        return table_on
+    if written == ON_PRIMARY:
+        return ON_PRIMARY if table_on is not None else None
+    return written
+
+
+def _labelled(kind: str, name: str | None) -> str:
+    return f"{kind} {names.quote(name)}" if name else kind  # a key of a table type has no name
+
+
+def _check_place(on: Place | None, options: Options, kind: str, name: str | None) -> None:
+    if on is None and "STATISTICS_INCREMENTAL" not in dict(options):
+        return
+    where = _labelled(kind, name)
+    if on is not None and on != ON_PRIMARY and not isinstance(on, Partition):
+        raise ValueError(f"{where}: the place is ON [scheme]([column]), ON [PRIMARY] or nothing, not {on!r}")
+    if "STATISTICS_INCREMENTAL" in dict(options) and not isinstance(on, Partition):
+        raise ValueError(
+            f"{where}: STATISTICS_INCREMENTAL goes with an index on a partition scheme: "
+            "state ON [scheme]([column])"
+        )
+
+
+@dataclass(frozen=True, eq=False)
 class PrimaryKey(_Node):
     _unordered: ClassVar[frozenset[str]] = frozenset({"options"})
-    _exact: ClassVar[frozenset[str]] = frozenset({"options"})
+    _exact: ClassVar[frozenset[str]] = frozenset({"options", "on"})
+    _sparse: ClassVar[frozenset[str]] = frozenset({"on"})
 
     name: str | None  # None only inside a table type
     clustered: bool
     columns: tuple[KeyColumn, ...]
     options: Options = ()  # declared options from INDEX_OPTION_VALUES, sorted by name
+    on: Place | None = None  # the module text says what None is
 
     def __post_init__(self) -> None:
         _check_options(self.options)
+        _check_place(self.on, self.options, "PRIMARY KEY", self.name)
 
 
 @dataclass(frozen=True, eq=False)
 class Unique(_Node):
     _unordered: ClassVar[frozenset[str]] = frozenset({"options"})
-    _exact: ClassVar[frozenset[str]] = frozenset({"options"})
+    _exact: ClassVar[frozenset[str]] = frozenset({"options", "on"})
+    _sparse: ClassVar[frozenset[str]] = frozenset({"on"})
 
     name: str | None  # None only inside a table type
     clustered: bool
     columns: tuple[KeyColumn, ...]
     options: Options = ()
+    on: Place | None = None
 
     def __post_init__(self) -> None:
         _check_options(self.options)
+        _check_place(self.on, self.options, "UNIQUE", self.name)
 
 
 @dataclass(frozen=True, eq=False)
@@ -509,8 +579,8 @@ class Index(_Node):
     the table, so it has no list and no filter. Its options come from COLUMNSTORE_OPTION_VALUES."""
 
     _unordered: ClassVar[frozenset[str]] = frozenset({"included", "options"})
-    _exact: ClassVar[frozenset[str]] = frozenset({"options"})
-    _sparse: ClassVar[frozenset[str]] = frozenset({"columnstore"})
+    _exact: ClassVar[frozenset[str]] = frozenset({"options", "on"})
+    _sparse: ClassVar[frozenset[str]] = frozenset({"columnstore", "on"})
 
     name: str
     unique: bool
@@ -520,12 +590,15 @@ class Index(_Node):
     filter: Expression | None = None
     options: Options = ()  # declared options from INDEX_OPTION_VALUES, sorted by name
     columnstore: bool = False
+    on: Place | None = None
 
     def __post_init__(self) -> None:
         if not self.columnstore:
             _check_options(self.options)
+            _check_place(self.on, self.options, "index", self.name)
             return
         _check_options(self.options, COLUMNSTORE_OPTION_VALUES)
+        _check_place(self.on, self.options, "index", self.name)
         where = f"columnstore index {self.name!r}"
         if self.unique or any(c.descending for c in self.columns):
             raise ValueError(f"{where} cannot be UNIQUE and its ORDER columns cannot be DESC")
@@ -645,6 +718,15 @@ class _Tabular(_SchemaObject):
         keys = [c for c in self.constraints if isinstance(c, PrimaryKey | Unique) and c.clustered]
         return next(iter([*keys, *(i for i in self.indexes if i.clustered)]), None)
 
+    def placed_items(self) -> list[tuple[str, PrimaryKey | Unique | Index]]:
+        """(label, item) of every key and index: what has a place of its own."""
+        found: list[tuple[str, PrimaryKey | Unique | Index]] = []
+        for constraint in self.constraints:
+            if isinstance(constraint, PrimaryKey | Unique):
+                kind = "PRIMARY KEY" if isinstance(constraint, PrimaryKey) else "UNIQUE"
+                found.append((_labelled(kind, constraint.name), constraint))
+        return found + [(_labelled("index", i.name), i) for i in self.indexes]
+
 
 @dataclass(frozen=True, eq=False)
 class Temporal(_Node):
@@ -686,13 +768,16 @@ def _check_retention(retention: tuple[int, str] | None) -> None:
 class Table(_Tabular):
     kind: ClassVar[str] = "TABLE"
     _exact: ClassVar[frozenset[str]] = frozenset({"compression"})
-    _sparse: ClassVar[frozenset[str]] = frozenset({"temporal", "compression"})
+    _sparse: ClassVar[frozenset[str]] = frozenset({"temporal", "compression", "on"})
     _period_needs_versioning: ClassVar[bool] = True
 
     temporal: Temporal | None = None  # None = not system-versioned
     # DATA_COMPRESSION of the heap: ROW or PAGE; None = not compressed. A table with a clustered
     # key or index states its compression there, as an option.
     compression: str | None = None
+    # The partition scheme and the partitioning column of the heap or of the clustered key or
+    # index; None = not partitioned.
+    on: Partition | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -709,6 +794,7 @@ class Table(_Tabular):
                     f"{where}: DATA_COMPRESSION of the table is the compression of a heap; state it on "
                     f"the clustered key or index {names.quote(clustered.name or '')}"
                 )
+        self._check_places(where)
         generated = [c for c in self.columns if c.generated is not None]
         if self.temporal is None:
             if generated and self._period_needs_versioning:
@@ -738,6 +824,54 @@ class Table(_Tabular):
             raise ValueError(f"{where}: only the two period columns can be GENERATED ALWAYS")
         if not any(isinstance(c, PrimaryKey) for c in self.constraints):
             raise ValueError(f"{where}: a system-versioned table needs a PRIMARY KEY")
+
+    def _check_places(self, where: str) -> None:
+        """The places of the table, its keys and its indexes: the states that the module text
+        lists, and what the engine requires of a partitioning column."""
+        on = self.on
+        if on is not None and not isinstance(on, Partition):
+            raise ValueError(f"{where}: the place of a table is a partition scheme, or None for [PRIMARY]")
+        if on is not None:
+            self._check_partition(where, "the table", on, None)
+        clustered = self.clustered_item()
+        for label, item in self.placed_items():
+            if on is None and item.on == ON_PRIMARY:
+                raise ValueError(
+                    f"{where}: {label} states ON [PRIMARY] and the table is not partitioned: "
+                    "it has no ON clause"
+                )
+            if on is not None and item.on is None:
+                raise ValueError(
+                    f"{where}: {label} of a partitioned table states its place: "
+                    "ON [scheme]([column]) or ON [PRIMARY]"
+                )
+            if item is clustered and item.on != on:
+                raise ValueError(
+                    f"{where}: {label} is clustered: it is the table and has the place of the table "
+                    "(state the same ON clause on CREATE TABLE and on it)"
+                )
+            if isinstance(item.on, Partition):
+                unique = not isinstance(item, Index) or item.unique
+                self._check_partition(where, label, item.on, item.columns if unique else None)
+
+    def _check_partition(
+        self, where: str, label: str, on: Partition, unique_key: tuple[KeyColumn, ...] | None
+    ) -> None:
+        shown = names.quote(on.column)
+        column = self.column(on.column)
+        if column is None:
+            raise ValueError(
+                f"{where}: the partitioning column {shown} of {label} is not a column of the table"
+            )
+        if column.computed is not None and not column.computed.persisted:
+            raise ValueError(
+                f"{where}: the partitioning column of {label}: computed column {shown} must be PERSISTED"
+            )
+        # the engine refuses a unique index whose key does not hold the partitioning column (error 1908)
+        if unique_key is not None and all(fold(k.name) != fold(on.column) for k in unique_key):
+            raise ValueError(
+                f"{where}: {label} is unique: the partitioning column {shown} must be one of its key columns"
+            )
 
 
 @dataclass(frozen=True, eq=False)
@@ -775,6 +909,8 @@ class TableType(_Tabular):
             raise ValueError(f"{kind} cannot have NOT FOR REPLICATION")
         if any(i.columnstore for i in self.indexes):
             raise ValueError(f"{kind} cannot have a columnstore index")
+        if any(item.on is not None for _, item in self.placed_items()):
+            raise ValueError(f"{kind}: a table type cannot be on a partition scheme and states no ON clause")
         if any(c.masked is not None for c in self.columns):
             where = f"TYPE {names.qualified(self.schema, self.name)}"
             raise ValueError(f"{where}: this version has no masked column in a table type")
@@ -792,6 +928,7 @@ _MODEL_CLASSES: dict[str, type] = {
         Computed,
         Column,
         KeyColumn,
+        Partition,
         PrimaryKey,
         Unique,
         ForeignKey,
@@ -1071,15 +1208,18 @@ class AlterColumnProperty(_Node):
 
 @dataclass(frozen=True, eq=False)
 class RebuildTable(_Node):
-    """ALTER TABLE ... REBUILD WITH (DATA_COMPRESSION = NONE | ROW | PAGE)."""
+    """ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE)."""
 
     _unordered: ClassVar[frozenset[str]] = frozenset({"exec_options"})
     _exact: ClassVar[frozenset[str]] = frozenset({"compression", "exec_options"})
+    _sparse: ClassVar[frozenset[str]] = frozenset({"all_partitions"})
 
     schema: str
     table: str
     compression: str  # NONE | ROW | PAGE: always written
     exec_options: Options = ()  # ONLINE, MAXDOP, SORT_IN_TEMPDB; not part of the model
+    # PARTITION = ALL is written: the form for a partitioned table. The model changes the same way.
+    all_partitions: bool = False
 
     def __post_init__(self) -> None:
         if self.compression not in ("NONE", *TABLE_COMPRESSIONS):

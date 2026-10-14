@@ -1,0 +1,2 @@
+PARTITION_CHANGE TABLE:[sales].[OrderLine]
+PARTITION_CHANGE TABLE:[sales].[OrderLineStage]

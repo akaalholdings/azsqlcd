@@ -8,6 +8,7 @@ import pytest
 from azsqlcd import model as masking
 from azsqlcd import names
 from azsqlcd.model import (
+    ON_PRIMARY,
     AddConstraint,
     AliasType,
     AlterColumn,
@@ -24,6 +25,7 @@ from azsqlcd.model import (
     Index,
     KeyColumn,
     Model,
+    Partition,
     PrimaryKey,
     Rename,
     Schema,
@@ -37,6 +39,7 @@ from azsqlcd.model import (
     Unique,
     UnversionedTable,
     fold,
+    place_on,
 )
 
 
@@ -1001,3 +1004,243 @@ def test_a_retention_is_a_whole_number_from_1_that_the_catalog_can_hold():
     assert Temporal("a", "b", "s", "h", (2147483647, "DAYS")).retention == (2147483647, "DAYS")
     with pytest.raises(ValueError, match="1 <= n <= 2147483647"):
         Temporal("a", "b", "s", "h", (2147483648, "DAYS"))
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+PS = Partition("PS_OrderYear", "OrderDate")
+LINE_COLUMNS = (
+    Column("OrderLineId", TypeRef("bigint"), False),
+    Column("OrderDate", TypeRef("date"), False),
+    Column("Quantity", TypeRef("int"), False),
+)
+
+
+def order_line(**changes: Any) -> Table:
+    return Table("sales", "OrderLine", **{"columns": LINE_COLUMNS, "on": PS, **changes})
+
+
+def test_an_object_that_is_not_partitioned_keeps_its_canonical_json_and_a_partitioned_one_holds_its_place():
+    # the hash of every object that existed before this feature must not move
+    plain = Table(
+        "sales",
+        "OrderLine",
+        LINE_COLUMNS,
+        (PrimaryKey("PK_OrderLine", True, (KeyColumn("OrderLineId"),)),),
+        (Index("IX_OrderLine_Quantity", False, False, (KeyColumn("Quantity"),)),),
+    )
+    assert '"on"' not in Model([plain]).to_canonical_json()
+    assert "all_partitions" not in Model([plain]).to_canonical_json()
+    placed = order_line(
+        constraints=(PrimaryKey("PK_OrderLine", False, (KeyColumn("OrderLineId"),), on=ON_PRIMARY),),
+        indexes=(Index("IX_OrderLine_Quantity", False, False, (KeyColumn("Quantity"),), on=PS),),
+    )
+    model = Model([placed])
+    text = model.to_canonical_json()
+    # the names of the scheme and of the column are names: case-folded; PRIMARY is a keyword: exact
+    assert '"on":{"class":"Partition","column":"orderdate","scheme":"ps_orderyear"}' in text
+    assert '"on":"PRIMARY"' in text
+    again = Model.from_canonical_json(text)
+    assert again == model and again.to_canonical_json() == text
+
+
+def test_the_place_takes_part_in_equality_and_a_difference_names_it():
+    aligned = Index("IX_OrderLine_Quantity", False, False, (KeyColumn("Quantity"),), on=PS)
+    base = order_line(indexes=(aligned,))
+    assert base == order_line(indexes=(aligned,), on=Partition("ps_orderyear", "ORDERDATE"))
+
+    def paths(other: Table) -> list[str]:
+        return [path for _, path in Model([base]).diff_paths(Model([other]))]
+
+    assert paths(order_line(indexes=(aligned,), on=Partition("PS_Other", "OrderDate"))) == ["on.scheme"]
+    assert paths(order_line(indexes=(dataclasses.replace(aligned, on=ON_PRIMARY),))) == [
+        "indexes[ix_orderline_quantity].on"
+    ]
+    other_column = Partition("PS_OrderYear", "Quantity")
+    assert paths(order_line(indexes=(dataclasses.replace(aligned, on=other_column),))) == [
+        "indexes[ix_orderline_quantity].on.column"
+    ]
+    plain = Table("sales", "OrderLine", LINE_COLUMNS)
+    assert paths(plain) == ["indexes[ix_orderline_quantity] (absent in other)", "on"]
+
+
+def test_place_on_gives_the_place_that_the_engine_gives_an_index_written_with_that_on_clause():
+    # no ON clause: the place of the table (an aligned index on a partitioned table)
+    assert place_on(PS, None) == PS
+    assert place_on(None, None) is None
+    # ON [PRIMARY]: a state of its own only on a partitioned table; elsewhere it is the absence of a clause
+    assert place_on(PS, ON_PRIMARY) == ON_PRIMARY
+    assert place_on(None, ON_PRIMARY) is None
+    other = Partition("PS_Other", "Quantity")
+    assert place_on(PS, other) == other and place_on(None, other) == other
+
+
+UNIQUE_ON_SCHEME = "is unique: the partitioning column [OrderDate] must be one of its key columns"
+
+
+@pytest.mark.parametrize(
+    ("build", "says"),
+    [
+        (
+            lambda: order_line(on=Partition("PS_OrderYear", "Missing")),
+            "[Missing] of the table is not a column",
+        ),
+        (lambda: order_line(on=ON_PRIMARY), "the place of a table is a partition scheme"),
+        (lambda: Partition("", "OrderDate"), "has a name"),
+        (lambda: Partition("PS_OrderYear", ""), "has a name"),
+        (lambda: Index("IX", False, False, (KeyColumn("a"),), on="SECONDARY"), "ON [scheme]([column])"),
+        (
+            lambda: order_line(
+                constraints=(PrimaryKey("PK_OrderLine", False, (KeyColumn("OrderLineId"),), on=PS),)
+            ),
+            "PRIMARY KEY [PK_OrderLine] " + UNIQUE_ON_SCHEME,
+        ),
+        (
+            lambda: order_line(constraints=(Unique("UQ_OrderLine", False, (KeyColumn("Quantity"),), on=PS),)),
+            "UNIQUE [UQ_OrderLine] " + UNIQUE_ON_SCHEME,
+        ),
+        (
+            lambda: order_line(
+                indexes=(Index("UX_OrderLine", True, False, (KeyColumn("Quantity"),), on=PS),)
+            ),
+            "index [UX_OrderLine] " + UNIQUE_ON_SCHEME,
+        ),
+        (
+            # an included column is not a key column
+            lambda: order_line(
+                indexes=(Index("UX", True, False, (KeyColumn("Quantity"),), ("OrderDate",), on=PS),)
+            ),
+            UNIQUE_ON_SCHEME,
+        ),
+        (
+            lambda: order_line(
+                indexes=(
+                    Index("IX", False, False, (KeyColumn("Quantity"),), on=Partition("PS_Other", "Gone")),
+                )
+            ),
+            "[Gone] of index [IX] is not a column",
+        ),
+        (
+            lambda: order_line(indexes=(Index("IX", False, False, (KeyColumn("Quantity"),)),)),
+            "index [IX] of a partitioned table states its place: ON [scheme]([column]) or ON [PRIMARY]",
+        ),
+        (
+            lambda: Table(
+                "sales",
+                "OrderLine",
+                LINE_COLUMNS,
+                indexes=(Index("IX", False, False, (KeyColumn("Quantity"),), on=ON_PRIMARY),),
+            ),
+            "index [IX] states ON [PRIMARY] and the table is not partitioned",
+        ),
+        (
+            lambda: order_line(
+                indexes=(Index("CIX", False, True, (KeyColumn("OrderDate"),), on=ON_PRIMARY),)
+            ),
+            "index [CIX] is clustered: it is the table and has the place of the table",
+        ),
+        (
+            lambda: Table(
+                "sales",
+                "OrderLine",
+                LINE_COLUMNS,
+                indexes=(Index("CIX", False, True, (KeyColumn("OrderDate"),), on=PS),),
+            ),
+            "index [CIX] is clustered: it is the table and has the place of the table",
+        ),
+        (
+            lambda: order_line(
+                columns=(*LINE_COLUMNS, Column("Year", None, None, computed=Computed(expr("(1)")))),
+                on=Partition("PS_OrderYear", "Year"),
+            ),
+            "computed column [Year] must be PERSISTED",
+        ),
+        (
+            lambda: Index("IX", False, False, (KeyColumn("a"),), options=(("STATISTICS_INCREMENTAL", "ON"),)),
+            "STATISTICS_INCREMENTAL goes with an index on a partition scheme",
+        ),
+        (
+            lambda: PrimaryKey(
+                "PK", True, (KeyColumn("a"),), (("STATISTICS_INCREMENTAL", "ON"),), on=ON_PRIMARY
+            ),
+            "STATISTICS_INCREMENTAL goes with an index on a partition scheme",
+        ),
+        (
+            lambda: Index(
+                "I", False, True, (), options=(("STATISTICS_INCREMENTAL", "ON"),), columnstore=True, on=PS
+            ),
+            "index option",
+        ),
+        (
+            lambda: TableType(
+                "s", "L", (Column("a", NUMBER, False),), (PrimaryKey(None, True, (KeyColumn("a"),), on=PS),)
+            ),
+            "cannot be on a partition scheme",
+        ),
+        (
+            lambda: TableType(
+                "s",
+                "L",
+                (Column("a", NUMBER, False),),
+                indexes=(Index("IX", False, False, (KeyColumn("a"),), on=ON_PRIMARY),),
+            ),
+            "cannot be on a partition scheme",
+        ),
+    ],
+)
+def test_a_place_that_the_engine_refuses_or_that_has_no_canonical_form_is_a_value_error(build, says: str):
+    for char in "[]()":
+        says = says.replace(char, "\\" + char)
+    with pytest.raises(ValueError, match=says):
+        build()
+
+
+def test_a_partitioned_table_holds_aligned_and_other_indexes_and_keys_with_the_column_in_a_unique_key():
+    other = Partition("PS_Quantity", "Quantity")
+    table = order_line(
+        constraints=(
+            PrimaryKey("PK_OrderLine", True, (KeyColumn("OrderLineId"), KeyColumn("OrderDate")), on=PS),
+            Unique("UQ_OrderLine", False, (KeyColumn("OrderLineId"),), on=ON_PRIMARY),
+        ),
+        indexes=(
+            # not unique: the engine adds the partitioning column to the index by itself
+            Index(
+                "IX_Aligned",
+                False,
+                False,
+                (KeyColumn("Quantity"),),
+                options=(("STATISTICS_INCREMENTAL", "ON"),),
+                on=PS,
+            ),
+            Index("UX_Other", True, False, (KeyColumn("Quantity"), KeyColumn("OrderLineId")), on=other),
+            Index("NCCI", False, False, (), ("Quantity",), columnstore=True, on=PS),
+        ),
+    )
+    assert table.on == PS and table.clustered_item() == table.constraints[0]
+    # a table that is not partitioned can hold an index that is
+    plain = Table(
+        "sales",
+        "OrderLine",
+        LINE_COLUMNS,
+        indexes=(Index("IX", False, False, (KeyColumn("Quantity"),), on=PS),),
+    )
+    assert plain.on is None and plain.indexes[0].on == PS
+    # a clustered columnstore index is the table too
+    cci = order_line(indexes=(Index("CCI", False, True, (), columnstore=True, on=PS),))
+    assert cci.clustered_item() == cci.indexes[0]
+    # a persisted computed column can be the partitioning column
+    year = Column("Year", None, False, computed=Computed(expr("(year([OrderDate]))"), persisted=True))
+    assert order_line(columns=(*LINE_COLUMNS, year), on=Partition("PS_OrderYear", "Year")).on is not None
+
+
+def test_a_rebuild_of_all_partitions_is_another_statement_than_a_rebuild_and_the_same_change():
+    plain = masking.RebuildTable("s", "T", "PAGE")
+    every = masking.RebuildTable("s", "T", "PAGE", all_partitions=True)
+    assert plain != every and not plain.all_partitions
+
+
+def test_statistics_incremental_is_an_index_option_of_the_model():
+    assert masking.INDEX_OPTION_VALUES["STATISTICS_INCREMENTAL"] == ("ON", "OFF")
+    assert "STATISTICS_INCREMENTAL" not in masking.COLUMNSTORE_OPTION_VALUES
+    index = Index("IX", False, False, (KeyColumn("a"),), options=(("STATISTICS_INCREMENTAL", "OFF"),), on=PS)
+    assert index != dataclasses.replace(index, options=(("STATISTICS_INCREMENTAL", "ON"),))
+    assert index != dataclasses.replace(index, options=())

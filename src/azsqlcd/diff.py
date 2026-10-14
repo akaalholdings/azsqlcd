@@ -29,6 +29,12 @@ Rules:
     the step of ALTER COLUMN. The engine removes the mask with every ALTER COLUMN that states a
     data type, so for one column the order is DROP MASKED, ALTER COLUMN, ADD MASKED: the mask
     is written again after a type or nullability change.
+  * Partition schemes. A table is never moved: another scheme, another partitioning column, a
+    table that goes on a scheme or off one, and ALTER COLUMN of a partitioning column are the
+    refusal PARTITION_CHANGE; a person writes the rebuild and the replay proves it. All else is
+    written as on any table, each key and index with the ON clause of the head revision: a
+    nonclustered key or index that changes its place is dropped and created like any other that
+    differs, and a compression change of a partitioned heap is REBUILD PARTITION = ALL.
   * The generator refuses what the replay would block. The dependants of an ALTER COLUMN are
     found with replay.column_dependants on the model as it is when ALTER COLUMN runs; a longer
     varchar, nvarchar or varbinary passes under UNIQUE, CHECK and an index (replay.only_widens). Before
@@ -99,7 +105,7 @@ from azsqlcd.model import (
     UnversionedTable,
     fold,
 )
-from azsqlcd.replay import ReplayError, apply, column_dependants, only_widens, replay
+from azsqlcd.replay import ReplayError, apply, column_dependants, only_widens, partitioned_on, replay
 
 # Design (b), generation step 2: the fixed order. The design does not place ALTER SEQUENCE, DROP
 # SYNONYM and DROP SCHEMA; a schema goes last because every object in it must go first. A table
@@ -184,6 +190,17 @@ REFUSALS: Mapping[str, str] = {
         "State DATA_COMPRESSION on the clustered key or index in the table file: NONE to remove the "
         "compression, ROW or PAGE to keep one. The engine gives a clustered index that states none the "
         "compression of the heap that it is built on."
+    ),
+    "PARTITION_CHANGE": (
+        "Hand-write the migration; verify proves it. The generator writes no statement that moves a table: "
+        "on to a partition scheme, off one, to another scheme or to another partitioning column, and it "
+        "writes no ALTER COLUMN or DROP COLUMN of a partitioning column. A table moves when its clustered "
+        "key or index is created with the new place. A table that has one: DROP INDEX or DROP CONSTRAINT, "
+        "then CREATE CLUSTERED INDEX or ADD CONSTRAINT with ON [scheme]([column]), or with ON [PRIMARY] to "
+        "end the partitioning. A heap: CREATE CLUSTERED INDEX ... ON [scheme]([column]), then DROP INDEX. "
+        "A partitioning column: move the table or the index off the scheme, change the column, move it "
+        "back. Each of these statements writes every row again and holds a long lock (allow LONG_LOCK). "
+        "The partition scheme must exist in the database: a DBA creates it, the tool does not."
     ),
     "RENAME_INVALID": (
         "Write KIND:[schema].[table].[old]=[new] with the name at the base revision and the name at the "
@@ -331,7 +348,7 @@ class _TableChange:
         if head.temporal is not None and not any(isinstance(c, PrimaryKey) for c in constraints):
             # The model holds no temporal table without its key. diff() refuses this change
             # (TEMPORAL_CHANGE); until then the table stands here with its columns and no versioning.
-            return UnversionedTable(head.schema, head.name, head.columns, constraints, indexes)
+            return UnversionedTable(head.schema, head.name, head.columns, constraints, indexes, on=head.on)
         return replace(head, constraints=constraints, indexes=indexes)
 
     def drops_key(self, columns: Iterable[str]) -> bool:
@@ -611,7 +628,10 @@ def _heap_compression(change: _TableChange, out: _Out) -> RebuildTable | None:
         before = _heap_before(change)
         if before == head.compression:
             return None
-        return RebuildTable(head.schema, head.name, head.compression or "NONE")
+        # PARTITION = ALL: the form of the statement for a partitioned table
+        return RebuildTable(
+            head.schema, head.name, head.compression or "NONE", all_partitions=head.on is not None
+        )
     new = any(clustered is item for item in (*change.added, *change.added_indexes))
     columnstore = isinstance(clustered, Index) and clustered.columnstore
     if new and not columnstore and "DATA_COMPRESSION" not in dict(clustered.options):
@@ -641,6 +661,12 @@ def _alter_column(table: Table, old: Column, new: Column, middle: Model, out: _O
     if old.type == new.type and old.nullable == new.nullable:
         return None
     assert new.type is not None and new.nullable is not None  # Column has checked both
+    at_alter = middle.get(table.key)
+    partitioned = partitioned_on(at_alter, new.name) if isinstance(at_alter, Table) else []
+    if partitioned:
+        what = " and ".join(partitioned)
+        message = f"ALTER COLUMN of {shown} is blocked: it is the partitioning column of {what}"
+        out.refuse("PARTITION_CHANGE", table.key, message)
     # a longer varchar, nvarchar or varbinary passes under UNIQUE, CHECK and an index: the engine's rule
     widening = only_widens(old, new.type, new.nullable, new.collation)
     users = column_dependants(middle, table.schema, table.name, new.name, widening=widening)
@@ -681,6 +707,38 @@ def _temporal_change(base: Table, head: Table) -> tuple[str, str] | None:
     return None
 
 
+def _partition_change(base: Table, head: Table) -> str | None:
+    """How the place of a table of both revisions differs; None when the table stays where it is."""
+    old, new = base.on, head.on
+    if old == new:
+        return None
+    if old is None:
+        assert new is not None
+        return (
+            "the table is not partitioned at the base revision and is on partition scheme "
+            f"{names.quote(new.scheme)} at the head revision"
+        )
+    if new is None:
+        return (
+            f"the table is on partition scheme {names.quote(old.scheme)} at the base revision and is not "
+            "partitioned at the head revision"
+        )
+    if fold(old.scheme) != fold(new.scheme):
+        return (
+            f"the table is on partition scheme {names.quote(old.scheme)} at the base revision and on "
+            f"{names.quote(new.scheme)} at the head revision"
+        )
+    gone = (
+        ""
+        if head.column(old.column) is not None
+        else f"; the head revision has no column {names.quote(old.column)}"
+    )
+    return (
+        f"the partitioning column of the table is {names.quote(old.column)} at the base revision and "
+        f"{names.quote(new.column)} at the head revision{gone}"
+    )
+
+
 def _alter_table(change: _TableChange, middle: Model, out: _Out) -> None:
     base, head = change.base, change.head
     schema, table = head.schema, head.name
@@ -688,6 +746,11 @@ def _alter_table(change: _TableChange, middle: Model, out: _Out) -> None:
     if temporal is not None:
         # what follows would be noise: the period columns come and go with the versioning
         out.refuse("TEMPORAL_CHANGE", head.key, *temporal)
+        return
+    moved = _partition_change(base, head)
+    if moved is not None:
+        # what follows would be noise: every key and index is stated against the place of the table
+        out.refuse("PARTITION_CHANGE", head.key, moved)
         return
     key = next((c for c in change.dropped if isinstance(c, PrimaryKey)), None)
     if head.temporal is not None and key is not None:
@@ -883,7 +946,10 @@ def classify(op: Operation, base: Model, *, created: Collection[str] = ()) -> li
     SET_NOT_NULL for NULL to NOT NULL. LONG_LOCK, only for a table that base holds and created
     does not: CREATE INDEX, ADD PRIMARY KEY or UNIQUE, ADD CHECK or FOREIGN KEY unless WITH
     NOCHECK (the engine checks every row when nothing is written), ALTER COLUMN that changes the
-    data type or the collation. The order of the codes is fixed: lossy, not null, lock.
+    data type or the collation, DROP INDEX or DROP CONSTRAINT of the clustered index or key
+    (rowstore or columnstore: the table becomes a heap). lint.py cannot see that an index is
+    clustered: for the drop, the proof asks for the allow line (gen._clustered_drop). The order of
+    the codes is fixed: lossy, not null, lock.
     """
 
     def existing(schema: str, table: str) -> bool:
@@ -918,6 +984,14 @@ def classify(op: Operation, base: Model, *, created: Collection[str] = ()) -> li
             return ["LONG_LOCK"] if rewrites else []
         case RebuildTable():
             return ["LONG_LOCK"] if existing(op.schema, op.table) else []
+        case DropIndex() | DropConstraint():
+            # the table becomes a heap: every row is written again and every nonclustered index rebuilt
+            table = base.get(_table_key(op.schema, op.table))
+            clustered = table.clustered_item() if isinstance(table, Table) else None
+            drops_it = (
+                clustered is not None and clustered.name is not None and fold(clustered.name) == fold(op.name)
+            )
+            return ["LONG_LOCK"] if drops_it and existing(op.schema, op.table) else []
         case (
             CreateSchema()
             | CreateType()
@@ -927,8 +1001,6 @@ def classify(op: Operation, base: Model, *, created: Collection[str] = ()) -> li
             | DropSynonym()
             | CreateTable()
             | AddColumn()
-            | DropConstraint()
-            | DropIndex()
         ):
             return []
         case SetSystemVersioning():

@@ -451,7 +451,7 @@ def test_a_refusal_names_an_object_of_the_pair_and_carries_the_hand_write_hint(c
 
 def test_every_refusal_of_one_comparison_is_collected():
     codes = [code for code, _ in refusals_of(*models("refuse_collects_every_refusal"))]
-    assert len(codes) == 10
+    assert len(codes) == 11
     assert set(codes) == set(REFUSALS) - {"RENAME_INVALID", "ORDER_BLOCKED"}
 
 
@@ -793,6 +793,36 @@ def test_classify_gives_the_allow_codes_that_a_statement_needs(statement: str, c
     assert classify(parse_statement(statement), BASE) == codes
 
 
+@pytest.mark.parametrize("place", ["", " ON [PS_OrderYear]([OrderDate])"])
+def test_classify_asks_long_lock_for_the_drop_of_the_clustered_item_of_a_table_that_exists(place: str):
+    """The drop of a clustered index, a clustered columnstore index or a clustered key writes every
+    row again as a heap and rebuilds every nonclustered index, under a schema-modification lock;
+    on a partitioned table too. The drop of a nonclustered item writes no row."""
+    table = (
+        "CREATE TABLE [s].[L] ([Id] bigint NOT NULL, [OrderDate] date NOT NULL, [Q] int NOT NULL, {key})"
+        + ("\nON [PS_OrderYear]([OrderDate])" if place else "")
+    )
+    pk = "CONSTRAINT [PK_L] PRIMARY KEY {kind} ([OrderDate], [Id])" + place
+    heap = model_of(SCHEMA, table.format(key=pk.format(kind="NONCLUSTERED")))
+    clustered = apply(
+        apply(heap, parse_statement("CREATE CLUSTERED INDEX [CIX_L] ON [s].[L] ([OrderDate])" + place)),
+        parse_statement("CREATE NONCLUSTERED INDEX [IX_L] ON [s].[L] ([Q])" + place),
+    )
+    keyed = model_of(SCHEMA, table.format(key=pk.format(kind="CLUSTERED")))
+    columnstore = apply(
+        heap, parse_statement("CREATE CLUSTERED COLUMNSTORE INDEX [CCI_L] ON [s].[L]" + place)
+    )
+    assert classify(parse_statement("DROP INDEX [CIX_L] ON [s].[L]"), clustered) == ["LONG_LOCK"]
+    assert classify(parse_statement("DROP INDEX [CCI_L] ON [s].[L]"), columnstore) == ["LONG_LOCK"]
+    assert classify(parse_statement("ALTER TABLE [s].[L] DROP CONSTRAINT [PK_L]"), keyed) == ["LONG_LOCK"]
+    # near misses: a nonclustered item, and a table that the same change created
+    assert classify(parse_statement("DROP INDEX [IX_L] ON [s].[L]"), clustered) == []
+    assert classify(parse_statement("ALTER TABLE [s].[L] DROP CONSTRAINT [PK_L]"), clustered) == []
+    assert (
+        classify(parse_statement("DROP INDEX [CIX_L] ON [s].[L]"), clustered, created=["TABLE:[s].[L]"]) == []
+    )
+
+
 def test_classify_reads_a_table_that_the_same_change_created_as_new():
     index = parse_statement("CREATE NONCLUSTERED INDEX [IX_T] ON [s].[T] ([Name])")
     retype = parse_statement(ALTER + "[Id] bigint NOT NULL")
@@ -820,6 +850,8 @@ def test_classify_of_generated_operations_marks_exactly_the_destructive_and_lock
         "DROP TABLE [old].[Part];": ["DROP_TABLE"],
         "DROP TABLE [old].[Thing];": ["DROP_TABLE"],
         "ALTER TABLE [sales].[Customer] ALTER COLUMN [Email] varchar(320) NULL;": ["LONG_LOCK"],
+        # the key was clustered: the table becomes a heap, every row is written again
+        "ALTER TABLE [sales].[Customer] DROP CONSTRAINT [PK_Customer];": ["LONG_LOCK"],
         "ALTER TABLE [sales].[Customer] ADD CONSTRAINT [PK_Customer] "
         "PRIMARY KEY NONCLUSTERED ([CustomerId]);": ["LONG_LOCK"],
         "ALTER TABLE [sales].[Customer] ADD CONSTRAINT [UQ_Customer_Mail] UNIQUE NONCLUSTERED ([Email]);": [
@@ -1544,3 +1576,278 @@ def test_a_new_table_and_a_new_column_carry_their_masks_in_the_create_and_add_st
         None,
     ]
     assert isinstance(add, masking.AddColumn) and add.column.masked == "default()"
+
+
+# ------------------------------------------------------------------ partitioned tables and indexes
+LINE_COLUMNS = (
+    "[Id] bigint NOT NULL, [OrderDate] date NOT NULL, [Quantity] int NOT NULL, [Note] varchar(20) NULL"
+)
+ON_YEAR = " ON [PS_OrderYear]([OrderDate])"
+PK_LINE = "CONSTRAINT [PK_Line] PRIMARY KEY CLUSTERED ([OrderDate], [Id])"
+
+
+def line(body: str = "", on: str = "", options: str = "", columns: str = LINE_COLUMNS) -> str:
+    return f"CREATE TABLE [s].[Line] ({columns}{body}){on}{options}"
+
+
+HEAP = line(on=ON_YEAR)
+KEYED = line(f", {PK_LINE}{ON_YEAR}, INDEX [IX_Line] NONCLUSTERED ([Quantity]){ON_YEAR}", ON_YEAR)
+PLAIN = line(f", {PK_LINE}, INDEX [IX_Line] NONCLUSTERED ([Quantity])")
+COLUMNSTORE = line(f", INDEX [CCI_Line] CLUSTERED COLUMNSTORE{ON_YEAR}", ON_YEAR)
+# (base, head, what the message says, the statements that a person writes: the route of the hint)
+MOVES = [
+    (
+        HEAP,
+        line(on=" ON [PS_OrderMonth]([OrderDate])"),
+        "the table is on partition scheme [PS_OrderYear] at the base revision and on [PS_OrderMonth] at",
+        [
+            "CREATE CLUSTERED INDEX [CIX_Move] ON [s].[Line] ([Id]) ON [PS_OrderMonth]([OrderDate])",
+            "DROP INDEX [CIX_Move] ON [s].[Line]",
+        ],
+    ),
+    (
+        HEAP,
+        line(on=" ON [PS_OrderYear]([Quantity])"),
+        "the partitioning column of the table is [OrderDate] at the base revision and [Quantity] at",
+        [
+            "CREATE CLUSTERED INDEX [CIX_Move] ON [s].[Line] ([Id]) ON [PS_OrderYear]([Quantity])",
+            "DROP INDEX [CIX_Move] ON [s].[Line]",
+        ],
+    ),
+    (
+        PLAIN,
+        line(f", {PK_LINE}{ON_YEAR}, INDEX [IX_Line] NONCLUSTERED ([Quantity]) ON [PRIMARY]", ON_YEAR),
+        "the table is not partitioned at the base revision and is on partition scheme [PS_OrderYear] at",
+        [
+            "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line]",
+            f"ALTER TABLE [s].[Line] ADD {PK_LINE}{ON_YEAR}",
+        ],
+    ),
+    (
+        KEYED,
+        line(f", {PK_LINE}, INDEX [IX_Line] NONCLUSTERED ([Quantity]){ON_YEAR}"),
+        "the table is on partition scheme [PS_OrderYear] at the base revision and is not partitioned at",
+        [
+            "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line]",
+            f"ALTER TABLE [s].[Line] ADD {PK_LINE} ON [PRIMARY]",
+        ],
+    ),
+    (
+        line(),
+        HEAP,
+        "the table is not partitioned at the base revision and is on partition scheme [PS_OrderYear] at",
+        [
+            f"CREATE CLUSTERED INDEX [CIX_Move] ON [s].[Line] ([Id]){ON_YEAR}",
+            "DROP INDEX [CIX_Move] ON [s].[Line]",
+        ],
+    ),
+    (
+        COLUMNSTORE,
+        line(
+            ", INDEX [CCI_Line] CLUSTERED COLUMNSTORE ON [PS_OrderMonth]([OrderDate])",
+            " ON [PS_OrderMonth]([OrderDate])",
+        ),
+        "the table is on partition scheme [PS_OrderYear] at the base revision and on [PS_OrderMonth] at",
+        [
+            "DROP INDEX [CCI_Line] ON [s].[Line]",
+            "CREATE CLUSTERED COLUMNSTORE INDEX [CCI_Line] ON [s].[Line] ON [PS_OrderMonth]([OrderDate])",
+        ],
+    ),
+    (
+        # the partitioning column goes: the table cannot stay where it is
+        HEAP,
+        line(
+            on=" ON [PS_OrderYear]([Quantity])",
+            columns=LINE_COLUMNS.replace("[OrderDate] date NOT NULL, ", ""),
+        ),
+        "the head revision has no column [OrderDate]",
+        [
+            "CREATE CLUSTERED INDEX [CIX_Move] ON [s].[Line] ([Id]) ON [PS_OrderYear]([Quantity])",
+            "DROP INDEX [CIX_Move] ON [s].[Line]",
+            "ALTER TABLE [s].[Line] DROP COLUMN [OrderDate]",
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(("base", "head", "says", "by_hand"), MOVES, ids=[row[2][:60] for row in MOVES])
+def test_a_table_is_never_moved_by_the_generator_and_the_route_of_the_hint_is_proven(
+    base, head, says, by_hand
+):
+    before, after = model_of(SCHEMA, base), model_of(SCHEMA, head)
+    with pytest.raises(GenRefused) as caught:
+        diff(before, after)
+    (refusal,) = caught.value.refusals  # one refusal for the table, not one for each index that is restated
+    assert (refusal.code, refusal.object_key) == ("PARTITION_CHANGE", "TABLE:[s].[Line]")
+    assert says in refusal.message
+    hint = refusal.hint
+    assert hint == REFUSALS["PARTITION_CHANGE"] and hint.startswith("Hand-write the migration")
+    for word in ("ON [scheme]([column])", "ON [PRIMARY]", "DROP INDEX", "DROP CONSTRAINT", "LONG_LOCK"):
+        assert word in hint
+    assert "a DBA creates it" in hint  # the scheme is not an object of the tool
+    # the route of the hint is true: these statements give the head model in the replay ...
+    operations = [parse_statement(text) for text in by_hand]
+    assert replay(before, operations) == after
+    # ... and none of them passes without an allow line: each one that rewrites the rows holds a long lock
+    state, locks = before, 0
+    for operation in operations:
+        locks += "LONG_LOCK" in classify(operation, state)
+        state = apply(state, operation)
+    assert locks >= 1
+
+
+def test_alter_column_of_a_partitioning_column_is_refused_and_the_route_off_the_scheme_is_proven():
+    head = line(on=ON_YEAR, columns=LINE_COLUMNS.replace("[OrderDate] date", "[OrderDate] datetime2(0)"))
+    before, after = model_of(SCHEMA, HEAP), model_of(SCHEMA, head)
+    with pytest.raises(GenRefused) as caught:
+        diff(before, after)
+    (refusal,) = caught.value.refusals
+    assert (refusal.code, refusal.object_key) == ("PARTITION_CHANGE", "TABLE:[s].[Line]")
+    assert refusal.message == (
+        "ALTER COLUMN of column [OrderDate] is blocked: it is the partitioning column of the table"
+    )
+    assert "move the table or the index off the scheme" in refusal.hint
+    off_and_on = [
+        "CREATE CLUSTERED INDEX [CIX_Move] ON [s].[Line] ([Id]) ON [PRIMARY]",
+        "DROP INDEX [CIX_Move] ON [s].[Line]",
+        "ALTER TABLE [s].[Line] ALTER COLUMN [OrderDate] datetime2(0) NOT NULL",
+        f"CREATE CLUSTERED INDEX [CIX_Move] ON [s].[Line] ([Id]){ON_YEAR}",
+        "DROP INDEX [CIX_Move] ON [s].[Line]",
+    ]
+    assert replay(before, [parse_statement(text) for text in off_and_on]) == after
+    # the statement that the generator did not write is the one that the replay blocks
+    with pytest.raises(ReplayError, match="it is the partitioning column of the table"):
+        replay(before, [parse_statement(off_and_on[2])])
+
+
+def test_alter_column_under_an_index_on_a_scheme_of_its_own_is_refused_unless_the_index_is_rebuilt_anyway():
+    index = "INDEX [IX_Note] NONCLUSTERED ([Id]){} ON [PS_Quantity]([Quantity])"
+    base = line(f", {PK_LINE}, " + index.format(""))
+    wider = LINE_COLUMNS.replace("[Quantity] int", "[Quantity] bigint")
+    with pytest.raises(GenRefused) as caught:
+        diff(
+            model_of(SCHEMA, base), model_of(SCHEMA, line(f", {PK_LINE}, " + index.format(""), columns=wider))
+        )
+    (refusal,) = caught.value.refusals
+    assert refusal.code == "PARTITION_CHANGE" and refusal.message == (
+        "ALTER COLUMN of column [Quantity] is blocked: it is the partitioning column of index [IX_Note]"
+    )
+    # the index changes too, so it is dropped before the ALTER COLUMN and created after it
+    rebuilt = line(f", {PK_LINE}, " + index.format(" INCLUDE ([Note])"), columns=wider)
+    assert written(model_of(SCHEMA, base), model_of(SCHEMA, rebuilt)) == [
+        "DROP INDEX [IX_Note] ON [s].[Line];",
+        "ALTER TABLE [s].[Line] ALTER COLUMN [Quantity] bigint NOT NULL;",
+        "CREATE NONCLUSTERED INDEX [IX_Note] ON [s].[Line] ([Id]) INCLUDE ([Note])"
+        " ON [PS_Quantity]([Quantity]);",
+    ]
+
+
+def test_a_nonclustered_index_or_key_changes_its_place_by_drop_and_create_like_any_index_change():
+    base = line(
+        f", {PK_LINE}{ON_YEAR}"
+        ", CONSTRAINT [UQ_Line] UNIQUE NONCLUSTERED ([OrderDate], [Quantity]) ON [PRIMARY]"
+        f", INDEX [IX_Line] NONCLUSTERED ([Quantity]){ON_YEAR}"
+        ", INDEX [IX_Note] NONCLUSTERED ([Note]) ON [PRIMARY]",
+        ON_YEAR,
+    )
+    head = line(
+        f", {PK_LINE}{ON_YEAR}, CONSTRAINT [UQ_Line] UNIQUE NONCLUSTERED ([OrderDate], [Quantity]){ON_YEAR}"
+        f", INDEX [IX_Line] NONCLUSTERED ([Quantity]) ON [PRIMARY], INDEX [IX_Note] NONCLUSTERED ([Note])"
+        " ON [PS_Note]([Note])",
+        ON_YEAR,
+    )
+    before, after = model_of(SCHEMA, base), model_of(SCHEMA, head)
+    operations = diff(before, after)
+    assert [emit_operation(op) for op in operations] == [
+        "DROP INDEX [IX_Line] ON [s].[Line];",
+        "DROP INDEX [IX_Note] ON [s].[Line];",
+        "ALTER TABLE [s].[Line] DROP CONSTRAINT [UQ_Line];",
+        "ALTER TABLE [s].[Line] ADD CONSTRAINT [UQ_Line] UNIQUE NONCLUSTERED ([OrderDate], [Quantity])"
+        " ON [PS_OrderYear]([OrderDate]);",
+        "CREATE NONCLUSTERED INDEX [IX_Line] ON [s].[Line] ([Quantity]) ON [PRIMARY];",
+        "CREATE NONCLUSTERED INDEX [IX_Note] ON [s].[Line] ([Note]) ON [PS_Note]([Note]);",
+    ]
+    # the existing allow code of an index build on a table that has rows, and no new one
+    state, codes = before, []
+    for operation in operations:
+        codes += classify(operation, state)
+        state = apply(state, operation)
+    assert codes == ["LONG_LOCK"] * 3
+    # an index of a table that is not partitioned goes on a scheme the same way
+    assert written(
+        model_of(SCHEMA, PLAIN),
+        model_of(SCHEMA, line(f", {PK_LINE}, INDEX [IX_Line] NONCLUSTERED ([Quantity]){ON_YEAR}")),
+    ) == [
+        "DROP INDEX [IX_Line] ON [s].[Line];",
+        "CREATE NONCLUSTERED INDEX [IX_Line] ON [s].[Line] ([Quantity]) ON [PS_OrderYear]([OrderDate]);",
+    ]
+
+
+def test_what_changes_on_a_partitioned_table_without_moving_it_is_written_as_on_any_table():
+    base = model_of(SCHEMA, KEYED)
+    head = model_of(
+        SCHEMA,
+        line(
+            f", [Added] int NULL, CONSTRAINT [CK_Line] CHECK ([Quantity] > 0), {PK_LINE}{ON_YEAR}"
+            f", INDEX [IX_Line_Note] NONCLUSTERED ([Note]){ON_YEAR}",
+            ON_YEAR,
+            columns=LINE_COLUMNS.replace("varchar(20) NULL", "varchar(50) NULL"),
+        ),
+    )
+    assert written(base, head) == [
+        "DROP INDEX [IX_Line] ON [s].[Line];",
+        "ALTER TABLE [s].[Line] ADD [Added] int NULL;",
+        "ALTER TABLE [s].[Line] ALTER COLUMN [Note] varchar(50) NULL;",
+        "CREATE NONCLUSTERED INDEX [IX_Line_Note] ON [s].[Line] ([Note]) ON [PS_OrderYear]([OrderDate]);",
+        "ALTER TABLE [s].[Line] ADD CONSTRAINT [CK_Line] CHECK ([Quantity] > 0);",
+    ]
+    # the clustered key changes and the table stays: the heap between the two statements is on the scheme
+    desc = model_of(SCHEMA, KEYED.replace("([OrderDate], [Id])", "([OrderDate], [Id] DESC)"))
+    assert written(base, desc) == [
+        "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line];",
+        "ALTER TABLE [s].[Line] ADD CONSTRAINT [PK_Line] PRIMARY KEY CLUSTERED ([OrderDate], [Id] DESC)"
+        " ON [PS_OrderYear]([OrderDate]);",
+    ]
+
+
+def test_a_compression_change_of_a_partitioned_heap_is_one_rebuild_of_all_partitions():
+    packed = model_of(SCHEMA, line(on=ON_YEAR, options=" WITH (DATA_COMPRESSION = PAGE)"))
+    assert written(model_of(SCHEMA, HEAP), packed) == [
+        "ALTER TABLE [s].[Line] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);"
+    ]
+    assert written(packed, model_of(SCHEMA, HEAP)) == [
+        "ALTER TABLE [s].[Line] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = NONE);"
+    ]
+    # a heap that is not partitioned keeps the statement that it had
+    assert written(
+        model_of(SCHEMA, line()), model_of(SCHEMA, line(options=" WITH (DATA_COMPRESSION = ROW)"))
+    ) == ["ALTER TABLE [s].[Line] REBUILD WITH (DATA_COMPRESSION = ROW);"]
+    (rebuild,) = diff(model_of(SCHEMA, HEAP), packed)
+    assert classify(rebuild, model_of(SCHEMA, HEAP)) == ["LONG_LOCK"]
+    assert touched_objects([rebuild]) == ["TABLE:[s].[Line]"]
+
+
+def test_a_new_partitioned_table_is_created_on_its_scheme_and_its_clustered_index_is_built_in_place():
+    statements = written(model_of(SCHEMA), model_of(SCHEMA, KEYED.replace(PK_LINE + ON_YEAR + ", ", "")))
+    assert statements[0].endswith("\n)\nON [PS_OrderYear]([OrderDate]);")
+    assert statements[1:] == [
+        "CREATE NONCLUSTERED INDEX [IX_Line] ON [s].[Line] ([Quantity]) ON [PS_OrderYear]([OrderDate]);"
+    ]
+    clustered = KEYED.replace(PK_LINE + ON_YEAR, f"INDEX [CIX_Line] CLUSTERED ([OrderDate]){ON_YEAR}")
+    statements = written(model_of(SCHEMA), model_of(SCHEMA, clustered))
+    assert (
+        statements[1]
+        == "CREATE CLUSTERED INDEX [CIX_Line] ON [s].[Line] ([OrderDate]) ON [PS_OrderYear]([OrderDate]);"
+    )
+
+
+def test_a_rename_of_the_partitioning_column_is_one_sp_rename_when_it_is_given():
+    renamed = KEYED.replace("OrderDate", "OrderedOn")
+    spec = RenameSpec("column", ("s", "Line", "OrderDate"), "OrderedOn")
+    assert written(model_of(SCHEMA, KEYED), model_of(SCHEMA, renamed), [spec]) == [
+        "EXEC sys.sp_rename N'[s].[Line].[OrderDate]', N'OrderedOn', N'COLUMN';"
+    ]
+    # without the rename it is another column: the table would have to move
+    assert refusals_of(model_of(SCHEMA, KEYED), model_of(SCHEMA, renamed)) == [
+        ("PARTITION_CHANGE", "TABLE:[s].[Line]")
+    ]
