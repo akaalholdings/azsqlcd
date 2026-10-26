@@ -23,6 +23,7 @@ from azsqlcd.catalog_tables import (
     read_model,
     rename_constraints_sql,
 )
+from azsqlcd.config import Scope
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.model import (
     INDEX_OPTION_VALUES,
@@ -1172,6 +1173,66 @@ def test_an_object_outside_the_model_is_quarantined_and_the_rest_is_read():
     assert (item.object_key, item.code) == (ORDER_KEY, UNSUPPORTED)
     assert "ledger" in item.reason
     assert CUSTOMER_KEY in found.model and "SCHEMA:[sales]" in found.model  # the rest is read
+
+
+# ------------------------------------------------------------------ [scope]
+SCOPED = Scope(("sales", "dbo"), ("scratch",), ("dbo.temp_*",))
+TEMP_LOAD = Table("dbo", "temp_Load", (Column("Id", TypeRef("int"), False),))
+SCRATCH = Schema("scratch")
+SCRATCH_LOAD = Table("scratch", "Load", (Column("Id", TypeRef("int"), False),))
+EXTERNAL_KEY = names.object_key("TABLE", "sales", "ext_Rates")
+IN_SCOPE = "IN (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN (N'sales', N'dbo'))"
+
+
+def scoped_rows() -> CatalogRows:
+    """sales, a dbo table that the pattern dbo.temp_* excludes, an excluded schema, an external table."""
+    rows = rows_from_model(Model([SALES, ORDER, CUSTOMER, TEMP_LOAD, SCRATCH, SCRATCH_LOAD]))
+    head = dict(only(rows, "tabulars", name="Customer"))
+    rows["tabulars"].append(head | {"object_id": 900, "name": "ext_Rates", "is_external": 1})
+    return rows
+
+
+def test_a_scope_reads_its_schemas_and_leaves_out_what_a_pattern_or_the_type_external_excludes():
+    db = session_for(scoped_rows())  # the fake answers every row; the engine would filter the schemas
+    found = read_model(db, scope=SCOPED)
+    assert set(found.model) == {SALES.key, ORDER_KEY, CUSTOMER_KEY}
+    assert set(found.captures) == set(found.model)
+    # outside the scope is neither unsupported nor unmanaged: it is not seen. An external table is
+    # skipped by its type and counted
+    assert found.unsupported == () and found.history_tables == ()
+    assert found.external_tables == (EXTERNAL_KEY,)
+    assert len(db.batches) == len(COLUMNS) and all(IN_SCOPE in batch for batch in db.batches)
+    children = [batch for batch in db.batches if "AS p ([object_id])" in batch]
+    assert len(children) == 6 and all("t.[is_external] = 0" in batch for batch in children)
+
+
+def test_without_a_scope_the_read_is_what_it_was_and_an_external_table_is_quarantined():
+    db = session_for(scoped_rows())
+    found = read_model(db)
+    assert [(u.object_key, u.reason) for u in found.unsupported] == [(EXTERNAL_KEY, "an external table")]
+    assert {TEMP_LOAD.key, SCRATCH.key, SCRATCH_LOAD.key} <= set(found.model)
+    assert found.external_tables == ()
+    assert not any("sys.schemas AS sx" in batch or "is_external] = 0" in batch for batch in db.batches)
+    # asked keys are read wherever they are, with a scope or without
+    asked = session_for(scoped_rows())
+    read_model(asked, [ORDER_KEY], scope=SCOPED)
+    assert not any("sys.schemas AS sx" in batch for batch in asked.batches)
+
+
+def test_an_object_that_a_pattern_excludes_still_holds_its_name_in_its_schema():
+    # the fixed name of the engine-named key of [dbo].[t] is the name of a table that [scope] excludes
+    table = Table(
+        "dbo", "t", (Column("id", TypeRef("int"), False),), (PrimaryKey("PKX", True, (KeyColumn("id"),)),)
+    )
+    taken = Table("dbo", "PK_t", (Column("id", TypeRef("int"), False),))
+    rows = rows_from_model(Model([table, taken]))
+    only(rows, "indexes", name="PKX").update(name="PK__t__3213E83F00000000", constraint_is_system_named=1)
+
+    found = read_model(session_for(rows), scope=Scope(("dbo",), (), ("dbo.PK_*",)))
+
+    assert list(found.model) == [] and found.system_named == ()
+    assert [(item.object_key, item.code) for item in found.unsupported] == [(table.key, UNSUPPORTED)]
+    assert "[PK_t]" in found.unsupported[0].reason
 
 
 # ------------------------------------------------------------------ system-versioned temporal tables

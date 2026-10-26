@@ -27,6 +27,8 @@ State (plain attributes; a test may read and set them)
     partition_schemes    names of the partition schemes that exist: plain names, compared without
                letter case. No DDL of the fake makes one: a test adds what a DBA created. The place
                of a table and of each key and index is in `model` (Table.on, .on of a key or index)
+    external_tables    (schema, name) of the external tables: sys.objects type ET, a row of
+               read_tabulars with is_external = 1 and no column. No DDL of the fake makes one
 
 Sessions
     db.session() opens a session on the shared state; pass db.session as session_factory. Each
@@ -56,6 +58,10 @@ Questions
     rows(table)        a copy of the rows of one state table, each row a dict of every column
     module(key)        the Module of an object key, or None
     recorded()         state.read_state on a session of its own
+
+A read of every object that names the schemas of a [scope] (catalog.schema_condition: IN or
+NOT IN (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN (...))) gets the rows of
+those schemas only, as the engine gives them.
 
 What the fake engine checks, beyond replay.apply
     a table, a key or an index on a partition scheme needs the scheme in partition_schemes (error
@@ -212,6 +218,23 @@ def _object_names(toks: list[Tok]) -> list[Name]:
     return [(parts[0], parts[1]) for parts in found if len(parts) == 2]
 
 
+def _schema_filter(toks: list[Tok]) -> Callable[[str], bool]:
+    """Which schema names the condition of catalog.schema_condition in a batch lets through; every
+    name when the batch has none."""
+    starts = [
+        at
+        for at in range(3, len(toks) - 1)
+        if _word(toks[at]) == "SELECT" and toks[at + 1].kind in _IDENT and fold(toks[at + 1].value) == "sx"
+    ]
+    if not starts:
+        return lambda _: True
+    at = starts[0]
+    negated = _word(toks[at - 3]) == "NOT"
+    end = next(i for i in range(at, len(toks)) if _op(toks[i], ")") and _op(toks[i + 1], ")"))
+    listed = {fold(tok.value) for tok in toks[at:end] if tok.kind in _LITERAL}
+    return lambda schema: (fold(schema) in listed) != negated
+
+
 def _equal(a: object, b: object) -> bool:
     """Equality as a case-insensitive collation has it."""
     return a.casefold() == b.casefold() if isinstance(a, str) and isinstance(b, str) else a == b
@@ -284,6 +307,7 @@ class FakeDatabase:
         self.state_tables: dict[str, Table] = {}  # schema azsqlcd, as the setup script declares it
         self.indexed_views: set[str] = set()
         self.partition_schemes: set[str] = set()
+        self.external_tables: set[tuple[str, str]] = set()
         self.batches: list[str] = []
         self.ddl: list[str] = []
         self.unknown: list[str] = []
@@ -458,6 +482,8 @@ class FakeDatabase:
                 add(obj.schema, obj.name, "SN")
         for module in self.modules.values():
             add(module.schema, module.name, module.type)
+        for schema, name in self.external_tables:
+            add(schema, name, "ET")
         return found
 
     def table(self, name: Name) -> Table | None:
@@ -705,13 +731,29 @@ class FakeDatabase:
     def _q_read_model(self, query: str, toks: list[Tok]) -> Rows:
         """The eleven queries of catalog_tables.read_model, for everything or for the asked ids."""
         rows = rows_from_model(self.model)
+        for number, (schema, name) in enumerate(sorted(self.external_tables), 1):
+            head = dict.fromkeys(COLUMNS["tabulars"])
+            head |= dict.fromkeys(COLUMNS["tabulars"][4:11], 0)
+            rows["tabulars"].append(
+                head
+                | {
+                    "object_id": -number,
+                    "kind": "TABLE",
+                    "schema_name": schema,
+                    "name": name,
+                    "is_external": 1,
+                }
+            )
         objects = set(_object_names(toks))
         types = {_parts(literal) for _, literal in _calls(toks, "TYPE_ID")}
         schemas = {fold(literal) for _, literal in _calls(toks, "SCHEMA_ID")}
         everything = not (objects or types or schemas)
+        visible = _schema_filter(toks)
 
         def named(row: dict[str, Any], asked: set[Any]) -> bool:
-            return everything or (fold(row["schema_name"]), fold(row["name"])) in asked
+            if everything:
+                return visible(row["schema_name"])
+            return (fold(row["schema_name"]), fold(row["name"])) in asked
 
         heads = [row for row in rows["tabulars"] if named(row, objects if row["kind"] == "TABLE" else types)]
         if query == "schemas":
@@ -723,7 +765,7 @@ class FakeDatabase:
             found = [
                 {"name": name, "owner_name": owner, "module_count": counts.get(fold(name), 0)}
                 for name, owner in owners.items()
-                if everything or fold(name) in schemas
+                if (everything and visible(name)) or fold(name) in schemas
             ]
         elif query == "tabulars":
             found = heads
@@ -766,12 +808,23 @@ class FakeDatabase:
 
     def _q_capture_modules(self, toks: list[Tok]) -> Rows:
         if not any(_word(tok) == "VALUES" for tok in toks):
-            return [self._module_row(None, module) for module in self.modules.values()]
+            visible = _schema_filter(toks)
+            return [
+                self._module_row(None, module) for module in self.modules.values() if visible(module.schema)
+            ]
         asked = self._requested(toks)
         return [self._module_row(key, self.modules[name]) for key, name in asked if name in self.modules]
 
     def _q_list_user_objects(self, toks: list[Tok]) -> Rows:
-        return sorted(self.objects().values())
+        visible = _schema_filter(toks)
+        return sorted(found for found in self.objects().values() if visible(found[0]))
+
+    def _q_list_schemas(self, toks: list[Tok]) -> Rows:
+        """sys.schemas: the schemas of the engine, of the tool after its setup, and of the model."""
+        tool = ("azsqlcd",) if self.tables is not None else ()
+        return [
+            (name,) for name in (*_BUILTIN_SCHEMAS, *tool, *self.schema_names().values()) if name != "dbo"
+        ] + [("dbo",)]
 
     def _q_object_exists(self, toks: list[Tok]) -> Rows:
         (name,) = _object_names(toks)

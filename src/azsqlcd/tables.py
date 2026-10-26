@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 from azsqlcd import catalog, catalog_tables, chain, diff, emit, names, state
 from azsqlcd.catalog import Difference
 from azsqlcd.catalog_tables import SystemNamed, Unsupported, project_options
-from azsqlcd.config import Config
+from azsqlcd.config import Config, Scope, in_scope
 from azsqlcd.errors import ToolError, failed, refused
 from azsqlcd.lex import BOM, LexError, significant, tokenize
 from azsqlcd.model import (
@@ -778,6 +778,8 @@ class TableExport:
     snapshot: dict[str, Any]  # JSON for onboarding/<env>/snapshot.json: {format, captures, column_order}
     # (key of a history table, key of its temporal table): owned by the engine, no file, not unmanaged
     history_tables: tuple[tuple[str, str], ...] = ()
+    # with a scope: the external tables of the schemas that were read; skipped by type, no file
+    external_tables: tuple[str, ...] = ()
 
 
 def _needs(obj: ModelObject) -> list[str]:
@@ -823,6 +825,7 @@ def _report(
     renames: Collection[SystemNamed],
     captures: Mapping[str, Mapping[str, Any]],
     history_tables: Collection[tuple[str, str]] = (),
+    external_tables: Collection[str] | None = None,
 ) -> str:
     unmanaged, by_config = list(unmanaged), sorted(by_config, key=fold)
     lines = [
@@ -831,6 +834,8 @@ def _report(
         f"Files written: {len(files)}. Left unmanaged: {len(unmanaged)}.",
         "",
     ]
+    if external_tables is not None:  # a read under [scope]: one count, never one line for each
+        lines += [external_line(len(external_tables)), ""]
     if history_tables:
         lines += [
             "### History tables of temporal tables",
@@ -880,9 +885,24 @@ def _report(
     return "\n".join(lines)
 
 
-def export_tables(session: Session, config: Config) -> TableExport:
+def external_line(count: int) -> str:
+    """The one line of a report for the external tables that a read under [scope] skipped."""
+    return (
+        f"External tables in the schemas that were read: {count}. They are skipped by their type: not "
+        "managed, not listed one by one."
+    )
+
+
+def export_tables(
+    session: Session, config: Config, scope: Scope | None = None, schema: str | None = None
+) -> TableExport:
     """The table-class objects of the catalog as object files (Part 2 (c) 1 to 4). Read-only; writes
     nothing to disk.
+
+    scope: the [scope] of the read (catalog_tables.read_model); None reads every schema, as before
+    the table existed. schema: the one schema of `export --schema`. An object of another schema
+    that [scope] of the config manages and [unmanaged] does not list is taken as managed already:
+    a file of the schema may need it (a foreign key to it, a type of it).
 
     One file for each object that the model can hold and whose file reads back as the catalog
     object, and passes the token round trip. A schema file for each schema that holds a managed
@@ -897,9 +917,20 @@ def export_tables(session: Session, config: Config) -> TableExport:
     table itself was exported or not.
     """
     # the names of a schema are one namespace: a fixed constraint name must be free in all of it
-    taken = {(found.schema, found.name) for found in catalog.list_user_objects(session)}
-    found = catalog_tables.read_model(session, taken=taken)
+    taken = {(found.schema, found.name) for found in catalog.list_user_objects(session, scope)}
+    found = catalog_tables.read_model(session, taken=taken, scope=scope)
     by_config = {fold(key) for key in config.unmanaged_objects}
+
+    def elsewhere(key: str) -> bool:
+        """A need in a schema that is managed already, outside the schema of this export."""
+        _, owner, name = names.parse_object_key(key)
+        return (
+            schema is not None
+            and fold(owner or name) != fold(schema)
+            and in_scope(config.scope, key)
+            and fold(key) not in by_config
+        )
+
     unmanaged = list(found.unsupported)
     texts: dict[str, tuple[str, str]] = {}  # case-folded key -> (path, text)
     kept: dict[str, ModelObject] = {}
@@ -918,7 +949,12 @@ def export_tables(session: Session, config: Config) -> TableExport:
             texts[fold(key)], kept[fold(key)] = result, obj
             owner[result[0].casefold()] = obj.key
     while True:
-        lost = [(key, need) for key, obj in kept.items() for need in _needs(obj) if fold(need) not in kept]
+        lost = [
+            (key, need)
+            for key, obj in kept.items()
+            for need in _needs(obj)
+            if fold(need) not in kept and not elsewhere(need)
+        ]
         if not lost:
             break
         for key, need in dict(lost).items():
@@ -934,16 +970,43 @@ def export_tables(session: Session, config: Config) -> TableExport:
     }
     unmanaged.sort(key=lambda item: fold(item.object_key))
     listed = [
-        key for key in config.unmanaged_objects if names.parse_object_key(key)[0] in names.TABLE_CLASS_KINDS
+        key
+        for key in config.unmanaged_objects
+        if names.parse_object_key(key)[0] in names.TABLE_CLASS_KINDS and in_scope(scope, key)
     ]
+    external = None if scope is None else found.external_tables
     return TableExport(
         files,
-        _report(files, unmanaged, listed, renames, captures, found.history_tables),
+        _report(files, unmanaged, listed, renames, captures, found.history_tables, external),
         tuple(unmanaged),
         catalog_tables.rename_constraints_sql(renames),
         {"format": SNAPSHOT_FORMAT, "captures": captures, "column_order": order},
         found.history_tables,
+        found.external_tables,
     )
+
+
+def merge_snapshot(old: Mapping[str, Any], new: Mapping[str, Any], schema: str) -> dict[str, Any]:
+    """The snapshot of `export --schema`: the captures of the other schemas as the snapshot of the
+    repository holds them, and those of the schema as this export read them. ToolError REFUSED
+    SNAPSHOT_INVALID for an old snapshot that export_tables did not make."""
+    captures, order = old.get("captures"), old.get("column_order")
+    if old.get("format") != SNAPSHOT_FORMAT or not isinstance(captures, dict) or not isinstance(order, dict):
+        raise refused(
+            "SNAPSHOT_INVALID",
+            f"the snapshot of the repository is not a table snapshot of format {SNAPSHOT_FORMAT}: the "
+            "export of one schema adds its captures to it",
+        )
+
+    def other(key: str) -> bool:
+        _, owner, name = names.parse_object_key(key)
+        return fold(owner or name) != fold(schema)
+
+    return {
+        "format": SNAPSHOT_FORMAT,
+        "captures": {k: v for k, v in captures.items() if other(k)} | dict(new["captures"]),
+        "column_order": {k: v for k, v in order.items() if other(k)} | dict(new["column_order"]),
+    }
 
 
 # ------------------------------------------------------------------ baseline compare
@@ -992,7 +1055,7 @@ def _against_reference(
 
 
 def compare_with_snapshot(
-    session: Session, snapshot: Mapping[str, Any], managed_keys: Collection[str]
+    session: Session, snapshot: Mapping[str, Any], managed_keys: Collection[str], scope: Scope | None = None
 ) -> TableBaseline:
     """This database against the snapshot of the reference database (Part 2 (c) 6). Read-only.
 
@@ -1006,6 +1069,8 @@ def compare_with_snapshot(
     The temporal facts of a table are capture properties ('temporal', and the period columns), so
     a switched-off versioning, another history table or another retention is `differs`. A history
     table has no item: it is the engine's part of its temporal table, never `only_here`.
+
+    scope: the [scope] of the read. What it does not manage, and an external table, has no item.
     """
     reference, order = snapshot.get("captures"), snapshot.get("column_order")
     if (
@@ -1016,7 +1081,7 @@ def compare_with_snapshot(
         raise refused("SNAPSHOT_INVALID", f"the snapshot is not a table snapshot of format {SNAPSHOT_FORMAT}")
     reference = {fold(key): capture for key, capture in reference.items()}
     order = {fold(key): columns for key, columns in order.items()}
-    found = catalog_tables.read_model(session)
+    found = catalog_tables.read_model(session, scope=scope)
     outside = {fold(item.object_key) for item in found.unsupported}
     engine_named: dict[str, list[SystemNamed]] = defaultdict(list)
     for item in found.system_named:

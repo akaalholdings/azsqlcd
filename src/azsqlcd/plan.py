@@ -28,7 +28,7 @@ from urllib.parse import quote
 from azsqlcd import catalog, catalog_tables, chain, lex, modules, names, release, state
 from azsqlcd.catalog import Difference, FenceFacts
 from azsqlcd.chain import Chain, ChainEntry, Migration
-from azsqlcd.config import Config, resolve_target
+from azsqlcd.config import Config, Scope, in_scope, resolve_target
 from azsqlcd.errors import ToolError, locked, refused
 from azsqlcd.model import fold
 from azsqlcd.modules import ModuleFile
@@ -51,6 +51,7 @@ _CANARY_MUST_NOT_PARSE = "SELECT FROM;"
 # sent after SET PARSEONLY OFF: a session that still parses only gives no result set for it
 _PARSEONLY_IS_OFF = "/* azsqlcd:parseonly_off */ SELECT @@SPID;"
 _NOT_IN_DEPLOY = ", and the deploy of an approved plan does not run the check"
+EXTERNAL_TABLE_TYPE = "ET"  # sys.objects.type of an external table: skipped by type under [scope]
 
 
 # ------------------------------------------------------------------ data
@@ -408,6 +409,46 @@ def _refuse_unresolved(recorded: State) -> None:
 
 def _is_module(key: str) -> bool:
     return names.parse_object_key(key)[0] in names.MODULE_KINDS
+
+
+def scoped_state(recorded: State, scope: Scope | None) -> State:
+    """The recorded state as [scope] sees it: the rows of the objects that it does not manage are
+    left out. Such a row is of a schema that left the scope: the tool stops managing the object, so
+    it plans, compares and drops nothing for it. No scope: the state as it is."""
+    if scope is None:
+        return recorded
+    return replace(
+        recorded, objects={key: row for key, row in recorded.objects.items() if in_scope(scope, key)}
+    )
+
+
+def schema_of(key: str) -> str:
+    """The schema that an object of the key is in; for a schema key, the schema itself."""
+    _, schema, name = names.parse_object_key(key)
+    return name if schema is None else schema
+
+
+def _new_schemas(keys: Collection[str], recorded: State) -> list[str]:
+    """The schemas of the keys in which this database records no managed object: schemas that the
+    release onboards. In the spelling of the first key, in the order of the names without case."""
+    held = {fold(schema_of(key)) for key, row in recorded.objects.items() if row.status == "managed"}
+    found: dict[str, str] = {}
+    for key in sorted(keys):
+        found.setdefault(fold(schema_of(key)), schema_of(key))
+    return [schema for folded, schema in sorted(found.items()) if folded not in held]
+
+
+def _baseline_schemas(schemas: Sequence[str]) -> str:
+    return ", ".join(f"azsqlcd baseline --schema {schema}" for schema in schemas)
+
+
+def unscoped_note(schema: str) -> str:
+    """The plan note of a schema that no list of [scope] names (SCHEMA_UNSCOPED)."""
+    return (
+        f"SCHEMA_UNSCOPED {names.quote(schema)}: the schema is in neither [scope] schemas nor [scope] "
+        "exclude of azsqlcd.toml, so the tool does not see its objects. Onboard it (azsqlcd export "
+        "--schema), or add it to exclude"
+    )
 
 
 def _managed_modules(recorded: State) -> dict[str, ObjectRow]:
@@ -1357,6 +1398,8 @@ def compute_plan(
             project=recorded.meta.project,
             environment=recorded.meta.environment,
         )
+    scope = config.scope
+    recorded = scoped_state(recorded, scope)
     notes: list[str] = []
     if not lock_held:
         notes += [
@@ -1413,11 +1456,21 @@ def compute_plan(
     managed = {key: row for key, row in recorded.objects.items() if row.status == "managed"}
     managed_modules = _managed_modules(recorded)
     rows = {fold(key): row for key, row in managed.items()}
-    user_objects = catalog.list_user_objects(session)
+    user_objects = catalog.list_user_objects(session, scope)
 
     # step 5: a create must not take over an object that the tool did not make
     taken = {_fold(found.schema, found.name) for found in user_objects}
     collisions = [c.key for c in work.module_changes if c.action == "create" and _fold_key(c.key) in taken]
+    onboarding = _new_schemas(collisions, recorded) if collisions and scope is not None else []
+    if onboarding and len(onboarding) == len({fold(schema_of(key)) for key in collisions}):
+        # every module that collides is in a schema with no managed object: the release onboards it
+        raise refused(
+            "BASELINE_REQUIRED",
+            f"the release holds {collisions[0]}, the database has it, and this database records no object "
+            f"of its schema ({len(collisions)} module(s) in all): the release onboards the schema. Run "
+            f"{_baseline_schemas(onboarding)}",
+            objects=collisions,
+        )
     if collisions:
         raise refused(
             "NAME_COLLISION",
@@ -1459,11 +1512,13 @@ def compute_plan(
     else:
         unrecorded = table_hooks.unrecorded_objects(work, recorded)
         if unrecorded:  # Part 2 (c) 8
+            onboarding = _new_schemas(unrecorded, recorded) if scope is not None else []
+            run = f"run {_baseline_schemas(onboarding)}" if onboarding else "run azsqlcd baseline"
             raise refused(
                 "BASELINE_REQUIRED",
                 f"{unrecorded[0]} is in the table model of this release, has no managed row in this "
                 f"database, and no pending migration creates it ({len(unrecorded)} object(s) in all). The "
-                "database was never compared with the model: run azsqlcd baseline",
+                f"database was never compared with the model: {run}",
                 objects=list(unrecorded),
             )
         if work.pending:
@@ -1586,8 +1641,20 @@ def compute_plan(
         and found.kind in unmanaged_kinds
         and fold(key := names.object_key(found.kind, found.schema, found.name)) not in rows
         and fold(key) not in owned_by_engine
+        and in_scope(scope, key)
     )
     notes += _temporal_notes(work.destructive, history)
+    if scope is not None:
+        external = sum(
+            found.type == EXTERNAL_TABLE_TYPE and scope.has_schema(found.schema) for found in user_objects
+        )
+        if external:
+            notes.append(
+                f"{external} external table(s) in the managed schemas: skipped by their type, not managed "
+                "and not listed"
+            )
+        if not scope.every_schema:
+            notes += [unscoped_note(name) for name in catalog.list_schemas(session) if not scope.listed(name)]
 
     # step 9
     syntax_check = None

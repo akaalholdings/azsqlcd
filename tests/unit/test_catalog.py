@@ -12,6 +12,7 @@ import pytest
 
 from azsqlcd import catalog, lex, names, state
 from azsqlcd.catalog import Dependant, Difference, ExportFact, FenceFacts, TableFacts, UserObject
+from azsqlcd.config import Scope
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.sqlerrors import SqlError, sql_error
 from support.fake_session import FakeSession
@@ -778,3 +779,46 @@ def test_a_capture_is_compared_as_stored_json_not_by_key_order():
     assert [d.property for d in catalog.capture_differences(stored, live)] == ["events"]
     # true and 1 are not the same JSON, so a capture that a row gave back is compared as it was stored
     assert catalog.capture_differences({"is_disabled": True}, {"is_disabled": 1}) != []
+
+
+# ------------------------------------------------------------------ [scope]: what the catalog reads
+SCOPE = Scope(("sales", "dbo"), ("dba",), ("dbo.temp_*",))
+IN_SALES_AND_DBO = (
+    "o.[schema_id] IN (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN (N'sales', N'dbo'))"
+)
+
+
+def test_a_scope_limits_a_read_of_every_object_to_its_schemas_in_the_engine():
+    assert catalog.schema_condition("o.[schema_id]", None) is None
+    assert catalog.schema_condition("o.[schema_id]", Scope(("*",))) is None  # every schema
+    assert catalog.schema_condition("o.[schema_id]", SCOPE) == IN_SALES_AND_DBO
+    # the engine resolves the names, without letter case; a name reaches the batch as a literal
+    assert catalog.schema_condition("t.[schema_id]", Scope(("*",), ("dba", "o'x"))) == (
+        "t.[schema_id] NOT IN (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN "
+        "(N'dba', N'o''x'))"
+    )
+    hostile = catalog.schema_condition("o.[schema_id]", Scope((HOSTILE,)))
+    assert hostile is not None
+    assert [t.kind for t in tokens(hostile) if t.kind in ("string", "nstring")] == ["nstring"]
+
+
+def test_the_user_objects_and_the_modules_of_a_scope_are_read_from_its_schemas_only():
+    db = FakeSession()
+    catalog.list_user_objects(db, SCOPE)
+    catalog.capture_modules(db, None, SCOPE)
+    assert len(db.batches) == 2
+    assert all(f" AND {IN_SALES_AND_DBO}" in batch for batch in db.batches)
+    # without a scope the batches are those of before; asked keys are read wherever they are
+    plain = FakeSession()
+    catalog.list_user_objects(plain)
+    catalog.capture_modules(plain, None)
+    catalog.capture_modules(plain, [PROC], SCOPE)
+    assert not any("sys.schemas AS sx" in batch for batch in plain.batches)
+
+
+def test_the_schemas_of_a_database_are_listed_without_the_schemas_of_the_engine_and_of_the_tool():
+    db = FakeSession()
+    found = [("dbo",), ("sys",), ("guest",), ("INFORMATION_SCHEMA",), ("db_owner",), ("azsqlcd",)]
+    db.respond("azsqlcd:list_schemas", [[*found, ("sales",), ("Scratch",), ("db_datareader",)]])
+    assert catalog.list_schemas(db) == ["dbo", "sales", "Scratch"]
+    assert db.batches == ["/* azsqlcd:list_schemas */ SELECT s.[name] FROM sys.schemas AS s;"]

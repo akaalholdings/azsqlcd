@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from azsqlcd import catalog, catalog_tables, lint, modules, names, plan, runner, state, tables
-from azsqlcd.config import Config, resolve_target
+from azsqlcd.config import Config, Scope, in_scope, out_of_scope, resolve_target
 from azsqlcd.errors import ToolError, refused
 from azsqlcd.model import fold
 from azsqlcd.release import Bundle
@@ -42,10 +42,12 @@ from azsqlcd.state import State
 
 # BaselineItem.status
 EQUAL, DIFFERS, ONLY_HERE, MISSING_HERE = "equal", "differs", "only here", "missing here"
-# DriftItem.cls
-MANAGED, MISSING, UNMANAGED = "managed", "missing", "unmanaged"
+# DriftItem.cls. unscoped: a schema that no list of [scope] names
+MANAGED, MISSING, UNMANAGED, UNSCOPED = "managed", "missing", "unmanaged", "unscoped"
 # DriftItem.property of an object that is gone, or that has no managed row
 EXISTS = "exists"
+# DriftItem.property of a schema that no list of [scope] names: reported, never drift
+SCHEMA_UNSCOPED = "SCHEMA_UNSCOPED"
 # DriftItem.property of a managed view that has an index now: a deploy of its file would drop it
 HAS_INDEX = "has_index"
 INDEXED_VIEW = (
@@ -91,6 +93,8 @@ class Export:
     # (key of a history table, key of its temporal table): owned by the engine, no file, not in
     # unmanaged and not in the list for azsqlcd.toml; report_md has one line for each
     history_tables: tuple[tuple[str, str], ...] = ()
+    # with a [scope]: the external tables of the schemas that were read, skipped by their type
+    external_tables: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,8 +133,9 @@ class DriftResult:
 
     @property
     def has_drift(self) -> bool:
-        """A managed object differs from its capture or is gone. An unmanaged object is not drift."""
-        return any(item.cls != UNMANAGED for item in self.items)
+        """A managed object differs from its capture or is gone. An unmanaged object is not drift,
+        and neither is a schema that no list of [scope] names: the tool manages neither."""
+        return any(item.cls not in (UNMANAGED, UNSCOPED) for item in self.items)
 
 
 # ------------------------------------------------------------------ helpers
@@ -253,12 +258,18 @@ class _Facts(NamedTuple):
     outside: list[Quarantined]  # objects that are no module file at all
 
 
-def _export_facts(session: Session) -> _Facts:
+def _export_facts(session: Session, scope: Scope | None = None, schema: str | None = None) -> _Facts:
+    """The facts of export; with a scope, an object outside it is in no list. A database DDL
+    trigger is in no schema: the export of one schema leaves it out."""
     signed: set[str] = set()
     numbered: set[str] = set()
     indexed: set[str] = set()
     outside: list[Quarantined] = []
     for found in catalog.export_facts(session):
+        if found.schema is None and schema is not None:
+            continue
+        if found.schema is not None and scope is not None and not scope.has_schema(found.schema):
+            continue
         if found.fact == catalog.INDEXED_VIEW:
             indexed.add(names.object_key("VIEW", found.schema, found.name))
         elif found.fact == catalog.DATABASE_TRIGGER:
@@ -271,7 +282,8 @@ def _export_facts(session: Session) -> _Facts:
             )
         elif found.fact == catalog.CLR:
             key = names.object_key(catalog.CLR_TYPES[found.type], found.schema, found.name)
-            outside.append(Quarantined(key, "UNSUPPORTED", "a CLR module: it has no definition text"))
+            if in_scope(scope, key):
+                outside.append(Quarantined(key, "UNSUPPORTED", "a CLR module: it has no definition text"))
         elif found.type in catalog.MODULE_TYPES:  # a signature of a table or a key is not about a module
             key = names.object_key(catalog.MODULE_TYPES[found.type], found.schema, found.name)
             (signed if found.fact == catalog.SIGNED else numbered).add(key)
@@ -397,15 +409,20 @@ def _lint_failures(exported: _Exported) -> dict[str, str]:
     return failures
 
 
-def _read_modules(session: Session, config: Config) -> tuple[_Exported, list[Quarantined], list[str]]:
+def _read_modules(
+    session: Session, config: Config, scope: Scope | None = None, schema: str | None = None
+) -> tuple[_Exported, list[Quarantined], list[str]]:
     """(the modules that become object files, the modules and other objects that stay unmanaged,
     the keys of the modules that [unmanaged] objects of azsqlcd.toml lists).
 
     A listed module is left out, as tables.export_tables leaves a listed table out: no file, no
-    check of its text, no quarantine entry. Its entry stays in the list of the report.
+    check of its text, no quarantine entry. Its entry stays in the list of the report. scope: the
+    [scope] of the read; a module outside it is not read, or is left out like a listed one and is
+    in no list. schema: the one schema of `export --schema`.
     """
-    captures = catalog.capture_modules(session, None)
-    facts = _export_facts(session)
+    captures = catalog.capture_modules(session, None, scope)
+    captures = {key: capture for key, capture in captures.items() if in_scope(scope, key)}
+    facts = _export_facts(session, scope, schema)
     unmanaged = list(facts.outside)
     listed = {key.casefold() for key in config.unmanaged_objects}
     skipped = sorted(key for key in captures if key.casefold() in listed)
@@ -453,7 +470,7 @@ def export_modules(session: Session, config: Config) -> ExportResult:
     Raises ToolError REFUSED: NO_VIEW_DEFINITION (of catalog.capture_modules: the export stops),
     PARSEONLY_CANARY.
     """
-    exported, unmanaged, skipped = _read_modules(session, config)
+    exported, unmanaged, skipped = _read_modules(session, config, config.scope)
     title = f"modules of project {_cell(config.project.name)}"
     parts = _modules_report(title, exported, unmanaged, skipped)
     parts += _toml_section(
@@ -469,8 +486,64 @@ def export_modules(session: Session, config: Config) -> ExportResult:
     )
 
 
-def export(session: Session, config: Config) -> Export:
+def export_scope(config: Config, schema: str | None) -> Scope | None:
+    """The [scope] of an export: that of azsqlcd.toml, or cut to the one schema of `export --schema`.
+
+    Raises ToolError REFUSED OUT_OF_SCOPE for the schema of the tool, and for a schema that [scope]
+    exclude names: the files of the export would be OUT_OF_SCOPE.
+    """
+    if schema is None:
+        return config.scope
+    shown = names.quote(schema)
+    if fold(schema) == fold(state.SCHEMA):
+        raise refused("OUT_OF_SCOPE", f"the schema {shown} holds the state of the tool: it is never exported")
+    if config.scope is not None and fold(schema) in {fold(name) for name in config.scope.exclude}:
+        raise refused(
+            "OUT_OF_SCOPE",
+            f"the schema {shown} is in [scope] exclude of azsqlcd.toml: it was reviewed and is not managed. "
+            "Take it out of exclude first, in the pull request that adds its files",
+            schema=schema,
+        )
+    return (config.scope or Scope((schema,))).only(schema)
+
+
+def scope_advice(config: Config, schema: str) -> str:
+    """What `export --schema` tells about [scope] of azsqlcd.toml. The tool never edits the file."""
+    shown = names.quote(schema)
+    if config.scope is None:
+        return f"azsqlcd.toml has no [scope]: every schema is managed, so the schema {shown} needs no entry"
+    if config.scope.has_schema(schema):
+        return f"the schema {shown} is in [scope] schemas of azsqlcd.toml already"
+    return (
+        f"Add {json.dumps(schema, ensure_ascii=False)} to [scope] schemas of azsqlcd.toml, in the pull "
+        "request that adds these files. After the merge run azsqlcd baseline --schema "
+        f"{schema} on every target"
+    )
+
+
+def _scope_report(config: Config, scope: Scope | None, schema: str | None) -> list[str]:
+    if scope is None:
+        return []
+    if schema is not None:
+        read = f"the schema {names.quote(schema)} alone. {scope_advice(config, schema)}"
+    elif scope.every_schema:
+        read = "every schema" + "".join(f", not {names.quote(name)}" for name in scope.exclude)
+    else:
+        read = ", ".join(names.quote(name) for name in scope.schemas)
+    patterns = ", ".join(f"`{_cell(pattern)}`" for pattern in scope.exclude_objects) or "none"
+    return [
+        "## Scope\n",
+        f"Read: {_cell(read)}. Objects that [scope] exclude_objects matches: not read into a file and "
+        f"not listed ({patterns}). What [scope] does not manage is not in this report.\n",
+    ]
+
+
+def export(session: Session, config: Config, schema: str | None = None) -> Export:
     """The export command: export_modules and tables.export_tables as one result (design (c) 1 to 4).
+
+    schema: `export --schema`: the objects of this one schema (export_scope). The snapshot then
+    holds the captures of the schema only; the caller adds them to the snapshot that it has
+    (tables.merge_snapshot).
 
     files: the module files and the table-class files. unmanaged: the objects of both parts that
     stay unmanaged. report_md: the module part, the table part, then the list for [unmanaged]
@@ -489,8 +562,9 @@ def export(session: Session, config: Config) -> Export:
     SECRET = literal (A25): such a text is never written, and a table cannot be left out without
     the objects that need it, so the export stops and names the object.
     """
-    table = tables.export_tables(session, config)
-    exported, quarantined, skipped = _read_modules(session, config)
+    scope = export_scope(config, schema)
+    table = tables.export_tables(session, config, scope, schema)
+    exported, quarantined, skipped = _read_modules(session, config, scope, schema)
     secrets = sorted(path for path, data in table.files.items() if _secret_literal(data))
     if secrets:
         raise refused(
@@ -504,6 +578,7 @@ def export(session: Session, config: Config) -> Export:
         [*quarantined, *(Quarantined(u.object_key, u.code, u.reason) for u in table.unmanaged)]
     )
     parts = _modules_report(f"project {_cell(config.project.name)}", exported, quarantined, skipped)
+    parts += _scope_report(config, scope, schema)
     parts.append(table.report_md)
     parts += _toml_section(
         config,
@@ -518,6 +593,7 @@ def export(session: Session, config: Config) -> Export:
         rename_constraints_sql=table.rename_constraints_sql,
         snapshot=table.snapshot,
         history_tables=table.history_tables,
+        external_tables=table.external_tables,
     )
 
 
@@ -581,15 +657,20 @@ def _not_as_deployed(capture: dict[str, Any]) -> str:
     return "; ".join(found)
 
 
-def _compare(session: Session, bundle: Bundle, env: str) -> _Compared:
+def _compare(session: Session, bundle: Bundle, env: str, scope: Scope | None = None) -> _Compared:
     """Each module file of the release against the live module of its name; then the modules with no file.
 
     The engine resolves the name of a file (catalog.capture_modules with keys), so a module that
-    a deploy of the file would overwrite is never `missing here`.
+    a deploy of the file would overwrite is never `missing here`. scope: only the files and the
+    live modules that it manages are compared.
     """
-    files = plan.module_files(bundle.files)
+    files = {key: file for key, file in plan.module_files(bundle.files).items() if in_scope(scope, key)}
     asked = catalog.capture_modules(session, list(files))
-    every = catalog.capture_modules(session, None)
+    every = {
+        key: found
+        for key, found in catalog.capture_modules(session, None, scope).items()
+        if in_scope(scope, key)
+    }
     indexed = {key.casefold() for key in catalog.indexed_views(session)}
     without_case = {key.casefold(): key for key in every}
     items: list[BaselineItem] = []
@@ -654,9 +735,16 @@ def _snapshot_path() -> str:
     return f"onboarding/{REFERENCE_ENV}/snapshot.json"
 
 
-def _engine_named(session: Session, hooks: tables.Hooks) -> tuple[tuple[str, ...], str]:
+def _model_keys(hooks: tables.Hooks, scope: Scope | None) -> list[str]:
+    """The keys of the table model of the release that the scope manages."""
+    return [key for key in hooks.model if in_scope(scope, key)]
+
+
+def _engine_named(
+    session: Session, hooks: tables.Hooks, scope: Scope | None = None
+) -> tuple[tuple[str, ...], str]:
     """(one line for each constraint of the model that the engine named here, the rename script)."""
-    found = hooks.engine_named(session, list(hooks.model))
+    found = hooks.engine_named(session, _model_keys(hooks, scope))
     lines = tuple(
         f"{item.table_key} {item.kind} {names.quote(item.live_name)} -> {names.quote(item.fixed_name)}"
         for item in found
@@ -664,14 +752,16 @@ def _engine_named(session: Session, hooks: tables.Hooks) -> tuple[tuple[str, ...
     return lines, tables.rename_script(found)
 
 
-def _compare_tables(session: Session, bundle: Bundle, hooks: tables.Hooks | None) -> _Tables:
+def _compare_tables(
+    session: Session, bundle: Bundle, hooks: tables.Hooks | None, scope: Scope | None = None
+) -> _Tables:
     """Report only: the table-class objects of this database against the reference snapshot."""
     if hooks is None:
         return _Tables()
     data = bundle.files.get(_snapshot_path())
     if data is None:
         # nothing to compare with; the names that a baseline that writes refuses need no snapshot
-        engine_named, rename_sql = _engine_named(session, hooks)
+        engine_named, rename_sql = _engine_named(session, hooks, scope)
         return _Tables(modelled=True, engine_named=engine_named, rename_sql=rename_sql)
     try:
         snapshot = json.loads(data)
@@ -679,8 +769,8 @@ def _compare_tables(session: Session, bundle: Bundle, hooks: tables.Hooks | None
         snapshot = None
     if not isinstance(snapshot, dict):
         raise refused("SNAPSHOT_INVALID", f"{_snapshot_path()} of the release is not a JSON object")
-    compared = tables.compare_with_snapshot(session, snapshot, list(hooks.model))
-    engine_named, rename_sql = _engine_named(session, hooks)
+    compared = tables.compare_with_snapshot(session, snapshot, _model_keys(hooks, scope), scope)
+    engine_named, rename_sql = _engine_named(session, hooks, scope)
     return _Tables(True, compared, engine_named=engine_named, rename_sql=rename_sql)
 
 
@@ -766,6 +856,7 @@ def _baseline_report(
     baselined: bool,
     report: Report | None,
     table: _Tables,
+    schema: str | None = None,
 ) -> str:
     items = compared.items
     differing = [item.object_key for item in items if item.status == DIFFERS]
@@ -774,8 +865,9 @@ def _baseline_report(
         if report is None
         else f"Recorded as run {report.run_id} (started {report.started_utc} UTC)."
     )
+    of = "" if schema is None else f", the schema {_cell(names.quote(schema))}"
     parts = [
-        f"# azsqlcd baseline: {_cell(env)} / {_cell(target_id)}\n",
+        f"# azsqlcd baseline: {_cell(env)} / {_cell(target_id)}{of}\n",
         mode + (" This database has a baseline step already." if baselined else "") + "\n",
         "## Module counts\n" if table.modelled else "Modules only. Table-class objects are not compared.\n",
         _table(
@@ -824,6 +916,7 @@ def baseline(
     tool_version: str,
     tool_digest: str,
     table_hooks: tables.Hooks | None = None,
+    schema: str | None = None,
 ) -> BaselineResult:
     """Compare an existing database with the files of the release, and record it.
 
@@ -860,8 +953,15 @@ def baseline(
     (Part 2 (c) 8); the run then records the table-class objects only and leaves every module row
     as it is.
 
+    With a [scope] only what it manages is compared and recorded. schema (`baseline --schema`):
+    one schema that [scope] of the release manages, onboarded alone. Only its module files and its
+    table-class objects are compared and recorded, with a baseline step of its own; no row of
+    another schema is read or written. It is refused (ALREADY_BASELINED) when this database
+    records a managed object of the schema, whatever other baseline step there is.
+
     Raises ToolError REFUSED before any batch: ENV_NOT_CONFIGURED, TARGET_NOT_CONFIGURED,
-    BASELINE_ACK_INVALID. From the database, in both modes: the fence codes, CONFIRM_MISMATCH,
+    BASELINE_ACK_INVALID, OUT_OF_SCOPE (a schema that [scope] of the release does not manage).
+    From the database, in both modes: the fence codes, CONFIRM_MISMATCH,
     STATE_MISSING and the other codes of read_state, FENCE_META_MISMATCH, NO_VIEW_DEFINITION,
     MODULE_INVALID; report_only also SNAPSHOT_INVALID. Write mode raises runner.RunError (a
     ToolError with the Report) and adds ALREADY_BASELINED, BASELINE_ACK_REQUIRED (a module differs
@@ -871,13 +971,16 @@ def baseline(
     """
     _, target = resolve_target(config, env, target_id)
     acknowledged = _acknowledged(bundle, env)
+    scope = config.scope if schema is None else _schema_scope(config, schema)
 
     def result(compared: _Compared, baselined: bool, report: Report | None, table: _Tables) -> BaselineResult:
         differing = tuple(item.object_key for item in compared.items if item.status == DIFFERS)
         return BaselineResult(
             items=compared.items,
             live_files=compared.live_files,
-            report_md=_baseline_report(env, target_id, compared, acknowledged, baselined, report, table),
+            report_md=_baseline_report(
+                env, target_id, compared, acknowledged, baselined, report, table, schema
+            ),
             overwrite_modules=differing,
             unacknowledged=tuple(key for key in differing if key not in acknowledged),
             report=report,
@@ -899,9 +1002,9 @@ def baseline(
                 confirmed=confirm_database,
             )
         recorded = _bound_state(session, config, env)
-        baselined = any(step.kind == "baseline" for step in recorded.steps)
-        compared = _compare(session, bundle, env)
-        return result(compared, baselined, None, _compare_tables(session, bundle, table_hooks))
+        baselined = schema is None and any(step.kind == "baseline" for step in recorded.steps)
+        compared = _compare(session, bundle, env, scope)
+        return result(compared, baselined, None, _compare_tables(session, bundle, table_hooks, scope))
 
     done: list[tuple[_Compared, bool, _Tables]] = []
 
@@ -912,15 +1015,29 @@ def baseline(
             names.parse_object_key(key)[0] in names.TABLE_CLASS_KINDS for key in recorded.objects
         )
         # Part 2 (c) 8: the modules are recorded, and the table model came later
-        tables_only = baselined and table_hooks is not None and not table_rows
-        if baselined and not tables_only:
+        tables_only = schema is None and baselined and table_hooks is not None and not table_rows
+        if schema is not None:
+            held = sorted(
+                key
+                for key, row in recorded.objects.items()
+                if row.status == "managed" and fold(plan.schema_of(key)) == fold(schema)
+            )
+            if held:
+                raise refused(
+                    "ALREADY_BASELINED",
+                    f"this database records {len(held)} managed object(s) of the schema "
+                    f"{names.quote(schema)} (first: {held[0]}): it was onboarded before. An object that "
+                    "changed since is drift (azsqlcd drift, azsqlcd resolve --accept-drift)",
+                    objects=held,
+                )
+        elif baselined and not tables_only:
             raise refused(
                 "ALREADY_BASELINED",
                 "this database has a baseline step: it was recorded before. An object that changed "
                 "since is drift (azsqlcd drift, azsqlcd resolve --accept-drift); a module that the tool "
                 "does not manage is adopted with azsqlcd resolve --adopt-module",
             )
-        compared = _Compared((), {}, {}) if tables_only else _compare(session, bundle, env)
+        compared = _Compared((), {}, {}) if tables_only else _compare(session, bundle, env, scope)
         differing = [item.object_key for item in compared.items if item.status == DIFFERS]
         unacknowledged = [key for key in differing if key not in acknowledged]
         if unacknowledged:
@@ -935,7 +1052,7 @@ def baseline(
             )
         # a constraint that the engine named reads back as the constraint of the model, and would be
         # recorded under the name of the file: a name that this database does not have
-        engine_named, rename_sql = _engine_named(session, table_hooks) if table_hooks else ((), "")
+        engine_named, rename_sql = _engine_named(session, table_hooks, scope) if table_hooks else ((), "")
         if engine_named:
             raise refused(
                 "CONSTRAINT_NAMES",
@@ -949,7 +1066,8 @@ def baseline(
             )
         # the read-back raises READBACK_MISMATCH for an object that differs from the model or is
         # missing; in this frame nothing was executed, so it leaves as a refusal
-        read = table_hooks.read_back(session, bundle, list(table_hooks.model), None) if table_hooks else {}
+        keys = _model_keys(table_hooks, scope) if table_hooks else []
+        read = table_hooks.read_back(session, bundle, keys, None) if table_hooks else {}
         table_captures = {key: capture for key, capture in read.items() if capture is not None}
         table = _Tables(table_hooks is not None, recorded=len(table_captures) if table_hooks else None)
         done.append((compared, tables_only, table))
@@ -957,6 +1075,8 @@ def baseline(
         counts = f"{recorded_modules} module(s), {len(differing)} to overwrite"
         if table_hooks is not None:
             counts = f"{len(table_captures)} table-class object(s)" + ("" if tables_only else f", {counts}")
+        if schema is not None:
+            counts = f"schema {names.quote(schema)}: {counts}"
 
         def writes(run_id: int) -> list[str]:
             objects = [
@@ -998,6 +1118,28 @@ def baseline(
     return result(compared, tables_only, report, table)
 
 
+def _schema_scope(config: Config, schema: str) -> Scope:
+    """The scope of `baseline --schema`: [scope] of the release cut to the schema. ToolError
+    REFUSED OUT_OF_SCOPE for a schema that the scope of the release does not manage: the pull
+    request that brings its files adds it to [scope] schemas."""
+    why = config_out_of_scope(config, schema)
+    if why is not None:
+        raise refused(
+            "OUT_OF_SCOPE",
+            f"{why}. Onboard a schema with the release whose azsqlcd.toml adds it to [scope] schemas, "
+            "with its files. Nothing was read",
+            schema=schema,
+        )
+    return (config.scope or Scope((schema,))).only(schema)
+
+
+def config_out_of_scope(config: Config, schema: str) -> str | None:
+    """Why [scope] of the config does not manage the schema; None when it does."""
+    if fold(schema) == fold(state.SCHEMA):
+        return f"the schema {names.quote(schema)} holds the state of the tool and is never managed"
+    return out_of_scope(config.scope, names.object_key("SCHEMA", None, schema))
+
+
 # ------------------------------------------------------------------ drift
 def drift(
     session: Session,
@@ -1011,7 +1153,9 @@ def drift(
 
     One item for each property of a managed object that differs (cls managed), one for a managed
     object that is gone (cls missing), one for a live object with no managed row (cls unmanaged;
-    reported, never drift). A managed view that has an index now has the item `has_index` (cls
+    reported, never drift), and with a [scope] one for each schema that no list of it names (cls
+    unscoped, property SCHEMA_UNSCOPED; reported, never drift). What [scope] does not manage is not
+    read and not compared. A managed view that has an index now has the item `has_index` (cls
     managed): ALTER VIEW would drop the index, and the runner refuses to send it. Modules are
     compared here; table-class objects by table_hooks.table_drift, and without table_hooks not at
     all. An item holds a key, a property name and hashes, never text (A25). The bundle is not
@@ -1022,7 +1166,8 @@ def drift(
     """
     _, target = resolve_target(config, env, target_id)
     plan.check_fence(catalog.fence_facts(session), target.database)
-    recorded = _bound_state(session, config, env)
+    scope = config.scope
+    recorded = plan.scoped_state(_bound_state(session, config, env), scope)
     managed = {key: row for key, row in recorded.objects.items() if row.status == "managed"}
     module_keys = [key for key in managed if names.parse_object_key(key)[0] in names.MODULE_KINDS]
     live = catalog.capture_modules(session, module_keys)
@@ -1062,11 +1207,21 @@ def drift(
     # and is not an unmanaged object. Without table hooks no table is listed
     history = {} if table_hooks is None else catalog_tables.history_tables(session)
     owned_by_engine = {fold(key) for key in history}
-    for found in catalog.list_user_objects(session):
+    for found in catalog.list_user_objects(session, scope):
         if found.kind is not None and found.kind in kinds:
             key = names.object_key(found.kind, found.schema, found.name)
-            if key.casefold() not in managed_without_case and fold(key) not in owned_by_engine:
+            if (
+                key.casefold() not in managed_without_case
+                and fold(key) not in owned_by_engine
+                and in_scope(scope, key)
+            ):
                 items.append(DriftItem(key, EXISTS, None, None, UNMANAGED))
+    if scope is not None and not scope.every_schema:
+        items += [
+            DriftItem(names.object_key("SCHEMA", None, name), SCHEMA_UNSCOPED, None, None, UNSCOPED)
+            for name in catalog.list_schemas(session)
+            if not scope.listed(name)
+        ]
     return DriftResult(tuple(sorted(items, key=lambda item: (item.object_key, item.property))))
 
 

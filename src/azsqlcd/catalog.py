@@ -18,6 +18,7 @@ from itertools import batched
 from typing import Any
 
 from azsqlcd import names
+from azsqlcd.config import Scope
 from azsqlcd.errors import refused
 from azsqlcd.session import Session
 from azsqlcd.sqlerrors import SqlError
@@ -92,6 +93,27 @@ def _chunks(keys: Collection[str]) -> list[tuple[str, ...]]:
     return list(batched(sorted(set(keys)), KEY_CHUNK))
 
 
+def schema_condition(column: str, scope: Scope | None) -> str | None:
+    """The condition on a schema_id column that limits a read of every object to the schemas of
+    [scope]; None when nothing limits it (no scope, or every schema with nothing excluded).
+
+    The engine resolves the names, without letter case, from sys.schemas: a listed schema that does
+    not exist matches nothing and stops nothing. A pattern of exclude_objects is decided in Python
+    on the rows; the engine only keeps the schemas that the scope cannot use away from the read.
+    """
+    if scope is None or (scope.every_schema and not scope.exclude):
+        return None
+    listed = scope.exclude if scope.every_schema else scope.schemas
+    values = ", ".join(names.sql_literal(name) for name in listed)
+    test = "NOT IN" if scope.every_schema else "IN"
+    return f"{column} {test} (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN ({values}))"
+
+
+def _and(column: str, scope: Scope | None) -> str:
+    condition = schema_condition(column, scope)
+    return "" if condition is None else f" AND {condition}"
+
+
 # ------------------------------------------------------------------ fence and lock
 @dataclass(frozen=True)
 class FenceFacts:
@@ -145,10 +167,11 @@ def service_objective(session: Session) -> str:
 
 
 # ------------------------------------------------------------------ modules
-def _modules_batch(source: str | None) -> str:
+def _modules_batch(source: str | None, managed: Scope | None = None) -> str:
     if source is None:
         requested, origin = "CAST(NULL AS nvarchar(300))", "sys.objects AS o"
         scope = f" AND o.[is_ms_shipped] = 0 AND s.[name] <> {names.sql_literal(SCHEMA)}"
+        scope += _and("o.[schema_id]", managed)
     else:
         requested, origin = (
             "k.[requested_key]",
@@ -182,12 +205,15 @@ def _trigger_events(text: str | None) -> dict[str, dict[str, bool]]:
     return events
 
 
-def capture_modules(session: Session, keys: Collection[str] | None) -> dict[str, dict[str, Any]]:
+def capture_modules(
+    session: Session, keys: Collection[str] | None, scope: Scope | None = None
+) -> dict[str, dict[str, Any]]:
     """Capture format 1 of views, procedures, functions and DML triggers.
 
     keys None: every module that is not shipped by Microsoft, outside schema azsqlcd, under the
-    key that the catalog names give. keys given: those that exist, each under the key that was
-    asked for; a key without an object is absent from the result.
+    key that the catalog names give; with a scope only those of its schemas (schema_condition).
+    keys given: those that exist, each under the key that was asked for; a key without an object
+    is absent from the result. A scope does not limit asked keys.
 
     Properties: kind, type (V P FN IF TF TR), definition (line ends as LF; None when encrypted),
     is_encrypted, uses_ansi_nulls, uses_quoted_identifier, is_schema_bound,
@@ -198,7 +224,7 @@ def capture_modules(session: Session, keys: Collection[str] | None) -> dict[str,
     object. Without it the tool cannot tell, and stops: ToolError REFUSED NO_VIEW_DEFINITION.
     """
     if keys is None:
-        found = rows(session, _modules_batch(None))
+        found = rows(session, _modules_batch(None, scope))
     else:
         found = [
             row for chunk in _chunks(keys) for row in rows(session, _modules_batch(object_source(chunk)))
@@ -254,14 +280,17 @@ class UserObject:
     type: str  # sys.objects.type; HISTORY_TABLE_TYPE for the history table of a temporal table
 
 
-def list_user_objects(session: Session) -> list[UserObject]:
-    """Every row of sys.objects that is not shipped by Microsoft and not in schema azsqlcd.
+def list_user_objects(session: Session, scope: Scope | None = None) -> list[UserObject]:
+    """Every row of sys.objects that is not shipped by Microsoft and not in schema azsqlcd; with a
+    scope, only those of its schemas (schema_condition). A pattern of exclude_objects does not
+    limit the read: an object that it excludes still takes its name in its schema.
 
     The names of one schema are one namespace, so this list answers "is this name taken"
     (constraints included), and its rows with a kind are the candidates for the unmanaged list.
     The history table of a system-versioned table takes a name and has no kind: the engine owns it,
     the file of its temporal table names it, and plan and drift do not list it as unmanaged.
-    Schemas and types are not objects of sys.objects and are not in the list.
+    An external table (type ET) has no kind either. Schemas and types are not objects of
+    sys.objects and are not in the list.
     """
     found = rows(
         session,
@@ -270,13 +299,44 @@ def list_user_objects(session: Session) -> list[UserObject]:
         "WHERE t.[object_id] = o.[object_id] AND t.[temporal_type] = 1) "
         f"THEN {names.sql_literal(HISTORY_TABLE_TYPE)} ELSE RTRIM(o.[type]) END "
         "FROM sys.objects AS o JOIN sys.schemas AS s ON s.[schema_id] = o.[schema_id] "
-        f"WHERE o.[is_ms_shipped] = 0 AND s.[name] <> {names.sql_literal(SCHEMA)} "
-        "ORDER BY s.[name], o.[name];",
+        f"WHERE o.[is_ms_shipped] = 0 AND s.[name] <> {names.sql_literal(SCHEMA)}"
+        f"{_and('o.[schema_id]', scope)} ORDER BY s.[name], o.[name];",
     )
     return [
         UserObject(OBJECT_TYPES.get(str(code).strip()), str(schema), str(name), str(code).strip())
         for schema, name, code in found
     ]
+
+
+# Schemas of every database that hold no object of a user, and the schema of the tool: no list of
+# [scope] names them, and an unlisted one of them is never SCHEMA_UNSCOPED. dbo is a schema of users.
+ENGINE_SCHEMAS = frozenset(
+    name.casefold()
+    for name in (
+        "sys",
+        "guest",
+        "INFORMATION_SCHEMA",
+        "db_owner",
+        "db_accessadmin",
+        "db_securityadmin",
+        "db_ddladmin",
+        "db_backupoperator",
+        "db_datareader",
+        "db_datawriter",
+        "db_denydatareader",
+        "db_denydatawriter",
+        SCHEMA,
+    )
+)
+
+
+def list_schemas(session: Session) -> list[str]:
+    """The names of the schemas of the database that users can hold objects in, dbo with them, in
+    the order of the names without letter case. Tag azsqlcd:list_schemas. Rows: (name)."""
+    found = rows(session, "/* azsqlcd:list_schemas */ SELECT s.[name] FROM sys.schemas AS s;")
+    return sorted(
+        (str(name) for (name,) in found if str(name).casefold() not in ENGINE_SCHEMAS), key=str.casefold
+    )
 
 
 def object_exists(session: Session, key: str) -> bool:

@@ -881,7 +881,8 @@ def _cmd_drift(call: _Call) -> None:
         ]
         call.summary.append(_table(("Class", "Object", "Property", "Recorded hash", "Live hash"), rows))
     if found.has_drift:
-        drifted = sorted({item.object_key for item in found.items if item.cls != onboard.UNMANAGED})
+        reported = (onboard.UNMANAGED, onboard.UNSCOPED)  # reported, never drift
+        drifted = sorted({item.object_key for item in found.items if item.cls not in reported})
         raise ToolError(
             Exit.DRIFT,
             "DRIFT_FOUND",
@@ -898,13 +899,19 @@ def _cmd_export(call: _Call) -> None:
     out.mkdir(parents=True, exist_ok=True)
     config = _root_config(args.root)
     _, target = resolve_target(config, args.env, args.target)
+    onboard.export_scope(config, args.schema)  # a schema that cannot be exported is refused before a session
+    snapshot = _snapshot_of(Path(args.root), args.env) if args.schema is not None else None
     with _read_session(call, config) as db:
         plan.check_fence(catalog.fence_facts(db), target.database)
-        exported = onboard.export(db, config)
+        exported = onboard.export(db, config, args.schema)
     reports = out / "onboarding" / args.env
     files: dict[Path, bytes | str] = {out / path: data for path, data in exported.files.items()}
     files[reports / "export.md"] = exported.report_md
-    files[reports / "snapshot.json"] = json.dumps(exported.snapshot, indent=2, sort_keys=True) + "\n"
+    whole = exported.snapshot
+    if args.schema is not None and snapshot is not None:
+        # the captures of the schemas that are managed already stay as the repository holds them
+        whole = tables.merge_snapshot(snapshot, exported.snapshot, args.schema)
+    files[reports / "snapshot.json"] = json.dumps(whole, indent=2, sort_keys=True) + "\n"
     if exported.rename_constraints_sql:
         files[reports / "rename-constraints.sql"] = exported.rename_constraints_sql
     for file, data in files.items():
@@ -919,6 +926,8 @@ def _cmd_export(call: _Call) -> None:
                 path=str(file),
             ) from None
     counts = f"{len(exported.files)} object file(s); {len(exported.unmanaged)} object(s) stay unmanaged"
+    if exported.external_tables:
+        counts += f"; {len(exported.external_tables)} external table(s) skipped by their type"
     if exported.history_tables:
         # not unmanaged and not exported: the file of each temporal table names its history table
         counts += (
@@ -928,6 +937,25 @@ def _cmd_export(call: _Call) -> None:
     call.say(f"{counts}. Written under {out}")
     call.say(f"report: {reports / 'export.md'}")
     call.summary.append(counts + "\n")
+    if args.schema is not None:
+        advice = onboard.scope_advice(config, args.schema)
+        call.say(advice)
+        call.summary.append(_md(advice) + "\n")
+
+
+def _snapshot_of(root: Path, env: str) -> dict[str, Any] | None:
+    """onboarding/<env>/snapshot.json of the repository; None when there is none. The export of one
+    schema adds its captures to it. ToolError SNAPSHOT_INVALID for a file that is not JSON."""
+    path = root / "onboarding" / env / "snapshot.json"
+    if not path.is_file():
+        return None
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:  # also UnicodeDecodeError
+        raise refused("SNAPSHOT_INVALID", f"{path} cannot be read as JSON ({type(error).__name__})") from None
+    if not isinstance(found, dict):
+        raise refused("SNAPSHOT_INVALID", f"{path} is not a JSON object")
+    return found
 
 
 def _cmd_baseline(call: _Call) -> None:
@@ -939,6 +967,7 @@ def _cmd_baseline(call: _Call) -> None:
         "tool_version": __version__,
         "tool_digest": release.tool_digest(),
         "table_hooks": _hooks(bundle, config),
+        "schema": args.schema,
     }
     done: list[onboard.BaselineResult] = []
 
@@ -1323,6 +1352,7 @@ def parsers() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParse
     export = add("export", _cmd_export, root, target, help="catalog to object files (onboarding)")
     export.add_argument("--env", required=True, metavar="E", help="environment of azsqlcd.toml")
     export.add_argument("--out", required=True, metavar="DIR", help="schema/ and onboarding/<env>/ go here")
+    export.add_argument("--schema", metavar="NAME", help="export this one schema: onboard schema by schema")
 
     baseline = add("baseline", _cmd_baseline, bundle, target, help="record an existing database")
     baseline.add_argument(
@@ -1333,6 +1363,9 @@ def parsers() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParse
     )
     baseline.add_argument("--confirm-database", required=True, metavar="NAME", help=confirm)
     baseline.add_argument("--out", metavar="DIR", help="directory for report.json")
+    baseline.add_argument(
+        "--schema", metavar="NAME", help="record this one schema of [scope]; other rows stay as they are"
+    )
 
     resolve = add("resolve", _cmd_resolve, bundle, target, help="human recovery: one action (A16)")
     resolve.add_argument("--confirm-database", required=True, metavar="NAME", help=confirm)

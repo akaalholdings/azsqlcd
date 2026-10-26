@@ -1852,13 +1852,13 @@ def _read_project(files: Mapping[str, bytes]) -> tuple[config.Project | None, st
     return (None if found is None else found.project), problem
 
 
-def _file_keys(path: str, parsed: _Parsed) -> list[str]:
-    """The keys that an object file can be of. A module file names its object in its header; a
-    table-class file is read from its name, <schema>.<name>.sql, so a schema name with a dot gives
-    one key for each dot of the stem."""
+def _file_keys(path: str, module_keys: Mapping[str, str]) -> list[str]:
+    """The keys that an object file can be of. A module file names its object in its header
+    (module_keys: path -> key of each module file that reads); a table-class file is read from its
+    name, <schema>.<name>.sql, so a schema name with a dot gives one key for each dot of the stem."""
     kind = _kind(path)
     if kind in names.MODULE_KINDS:
-        return [m.key for m in parsed.modules if m.path == path]
+        return [module_keys[path]] if path in module_keys else []
     if kind is None:
         return []
     stem = names.key_for_path(path)[1]
@@ -1876,8 +1876,9 @@ def _scope_findings(files: Mapping[str, bytes], parsed: _Parsed, scope: config.S
     contradict each other: plan, drift and export do not see the object, so its file would never
     be deployed, compared or recorded. A file that cannot be read is reported by its own rule."""
     out: list[Finding] = []
+    module_keys = {m.path: m.key for m in parsed.modules}
     for path in sorted(files) if scope is not None else ():
-        keys = _file_keys(path, parsed)
+        keys = _file_keys(path, module_keys)
         reasons = [config.out_of_scope(scope, key) for key in keys]
         if keys and all(reasons):
             message = (

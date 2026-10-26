@@ -30,7 +30,7 @@ from azsqlcd import (
 )
 from azsqlcd.catalog import Difference
 from azsqlcd.catalog_tables import SystemNamed, Unsupported, read_model
-from azsqlcd.config import Config, load_config
+from azsqlcd.config import Config, Scope, load_config
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.model import (
     ON_PRIMARY,
@@ -1684,6 +1684,82 @@ def test_a_table_on_an_alias_type_that_is_not_exported_stays_unmanaged():
         (sequence.key, DEPENDS_ON_UNMANAGED),
         (uses.key, DEPENDS_ON_UNMANAGED),
     ]
+
+
+WORK = Table(
+    "scratch",
+    "Work",
+    (Column("CustomerId", TypeRef("int"), False),),
+    (PrimaryKey("PK_Work", True, (KeyColumn("CustomerId"),)),),
+)
+USES_WORK = Table(
+    "sales",
+    "Uses",
+    (Column("CustomerId", TypeRef("int"), False),),
+    (ForeignKey("FK_Uses_Work", ("CustomerId",), "scratch", "Work", ("CustomerId",)),),
+)
+INVOICE = Table(
+    "billing",
+    "Invoice",
+    (Column("CustomerId", TypeRef("int"), False),),
+    (ForeignKey("FK_Invoice_Customer", ("CustomerId",), "sales", "Customer", ("CustomerId",)),),
+)
+
+
+def scoped(scope: Scope) -> Config:
+    return dataclasses.replace(config(), scope=scope)
+
+
+def test_a_foreign_key_to_a_table_outside_the_scope_is_a_foreign_key_to_an_unmanaged_table():
+    model = Model([SALES, CUSTOMER, Schema("scratch"), WORK, USES_WORK])
+    cfg = scoped(Scope(("sales",), ("scratch",)))
+
+    result = export_tables(database(model), cfg, cfg.scope)
+
+    assert sorted(result.files) == ["schema/schemas/sales.sql", "schema/tables/sales.Customer.sql"]
+    needs = (USES_WORK.key, DEPENDS_ON_UNMANAGED, f"it needs {WORK.key}, which is not managed")
+    assert [(u.object_key, u.code, u.reason) for u in result.unmanaged] == [needs]
+    # the rule of today: the same table when [unmanaged] objects lists the target, with no scope
+    listed = export_tables(database(model), config(unmanaged=[WORK.key, "SCHEMA:[scratch]"]))
+    assert needs in [(u.object_key, u.code, u.reason) for u in listed.unmanaged]
+
+
+def test_the_export_of_one_schema_takes_an_object_of_another_managed_schema_as_managed():
+    model = Model([SALES, CUSTOMER, Schema("billing"), INVOICE])
+    cfg = scoped(Scope(("sales",)))
+
+    result = export_tables(database(model), cfg, cfg.scope.only("billing"), "billing")
+
+    assert sorted(result.files) == ["schema/schemas/billing.sql", "schema/tables/billing.Invoice.sql"]
+    assert result.unmanaged == () and set(result.snapshot["captures"]) == {"SCHEMA:[billing]", INVOICE.key}
+    # a schema that the scope does not manage is no target: the key needs an unmanaged table
+    other = scoped(Scope(("dbo",)))
+    result = export_tables(database(model), other, other.scope.only("billing"), "billing")
+    assert [(u.object_key, u.code) for u in result.unmanaged] == [(INVOICE.key, DEPENDS_ON_UNMANAGED)]
+    unlisted = scoped(Scope(("sales",)))
+    listed = dataclasses.replace(unlisted, unmanaged_objects=(CUSTOMER_KEY,))
+    result = export_tables(database(model), listed, unlisted.scope.only("billing"), "billing")
+    assert [(u.object_key, u.code) for u in result.unmanaged] == [(INVOICE.key, DEPENDS_ON_UNMANAGED)]
+
+
+def test_the_snapshot_of_one_schema_replaces_the_captures_of_that_schema_only():
+    old = {
+        "format": 1,
+        "captures": {"SCHEMA:[sales]": {"a": 1}, "TABLE:[Billing].[Old]": {"b": 2}, CUSTOMER_KEY: {"c": 3}},
+        "column_order": {CUSTOMER_KEY: ["CustomerId"], "TABLE:[Billing].[Old]": ["x"]},
+    }
+    new = {"format": 1, "captures": {INVOICE.key: {"d": 4}}, "column_order": {INVOICE.key: ["CustomerId"]}}
+
+    merged = tables.merge_snapshot(old, new, "billing")
+
+    assert merged == {
+        "format": 1,
+        "captures": {"SCHEMA:[sales]": {"a": 1}, CUSTOMER_KEY: {"c": 3}, INVOICE.key: {"d": 4}},
+        "column_order": {CUSTOMER_KEY: ["CustomerId"], INVOICE.key: ["CustomerId"]},
+    }
+    with pytest.raises(ToolError) as e:
+        tables.merge_snapshot({"format": 2}, new, "billing")
+    assert e.value.reason_code == "SNAPSHOT_INVALID"
 
 
 def test_an_object_that_azsqlcd_toml_lists_as_unmanaged_is_skipped_and_stays_in_the_list():

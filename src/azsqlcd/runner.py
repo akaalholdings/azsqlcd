@@ -1147,10 +1147,16 @@ def _columns_gone(run: _Run, key: str, removed: set[tuple[str, str]]) -> list[st
     )
 
 
+def _watched(run: _Run) -> dict[str, state.ObjectRow]:
+    """The managed rows that a unit with a data or raw batch must leave as they are: those of the
+    objects that [scope] manages. A raw batch is for an object outside the scope too."""
+    return _managed(plan.scoped_state(_have(run.recorded), run.job.config.scope))
+
+
 def _snapshot(run: _Run, hooks: TableHooks | None) -> _Snapshot:
     """Every managed object as the catalog holds it now: module captures, and the drift of the rest."""
     recorded = _have(run.recorded)
-    managed = _managed(recorded)
+    managed = _watched(run)
     live = catalog.capture_modules(run.db, [key for key in managed if _is_module(key)])
     other = sorted(key for key in managed if not _is_module(key))
     drift = hooks.table_drift(run.db, recorded, other) if hooks is not None and other else {}
@@ -1170,7 +1176,7 @@ def _refuse_untouched_changes(
     after = _snapshot(run, hooks)
     changed: list[dict[str, Any]] = []
     touched_folded = {fold(key) for key in touched}
-    for key in sorted(_managed(_have(run.recorded))):
+    for key in sorted(_watched(run)):
         if fold(key) in touched_folded:
             continue
         was, now = before[0].get(key), after[0].get(key)
@@ -1770,7 +1776,9 @@ def mark_applied(
             return lambda run_id: [
                 state.set_step_status(migration, "ok", note=f"marked applied by run {run_id}")
             ]
-        work = plan.pending_work(bundle, recorded, config.project.module_chunk)
+        work = plan.pending_work(
+            bundle, plan.scoped_state(recorded, config.scope), config.project.module_chunk
+        )
         first = work.pending[0] if work.pending else None
         if first is None or first.file != migration or first.mode != "tx":
             raise _not_applicable(

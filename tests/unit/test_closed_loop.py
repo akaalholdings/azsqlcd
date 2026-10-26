@@ -903,6 +903,242 @@ def test_a_database_that_is_behind_is_caught_up_release_by_release_and_never_goe
     assert db.module(PROCEDURE_KEY).sent == PROCEDURE_3[1]
 
 
+# ------------------------------------------------------------------ 9. [scope]: one schema at a time
+SCOPE = '\n[scope]\nschemas = ["sales", "dbo"]\nexclude = ["scratch"]\nexclude_objects = ["dbo.temp_*"]\n'
+CURRENCY = Table(
+    "dbo",
+    "Currency",
+    (Column("Code", TypeRef("char", length=3), False),),
+    (PrimaryKey("PK_Currency", True, (KeyColumn("Code"),)),),
+)
+TEMP_LOAD = Table("dbo", "temp_Load", (Column("Id", TypeRef("int"), False),))
+SCRATCH_WORK = Table("scratch", "Work", (Column("Id", TypeRef("int"), False),))
+BILLING = Schema("billing")
+INVOICE = Table(
+    "billing",
+    "Invoice",
+    (Column("InvoiceId", TypeRef("int"), False), Column("CustomerId", TypeRef("int"), False)),
+    (
+        PrimaryKey("PK_Invoice", True, (KeyColumn("InvoiceId"),)),
+        # a key to a table of a schema that is managed already: the schema export keeps the table
+        ForeignKey("FK_Invoice_Customer", ("CustomerId",), "sales", "Customer", ("CustomerId",)),
+    ),
+)
+DUE = (
+    "schema/views/billing.vw_Due.sql",
+    "CREATE OR ALTER VIEW [billing].[vw_Due] AS\nSELECT [InvoiceId] FROM [billing].[Invoice];\n",
+)
+DUE_KEY = names.object_key("VIEW", "billing", "vw_Due")
+OUTSIDE = {TEMP_LOAD.key, SCRATCH_WORK.key, "SCHEMA:[scratch]", "TABLE:[dbo].[ext_Rates]"}
+
+
+def estate(project: Project) -> FakeDatabase:
+    """A database that the tool never saw: the sales schema of release 1 and a dbo table, a dbo
+    table that [scope] excludes by pattern, an external table, an excluded schema, and the schema
+    billing, which no list of [scope] names yet."""
+    db = project.database()
+    objects = (SALES, CUSTOMER, ORDER, CURRENCY, TEMP_LOAD, Schema("scratch"), SCRATCH_WORK, BILLING, INVOICE)
+    db.out_of_band(*emit.emit_create_script(Model(objects)))
+    db.out_of_band(FUNCTION[1], VIEW[1], PROCEDURE[1], DUE[1])
+    db.external_tables.add(("dbo", "ext_Rates"))
+    return db
+
+
+def object_files(folder: Path) -> dict[str, str]:
+    return {path.relative_to(folder).as_posix(): path.read_text() for path in folder.glob("schema/*/*.sql")}
+
+
+def test_a_database_is_onboarded_schema_by_schema_and_what_the_scope_leaves_out_is_never_seen(
+    tmp_path, capsys, monkeypatch
+):
+    project = Project(tmp_path, capsys, table_model=False)
+    db = estate(project)
+    project.write("azsqlcd.toml", TOML.format(table_model="false") + SCOPE)
+    project.main = project.commit("the scope of the onboarding")
+    monkeypatch.chdir(tmp_path)  # baseline writes its report under the working directory
+
+    # export: files for the managed objects only. The excluded schema, the pattern and the external
+    # table are not read, not written and not listed as unmanaged
+    exported = tmp_path / "exported"
+    done = project.tool("export", "--root", str(project.repo), *TARGET, "--out", str(exported), db=db)
+    assert done.code == 0, done.err
+    first_files = object_files(exported)
+    paths = {
+        names.path_for(o.kind, getattr(o, "schema", None), o.name) for o in (SALES, CUSTOMER, ORDER, CURRENCY)
+    }
+    assert set(first_files) == paths | {VIEW[0], FUNCTION[0], PROCEDURE[0]}
+    report = (exported / "onboarding" / "dev" / "export.md").read_text()
+    assert not any(key in report for key in OUTSIDE | {INVOICE.key, DUE_KEY})
+    assert "External tables in the schemas that were read: 1. They are skipped by their type" in report
+    assert "0 object(s) stay unmanaged" in done.out
+
+    shutil.copytree(exported, project.repo, dirs_exist_ok=True)
+    project.write("azsqlcd.toml", TOML.format(table_model="true") + SCOPE)  # the switch, with the files
+    project.write("migrations/migrations.sum", "azsqlcd-sum 1\nbaseline\n")
+    first = project.release("onboard sales and dbo")
+    recorded = project.tool(
+        "baseline", *first.where, "--confirm-database", "sales", "--out", str(project.out("r")), db=db
+    )
+    assert recorded.code == 0, recorded.err
+    rows = {row["object_key"]: row for row in db.rows("object")}
+    assert set(rows) == {*(tables.head_model(first.bundle.files)), *MODULES}
+
+    # plan: no object outside the scope in the unmanaged list, one note for the schema that no list names
+    out = project.out("plan")
+    plan = project.tool("plan", *first.where, "--out", str(out), db=db)
+    assert plan.code == 0, plan.err
+    planned = json.loads((out / "plan.json").read_text())
+    assert planned["unmanaged"] == []  # billing is in no list: not managed, and not seen either
+    unscoped = [note for note in planned["notes"] if note.startswith("SCHEMA_UNSCOPED")]
+    assert len(unscoped) == 1 and "[billing]" in unscoped[0]
+    assert f"note: {unscoped[0]}" in plan.out
+    assert project.deploy(first, db).code == 0 and db.ddl == []  # the files are the database: nothing to send
+    drift = project.tool("drift", *first.where, db=db)
+    assert drift.code == 0, drift.err  # an unlisted schema is reported, never drift
+    assert drift.out.splitlines() == ["unscoped SCHEMA:[billing] SCHEMA_UNSCOPED - -", "no drift"]
+
+    # the second schema alone: its files, the snapshot with it, and a line of what to add to [scope]
+    again = tmp_path / "billing"
+    done = project.tool(
+        "export", "--root", str(project.repo), *TARGET, "--out", str(again), "--schema", "billing", db=db
+    )
+    assert done.code == 0, done.err
+    billing_paths = {"schema/schemas/billing.sql", "schema/tables/billing.Invoice.sql", DUE[0]}
+    assert set(object_files(again)) == billing_paths
+    assert 'Add "billing" to [scope] schemas of azsqlcd.toml' in done.out
+    snapshot = json.loads((again / "onboarding" / "dev" / "snapshot.json").read_text())
+    before = json.loads((project.repo / "onboarding" / "dev" / "snapshot.json").read_text())
+    assert snapshot["captures"] == before["captures"] | {
+        key: snapshot["captures"][key] for key in (BILLING.key, INVOICE.key)
+    }
+    shutil.copytree(again, project.repo, dirs_exist_ok=True)
+    assert {
+        path: text for path, text in object_files(project.repo).items() if path not in billing_paths
+    } == first_files
+    project.write(
+        "azsqlcd.toml", TOML.format(table_model="true") + SCOPE.replace('"dbo"]', '"dbo", "billing"]')
+    )
+    second = project.release("onboard billing")
+    assert "azsqlcd baseline --schema billing" in second.verified  # PRF000: taken as they are
+
+    early = project.tool("plan", *second.where, "--out", str(project.out("plan")), db=db)
+    assert (early.code, early.reason) == (22, "BASELINE_REQUIRED") and "--schema billing" in early.err
+    others = db.rows("object")
+    recorded = project.tool(
+        "baseline",
+        *second.where,
+        "--schema",
+        "billing",
+        "--confirm-database",
+        "sales",
+        "--out",
+        str(project.out("r")),
+        db=db,
+    )
+    assert recorded.code == 0, recorded.err
+    assert db.rows("object")[: len(others)] == others  # the rows of sales and dbo did not change
+    added = {row["object_key"] for row in db.rows("object")[len(others) :]}
+    assert added == {BILLING.key, INVOICE.key, DUE_KEY}
+    assert db.rows("step")[-1]["note"].startswith("schema [billing]: ")
+    again = project.tool(
+        "baseline", *second.where, "--schema", "billing", "--confirm-database", "sales", db=db
+    )
+    assert (again.code, again.reason) == (22, "ALREADY_BASELINED")
+
+    out = project.out("plan")
+    assert project.tool("plan", *second.where, "--out", str(out), db=db).code == 0
+    planned = json.loads((out / "plan.json").read_text())
+    assert planned["unmanaged"] == [] and not any("SCHEMA_UNSCOPED" in n for n in planned["notes"])
+    sent = len(db.ddl)
+    assert project.deploy(second, db).code == 0 and db.ddl[sent:] == []
+    drift = project.tool("drift", *second.where, db=db)
+    assert (drift.code, drift.out.strip()) == (0, "no drift")
+
+
+def test_a_schema_that_no_list_names_is_a_note_of_the_plan_in_the_summary_of_github_too(
+    tmp_path, capsys, monkeypatch
+):
+    project = Project(tmp_path, capsys)
+    db = estate(project)
+    project.write("azsqlcd.toml", TOML.format(table_model="true") + SCOPE)
+    project.write(
+        "schema/views/sales.vw_New.sql", "CREATE OR ALTER VIEW [sales].[vw_New] AS\nSELECT 1 AS [One];\n"
+    )
+    built = project.release("a new view")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+
+    plan = project.tool("plan", *built.where, "--out", str(project.out("plan")), "--ci", "github", db=db)
+
+    assert plan.code == 0, plan.err
+    summary = (tmp_path / "summary").read_text()
+    assert "- SCHEMA_UNSCOPED \\[billing\\]: the schema is in neither \\[scope\\] schemas" in summary
+    assert "external table(s) in the managed schemas: skipped by their type" in plan.out
+    assert "1 external table(s)" in plan.out
+
+
+def test_export_and_baseline_of_one_schema_refuse_a_schema_that_the_scope_does_not_allow(
+    tmp_path, capsys, monkeypatch
+):
+    project = Project(tmp_path, capsys, table_model=False)
+    db = estate(project)
+    project.write("azsqlcd.toml", TOML.format(table_model="false") + SCOPE)
+    project.main = project.commit("scope")
+    root = ["--root", str(project.repo), *TARGET, "--out", str(tmp_path / "x")]
+    for schema in ("scratch", "SCRATCH", "azsqlcd"):
+        refused = project.tool("export", *root, "--schema", schema, db=db)
+        assert (refused.code, refused.reason) == (22, "OUT_OF_SCOPE"), refused.err
+    assert "in [scope] exclude of azsqlcd.toml" in project.tool("export", *root, "--schema", "scratch").err
+    project.git("update-ref", "refs/remotes/origin/main", project.main)
+    built = project.build()
+    monkeypatch.chdir(tmp_path)
+    for schema in ("billing", "scratch", "azsqlcd"):
+        refused = project.tool(
+            "baseline", *built.where, "--schema", schema, "--confirm-database", "sales", db=db
+        )
+        assert (refused.code, refused.reason) == (22, "OUT_OF_SCOPE"), refused.err
+    assert db.rows("run") == [] and db.rows("object") == []
+
+
+def test_a_schema_that_leaves_the_scope_is_no_longer_planned_compared_listed_or_dropped(project):
+    ping = (
+        "schema/procedures/dbo.usp_Ping.sql",
+        "CREATE OR ALTER PROCEDURE [dbo].[usp_Ping] AS\nSELECT 1 AS [One];\n",
+    )
+    project.write("azsqlcd.toml", TOML.format(table_model="true") + '\n[scope]\nschemas = ["sales", "dbo"]\n')
+    project.write(*ping)
+    db = deployed(project, release_1(project))
+    assert db.module("PROCEDURE:[dbo].[usp_Ping]") is not None
+    (project.repo / ping[0]).unlink()  # no tombstone: the tool stops managing dbo and drops nothing
+    project.write(
+        "azsqlcd.toml",
+        TOML.format(table_model="true") + '\n[scope]\nschemas = ["sales"]\nexclude = ["dbo"]\n',
+    )
+    left = project.release("dbo is not managed any more")
+    sent = len(db.ddl)
+
+    done = project.deploy(left, db)
+
+    assert done.code == 0, done.err  # no MODULE_ORPHAN for the managed row of dbo
+    assert db.ddl[sent:] == [] and db.module("PROCEDURE:[dbo].[usp_Ping]") is not None
+    drift = project.tool("drift", *left.where, db=db)
+    assert (drift.code, drift.out.strip()) == (0, "no drift")  # not unmanaged either: it is not seen
+    db.out_of_band("CREATE OR ALTER PROCEDURE [dbo].[usp_Ping] AS\nSELECT 2 AS [Two];\n")
+    assert project.tool("drift", *left.where, db=db).code == 0  # its recorded row is not compared
+
+
+def test_without_a_scope_no_read_is_limited_and_no_schema_is_listed(project, tmp_path):
+    first = release_1(project)
+    db = deployed(project, first)
+    assert project.tool("plan", *first.where, "--out", str(project.out("plan")), db=db).code == 0
+    assert project.tool("drift", *first.where, db=db).code == 0
+    out = tmp_path / "exported"
+    assert project.tool("export", "--root", str(project.repo), *TARGET, "--out", str(out), db=db).code == 0
+    assert not db.sent("sys.schemas AS sx") and not db.sent("azsqlcd:list_schemas")
+    assert not db.sent("is_external] = 0")
+    assert "## Scope" not in (out / "onboarding" / "dev" / "export.md").read_text()
+
+
 # ------------------------------------------------------------------ findings: the tool is wrong
 def test_a_module_that_was_dropped_behind_the_tool_can_be_taken_out_with_a_tombstone(project):
     first = release_1(project)

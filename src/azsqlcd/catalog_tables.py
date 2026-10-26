@@ -67,7 +67,16 @@ from decimal import Decimal
 from typing import Any
 
 from azsqlcd import names
-from azsqlcd.catalog import KEY_CHUNK, MODULE_TYPES, flag, object_id_sql, type_list
+from azsqlcd.catalog import (
+    ENGINE_SCHEMAS,
+    KEY_CHUNK,
+    MODULE_TYPES,
+    flag,
+    object_id_sql,
+    schema_condition,
+    type_list,
+)
+from azsqlcd.config import Scope, in_scope
 from azsqlcd.errors import refused
 from azsqlcd.lex import significant, tokenize
 from azsqlcd.model import (
@@ -107,25 +116,7 @@ UNSUPPORTED = "UNSUPPORTED"
 IDENTIFIER_MAX = 128  # sysname
 # Schemas that every database has. None of them gets a schema file. dbo is always there for an
 # object; an object in one of the others is outside the model.
-BUILTIN_SCHEMAS = frozenset(
-    fold(name)
-    for name in (
-        "dbo",
-        "sys",
-        "guest",
-        "INFORMATION_SCHEMA",
-        "db_owner",
-        "db_accessadmin",
-        "db_securityadmin",
-        "db_ddladmin",
-        "db_backupoperator",
-        "db_datareader",
-        "db_datawriter",
-        "db_denydatareader",
-        "db_denydatawriter",
-        SCHEMA,
-    )
-)
+BUILTIN_SCHEMAS = ENGINE_SCHEMAS | {fold("dbo")}
 # The value of each model option when the statement does not write it.
 OPTION_DEFAULTS = {
     "ALLOW_PAGE_LOCKS": "ON",
@@ -181,6 +172,9 @@ class CatalogRead:
     # (key of a history table, key of its current table). The engine owns a history table: it is
     # not in the model, has no capture and is not unsupported.
     history_tables: tuple[tuple[str, str], ...] = ()
+    # with a scope: the keys of the external tables of its schemas. Skipped by their type: not in
+    # the model, not unsupported, no column read. Without a scope an external table is unsupported
+    external_tables: tuple[str, ...] = ()
 
 
 class _Reject(ValueError):
@@ -194,7 +188,11 @@ type _Keyed = PrimaryKey | Unique | Index
 # ------------------------------------------------------------------ scope of one round of queries
 @dataclass(frozen=True)
 class _Scope:
-    """What the queries read: every user object, or the objects of asked keys (id expressions)."""
+    """What the queries read: every user object, or the objects of asked keys (id expressions).
+
+    managed: everything only, the [scope] of the read. The schemas that it cannot use are not read,
+    and the columns, constraints and indexes of an external table are not read.
+    """
 
     everything: bool
     tables: tuple[str, ...] = ()
@@ -202,11 +200,12 @@ class _Scope:
     sequences: tuple[str, ...] = ()
     synonyms: tuple[str, ...] = ()
     schemas: tuple[str, ...] = ()
+    managed: Scope | None = None
 
 
-def _scopes(keys: Collection[str] | None) -> list[_Scope]:
+def _scopes(keys: Collection[str] | None, managed: Scope | None = None) -> list[_Scope]:
     if keys is None:
-        return [_Scope(True)]
+        return [_Scope(True, managed=managed)]
     scopes: list[_Scope] = []
     for chunk in itertools.batched(sorted(set(keys)), KEY_CHUNK):
         ids: dict[str, list[str]] = defaultdict(list)
@@ -237,13 +236,24 @@ def _in(column: str, ids: Seq[str]) -> str:
     return f"{column} IN ({', '.join(ids)})" if ids else "1 = 0"
 
 
+def _within(scope: _Scope, column: str) -> str:
+    """' AND <condition>' that keeps a read of everything in the schemas of its [scope]; '' else."""
+    condition = schema_condition(column, scope.managed) if scope.everything else None
+    return "" if condition is None else f" AND {condition}"
+
+
 def _parents(scope: _Scope) -> str:
     """FROM item p ([object_id]): the tables and the table types of the scope.
 
-    The columns, constraints and indexes of a table type hang on its type_table_object_id.
+    The columns, constraints and indexes of a table type hang on its type_table_object_id. With a
+    [scope] an external table is no parent: what hangs on it is never read.
     """
     tables = "t.[is_ms_shipped] = 0" if scope.everything else _in("t.[object_id]", scope.tables)
     types = "tt.[is_user_defined] = 1" if scope.everything else _in("tt.[user_type_id]", scope.types)
+    if scope.everything and scope.managed is not None:
+        tables += " AND t.[is_external] = 0"
+    tables += _within(scope, "t.[schema_id]")
+    types += _within(scope, "tt.[schema_id]")
     return (
         f"(SELECT t.[object_id] FROM sys.tables AS t WHERE {tables} UNION ALL "
         f"SELECT tt.[type_table_object_id] FROM sys.table_types AS tt WHERE {types}) AS p ([object_id])"
@@ -265,6 +275,8 @@ def _schemas_sql(scope: _Scope) -> str | None:
     if not (scope.everything or scope.schemas):
         return None
     where = "" if scope.everything else f" WHERE {_in('s.[schema_id]', scope.schemas)}"
+    if _within(scope, "s.[schema_id]"):
+        where = f" WHERE {_within(scope, 's.[schema_id]').removeprefix(' AND ')}"
     return (
         "/* azsqlcd:read_schemas */ SELECT s.[name], dp.[name], "
         "(SELECT COUNT(*) FROM sys.objects AS o WHERE o.[schema_id] = s.[schema_id] "
@@ -293,6 +305,8 @@ def _tabulars_sql(scope: _Scope) -> str | None:
         return None
     tables = "t.[is_ms_shipped] = 0" if scope.everything else _in("t.[object_id]", scope.tables)
     types = "tt.[is_user_defined] = 1" if scope.everything else _in("tt.[user_type_id]", scope.types)
+    tables += _within(scope, "t.[schema_id]")
+    types += _within(scope, "tt.[schema_id]")
     return (
         "/* azsqlcd:read_tabulars */ SELECT t.[object_id], N'TABLE', s.[name], t.[name], "
         "t.[temporal_type], t.[ledger_type], t.[is_memory_optimized], t.[is_node], t.[is_edge], "
@@ -484,7 +498,11 @@ def _alias_types_sql(scope: _Scope) -> str | None:
     """
     if not (scope.everything or scope.types):
         return None
-    where = "" if scope.everything else f" AND {_in('ty.[user_type_id]', scope.types)}"
+    where = (
+        _within(scope, "ty.[schema_id]")
+        if scope.everything
+        else f" AND {_in('ty.[user_type_id]', scope.types)}"
+    )
     return (
         "/* azsqlcd:read_alias_types */ SELECT s.[name], ty.[name], bt.[name], ty.[is_assembly_type], "
         "ty.[max_length], ty.[precision], ty.[scale], ty.[is_nullable] "
@@ -505,6 +523,7 @@ def _sequences_sql(scope: _Scope) -> str | None:
     if not (scope.everything or scope.sequences):
         return None
     where = "q.[is_ms_shipped] = 0" if scope.everything else _in("q.[object_id]", scope.sequences)
+    where += _within(scope, "q.[schema_id]")
     return (
         "/* azsqlcd:read_sequences */ SELECT s.[name], q.[name], ts.[name], ty.[name], ty.[is_user_defined], "
         "q.[precision], q.[scale], CAST(q.[start_value] AS decimal(38, 0)), "
@@ -521,6 +540,7 @@ def _synonyms_sql(scope: _Scope) -> str | None:
     if not (scope.everything or scope.synonyms):
         return None
     where = "y.[is_ms_shipped] = 0" if scope.everything else _in("y.[object_id]", scope.synonyms)
+    where += _within(scope, "y.[schema_id]")
     return (
         "/* azsqlcd:read_synonyms */ SELECT s.[name], y.[name], y.[base_object_name] "
         f"FROM sys.synonyms AS y JOIN sys.schemas AS s ON s.[schema_id] = y.[schema_id] WHERE {where};"
@@ -1236,7 +1256,11 @@ def history_tables(session: Session) -> dict[str, str]:
 
 
 def read_model(
-    session: Session, keys: Collection[str] | None = None, *, taken: Collection[tuple[str, str]] = ()
+    session: Session,
+    keys: Collection[str] | None = None,
+    *,
+    taken: Collection[tuple[str, str]] = (),
+    scope: Scope | None = None,
 ) -> CatalogRead:
     """The table-class objects of the catalog as a model, with their captures.
 
@@ -1255,11 +1279,16 @@ def read_model(
     engine-named constraint whose fixed name is not free in its schema: another object of the
     model has it, an object that was read and is outside the model has it, or it is in `taken`,
     the (schema, name) pairs that the caller knows as taken (export gives every row of sys.objects).
+
+    scope, with keys None: the [scope] of the read. Only its schemas are read; an object that it
+    does not manage (config.out_of_scope) is in no list of the result, and still holds its name in
+    its schema. An external table of its schemas is skipped by its type: in `external_tables`, with
+    no column read. A history table is listed only for a current table in the scope.
     """
     found: dict[str, Rows] = defaultdict(list)
-    for scope in _scopes(keys):
+    for part in _scopes(keys, scope if keys is None else None):
         for name, (build, width) in _QUERIES.items():
-            batch = build(scope)
+            batch = build(part)
             fetched = [] if batch is None else rows(session, batch)
             if any(len(row) != width for row in fetched):
                 # a row of another shape would be read as an object outside the model; it is a defect
@@ -1272,11 +1301,17 @@ def read_model(
     unsupported: list[Unsupported] = []
 
     outside = {(fold(schema), fold(name)) for schema, name in taken}  # names that are not free
+    managed = scope if keys is None else None
+    external: list[str] = []
 
     def add(kind: str, schema: str, name: str, build: Callable[[], _Built]) -> bool:
         key = names.object_key(kind, schema, name)
         if fold(schema) == fold(SCHEMA):
             return True  # the state of the tool itself
+        if not in_scope(managed, key):
+            if kind != "TYPE":
+                outside.add((fold(schema), fold(name)))
+            return False
         try:
             if fold(schema) in BUILTIN_SCHEMAS and fold(schema) != "dbo":
                 raise _Reject(f"it is in the built-in schema {names.quote(schema)}")
@@ -1302,8 +1337,15 @@ def read_model(
         if head[1] == "TABLE" and int(head[4] or 0) == _HISTORY and None not in head[17:19]:
             if fold(head[2]) != fold(SCHEMA):
                 current = names.object_key("TABLE", head[17], head[18])
-                history.append((names.object_key("TABLE", head[2], head[3]), current))
+                if in_scope(managed, current):
+                    history.append((names.object_key("TABLE", head[2], head[3]), current))
                 outside.add((fold(head[2]), fold(head[3])))  # its name is not free in its schema
+            continue
+        if managed is not None and head[1] == "TABLE" and flag(head[9]):
+            key = names.object_key("TABLE", head[2], head[3])
+            if fold(head[2]) != fold(SCHEMA) and managed.has_schema(head[2]):
+                external.append(key)
+            outside.add((fold(head[2]), fold(head[3])))
             continue
         if not add(head[1], head[2], head[3], lambda head=head, child=child: _tabular(head, child)):
             # outside the model, and its constraints still hold their names in the schema
@@ -1338,6 +1380,8 @@ def read_model(
         key = names.object_key("SCHEMA", None, name)
         if fold(name) in BUILTIN_SCHEMAS or not (keys is not None or fold(name) in used or int(module_count)):
             continue
+        if not in_scope(managed, key):
+            continue
         if owner is None:
             unsupported.append(Unsupported(key, UNSUPPORTED, "its owner cannot be read"))
             continue
@@ -1350,6 +1394,7 @@ def read_model(
         tuple(sorted(system_named, key=lambda item: (fold(item.table_key), fold(item.fixed_name)))),
         tuple(sorted(unsupported, key=lambda item: fold(item.object_key))),
         tuple(sorted(history, key=lambda item: fold(item[0]))),
+        tuple(sorted(external, key=fold)),
     )
 
 
