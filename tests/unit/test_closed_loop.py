@@ -1127,6 +1127,53 @@ def test_a_schema_that_leaves_the_scope_is_no_longer_planned_compared_listed_or_
     assert project.tool("drift", *left.where, db=db).code == 0  # its recorded row is not compared
 
 
+RATES = Table(
+    "dbo",
+    "Rates",
+    (Column("Code", TypeRef("char", length=3), False),),
+    (PrimaryKey("PK_Rates", True, (KeyColumn("Code"),)),),
+)
+RATES_KEY = RATES.key
+
+
+def scoped_toml(table: str) -> str:
+    return TOML.format(table_model="true") + f"\n[scope]\n{table}\n"
+
+
+def test_a_withdrawal_after_a_schema_left_the_scope_proves_and_generates_nothing_for_that_schema(project):
+    """Review C1: the model from the history still held dbo.Rates after dbo left the scope; verify
+    asked for its file (WDR004) and gen wrote DROP TABLE [dbo].[Rates], which the deploy ran."""
+    project.write_objects(SALES, CUSTOMER, ORDER, RATES)
+    for path, text in MODULES.values():
+        project.write(path, text)
+    db = deployed(project, project.release("create", "create_all"))
+    project.write_objects(ORDER_2)
+    assert project.deploy(project.release("order note", "order_note"), db).code == 0
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    (project.repo / names.path_for("TABLE", "dbo", "Rates")).unlink()
+    assert project.deploy(project.release("dbo leaves the scope"), db).code == 0
+
+    # a pull request withdraws order_note with no replacement: the table file goes back
+    project.write_objects(ORDER)
+    lines = (project.repo / chain.SUM_PATH).read_text().splitlines()
+    lines = [line + " withdrawn" if "order_note" in line else line for line in lines]
+    project.write(chain.SUM_PATH, "\n".join(lines) + "\n")
+    verified = project.tool("verify", "--root", str(project.repo), "--base", project.main)
+    assert verified.code == 0, verified.out  # was: WDR004, asking for a file that is OUT_OF_SCOPE
+
+    # the same branch changes a managed table: gen writes that change only
+    email = dataclasses.replace(
+        CUSTOMER, columns=(*CUSTOMER.columns, Column("Email", TypeRef("nvarchar", length=200), True))
+    )
+    project.write_objects(email)
+    built = project.release("withdraw order_note, add the email", "customer_email")
+    assert built.migration is not None and "[dbo]" not in "".join(built.batches)
+    assert len(built.batches) == 1
+    assert built.batches[0].endswith("\nALTER TABLE [sales].[Customer] ADD [Email] nvarchar(200) NULL;")
+    assert project.deploy(built, db).code == 0
+    assert db.table(("dbo", "rates")) is not None  # the excluded table is still there
+
+
 def test_without_a_scope_no_read_is_limited_and_no_schema_is_listed(project, tmp_path):
     first = release_1(project)
     db = deployed(project, first)

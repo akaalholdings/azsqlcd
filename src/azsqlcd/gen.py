@@ -226,14 +226,14 @@ def _base_scope(base_files: Mapping[str, bytes], head: config.Config) -> config.
 def _scoped_start(
     base: Model, head: Model, base_scope: config.Scope | None, head_scope: config.Scope | None
 ) -> tuple[Model, list[str]]:
-    """The base model as the scope of the head revision sees it, and the keys that enter the scope.
+    """A start model (of the base revision, or from the history) as the scope of the head revision
+    sees it, and the keys that enter the scope.
 
-    An object that leaves the scope is left out: the tool stops managing it and drops nothing. An
-    object of the head files that enters it (a schema onboarded by this change) is taken as its
-    file says: no base model can prove it, and `baseline --schema` records it as the database has it.
+    An object outside the head scope is left out, whatever the scope was when it was recorded: the
+    tool manages it no longer and drops nothing. An object of the head files that enters the scope
+    (a schema onboarded by this change) is taken as its file says: no base model can prove it, and
+    `baseline --schema` records it as the database has it.
     """
-    if base_scope == head_scope:
-        return base, []
     kept = [
         obj
         for obj in base.values()
@@ -998,10 +998,12 @@ def _draft(
     start: Model,
     head: Model,
     specs: Sequence[diff.RenameSpec] = (),
+    scope: config.Scope | None = None,
 ) -> str:
     """The batches of the migration that changes start into head, with their directive lines.
 
-    '' when the models are equal. Raises ToolError GEN_REFUSED or GEN_INVALID.
+    '' when the models are equal. Raises ToolError GEN_REFUSED or GEN_INVALID; GEN_INVALID also for
+    a statement on an object that [scope] does not manage: the start must hold none (a defect).
     """
     try:
         ops = diff.diff(start, head, specs)
@@ -1009,6 +1011,17 @@ def _draft(
         raise _gen_refused(e.refusals, _rename_candidates(start, head, specs)) from None
     if not ops:
         return ""
+    try:
+        outside = [key for key in diff.touched_objects(ops, start) if not config.in_scope(scope, key)]
+    except ValueError:  # a rename that cannot be followed: the proof of verify refuses it
+        outside = []
+    if outside:
+        raise refused(
+            "GEN_INVALID",
+            f"the migration would change {outside[0]}, which [scope] of {release.CONFIG_PATH} does not "
+            "manage. gen writes no statement for such an object; this is a defect of the tool",
+            objects=outside,
+        )
     functions = {m.key: m for m in _module_files(head_files, ("FUNCTION",))}
     refusals: list[diff.GenRefusal] = []
     batches: list[str] = []
@@ -1107,10 +1120,12 @@ def _start_model(
     its file says, as in the proof: gen writes no CREATE for a schema that is onboarded."""
     base_chain, head_chain = _chain(base_files), _chain(head_files)
     cfg = _config(head_files)
-    start = _scoped_start(load_model(base_files), head, _base_scope(base_files, cfg), cfg.scope)[0]
+    base_scope = _base_scope(base_files, cfg)
+    start = _scoped_start(load_model(base_files), head, base_scope, cfg.scope)[0]
     if _withdrawn_alone(base_files, base_chain, head_chain):
         try:
-            start = _model_without(root, base, base_files, base_chain, head_chain)
+            history = _model_without(root, base, base_files, base_chain, head_chain)
+            start = _scoped_start(history, head, base_scope, cfg.scope)[0]
         except _NoProof as e:
             raise refused(
                 "GEN_INVALID",
@@ -1230,7 +1245,7 @@ def generate(root: release.StrPath, base_ref: str, name: str, renames: Sequence[
                 line=1,
             )
     start = _start_model(base_files, head_files, root, merge_base, head)
-    body = _draft(base_files, head_files, start, head, specs)
+    body = _draft(base_files, head_files, start, head, specs, _config(head_files).scope)
     if not body:
         others = (p for p in base_files.keys() | head_files.keys() if p.startswith("schema/"))
         changed = any(
@@ -1654,14 +1669,16 @@ def _prove(
             out.append(Finding("PRF004", ERROR, f"migrations/{entry.file}", 1, message))
         return out
 
-    base, entered = _scoped_start(load_model(base_files), head, _base_scope(base_files, cfg), cfg.scope)
+    base_scope = _base_scope(base_files, cfg)
+    base, entered = _scoped_start(load_model(base_files), head, base_scope, cfg.scope)
     if entered:
         out.append(_entered(entered))
     withdrawn = _withdrawn_alone(base_files, base_chain, head_chain)
     start: Model | None = base
     if withdrawn:
         try:
-            start = _model_without(root, main_ref, base_files, base_chain, head_chain)
+            history = _model_without(root, main_ref, base_files, base_chain, head_chain)
+            start = _scoped_start(history, head, base_scope, cfg.scope)[0]
         except (ToolError, _NoProof) as e:
             start = None
             for line, entry in withdrawn:
@@ -1696,7 +1713,7 @@ def _prove(
             out.append(Finding("WDR004", ERROR, chain.SUM_PATH, line, message))
     elif differences and not any(_changes_model(entry) for entry, _ in new):
         try:
-            draft = "it writes:\n" + _draft(base_files, head_files, base, head)
+            draft = "it writes:\n" + _draft(base_files, head_files, base, head, (), cfg.scope)
         except ToolError as e:
             draft = f"it refuses, so hand-write the migration: {e}"
         message = (

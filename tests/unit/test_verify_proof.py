@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from azsqlcd import chain, gen, release
+from azsqlcd.config import Scope
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.lint import Finding
 from fixtures.gen import repo as R
@@ -1477,3 +1478,17 @@ def test_a_raw_batch_for_an_object_outside_the_scope_is_a_raw_batch_for_an_unman
     assert errors(check(repo)) == []
     R.put(repo, one("0001__raw.sql", batch.replace("[etl].[Log]", "[sales].[Log]")))
     assert [code for code, _, _ in errors(check(repo))] == ["RAW001"]
+
+
+def test_gen_refuses_a_statement_on_an_object_outside_the_head_scope():
+    # review C1: a start model that still holds an object outside the scope gave DROP TABLE for it
+    rates = "CREATE TABLE [dbo].[Rates] (\n    [Code] char(3) NOT NULL\n);\n"
+    files = {**R.SALES, R.ORDER: R.order()}
+    head = gen.load_model({path: str(text).encode() for path, text in files.items()})
+    start = gen.load_model(
+        {**{p: str(t).encode() for p, t in files.items()}, "schema/tables/dbo.Rates.sql": rates.encode()}
+    )
+    with pytest.raises(ToolError) as e:
+        gen._draft({}, {}, start, head, scope=Scope(("sales",), ("dbo",)))
+    assert e.value.reason_code == "GEN_INVALID" and "TABLE:[dbo].[Rates]" in e.value.message
+    assert "DROP TABLE [dbo].[Rates]" in gen._draft({}, {}, start, head)  # no scope: the drop is the change
