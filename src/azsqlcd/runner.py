@@ -247,6 +247,7 @@ class _Sent:
     modules: dict[str, ModuleFile] = field(default_factory=dict)  # key -> the file the database holds now
     dropped: list[str] = field(default_factory=list)
     unbound: set[str] = field(default_factory=set)
+    unscoped: list[str] = field(default_factory=list)  # keys whose rows are marked: they left [scope]
     steps: list[str] = field(default_factory=list)
     # touched table key -> its columns before the batches; only for a plan with a dependant that
     # the engine cannot verify (_columns_before)
@@ -994,6 +995,8 @@ def _send_steps(run: _Run, unit: Unit, sent: _Sent) -> None:
             sent.dropped.append(key)
         elif step.kind == "refresh":
             _refresh(run, step)
+        elif step.kind == "unscope":  # a state write in this transaction; no statement on the object
+            sent.unscoped.append(_have(step.object_key))
         else:
             raise RuntimeError(f"step {step.id} has the kind {step.kind!r}, which the runner does not know")
         _guard(run)
@@ -1272,7 +1275,8 @@ def _finish(
     """Design (e) 8 d to f after the batches: dependants, read-back, object rows, step rows, guard."""
     run_id = run.id
     run.step = "dependants"
-    _sweep_dependants(run, sent)
+    if any(step.kind != "unscope" for step in unit.steps):
+        _sweep_dependants(run, sent)
     captures: Captures = {}
     readback = next((step for step in unit.steps if step.kind == "readback"), None)
     if readback is not None:
@@ -1283,7 +1287,9 @@ def _finish(
     recorded = _have(run.recorded)
     stored = _stored_keys(recorded.objects)
     writes = _object_writes(recorded, captures, sources, run_id)
-    writes += [state.mark_dropped(stored.get(fold(key), key), run_id) for key in sent.dropped]
+    writes += [
+        state.mark_dropped(stored.get(fold(key), key), run_id) for key in (*sent.dropped, *sent.unscoped)
+    ]
     for migration, sha256 in sent.migrations.items():
         writes.append(
             state.set_step_status(migration, "ok")

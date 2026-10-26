@@ -60,7 +60,7 @@ class Step:
     """One action of a unit of work, in the order the runner takes it."""
 
     id: str  # unique in its unit; the runner reports a failure by this id
-    kind: str  # batch | unbind | deploy_module | drop_module | refresh | readback
+    kind: str  # batch | unbind | deploy_module | drop_module | refresh | readback | unscope
     migration: str | None = None  # batch, and an unbind or deploy_module that a directive asks for
     batch: int | None = None  # number of the batch in the migration file, from 1
     batch_kind: str | None = None  # batch: model | data | raw
@@ -413,8 +413,8 @@ def _is_module(key: str) -> bool:
 
 def scoped_state(recorded: State, scope: Scope | None) -> State:
     """The recorded state as [scope] sees it: the rows of the objects that it does not manage are
-    left out. Such a row is of a schema that left the scope: the tool stops managing the object, so
-    it plans, compares and drops nothing for it. No scope: the state as it is."""
+    left out. Such a row is of an object that left the scope: the tool stops managing it, so it
+    plans, compares and drops nothing for it. No scope: the state as it is."""
     if scope is None:
         return recorded
     return replace(
@@ -422,14 +422,25 @@ def scoped_state(recorded: State, scope: Scope | None) -> State:
     )
 
 
-def _new_schemas(keys: Collection[str], recorded: State) -> list[str]:
-    """The schemas of the keys in which this database records no managed object: schemas that the
-    release onboards. In the spelling of the first key, in the order of the names without case."""
-    held = {fold(names.schema_of(key)) for key, row in recorded.objects.items() if row.status == "managed"}
+def left_scope(recorded: State, scope: Scope | None) -> list[str]:
+    """Keys of the managed rows of objects that [scope] does not manage, in key order.
+
+    The deploy marks such a row `dropped`: the status of a row that is no longer managed, which a
+    state table already holds. The object stays in the database and nothing is sent to it. When
+    the object comes back into the scope it has no managed row, so the release cannot take it as
+    recorded: the plan stops (BASELINE_REQUIRED) until `baseline --schema` compares it again.
+    """
+    return sorted(
+        key for key, row in recorded.objects.items() if row.status == "managed" and not in_scope(scope, key)
+    )
+
+
+def _schemas_of(keys: Collection[str]) -> list[str]:
+    """The schemas of the keys, in the spelling of the first key, in the order of the names without case."""
     found: dict[str, str] = {}
     for key in sorted(keys):
         found.setdefault(fold(names.schema_of(key)), names.schema_of(key))
-    return [schema for folded, schema in sorted(found.items()) if folded not in held]
+    return [found[folded] for folded in sorted(found)]
 
 
 def _baseline_schemas(schemas: Sequence[str]) -> str:
@@ -1393,6 +1404,7 @@ def compute_plan(
             environment=recorded.meta.environment,
         )
     scope = config.scope
+    leaving = left_scope(recorded, scope)
     recorded = scoped_state(recorded, scope)
     notes: list[str] = []
     if not lock_held:
@@ -1455,14 +1467,19 @@ def compute_plan(
     # step 5: a create must not take over an object that the tool did not make
     taken = {_fold(found.schema, found.name) for found in user_objects}
     collisions = [c.key for c in work.module_changes if c.action == "create" and _fold_key(c.key) in taken]
-    onboarding = _new_schemas(collisions, recorded) if collisions and scope is not None else []
-    if onboarding and len(onboarding) == len({fold(names.schema_of(key)) for key in collisions}):
-        # every module that collides is in a schema with no managed object: the release onboards it
+    kinds = {_fold(found.schema, found.name): found.kind for found in user_objects}
+    if (
+        scope is not None
+        and collisions
+        and all(kinds.get(_fold_key(key)) == names.parse_object_key(key)[0] for key in collisions)
+    ):
+        # the database has each module as the kind of its file, with no managed row: the module
+        # enters the scope (a schema that is onboarded or comes back, a pattern that went)
         raise refused(
             "BASELINE_REQUIRED",
-            f"the release holds {collisions[0]}, the database has it, and this database records no object "
-            f"of its schema ({len(collisions)} module(s) in all): the release onboards the schema. Run "
-            f"{_baseline_schemas(onboarding)}",
+            f"the release holds {collisions[0]}, the database has it, and this database records no managed "
+            f"row for it ({len(collisions)} module(s) in all): it enters [scope]. Run "
+            f"{_baseline_schemas(_schemas_of(collisions))}",
             objects=collisions,
         )
     if collisions:
@@ -1506,8 +1523,12 @@ def compute_plan(
     else:
         unrecorded = table_hooks.unrecorded_objects(work, recorded)
         if unrecorded:  # Part 2 (c) 8
-            onboarding = _new_schemas(unrecorded, recorded) if scope is not None else []
-            run = f"run {_baseline_schemas(onboarding)}" if onboarding else "run azsqlcd baseline"
+            # under [scope] the object enters the scope: the baseline of its schema records it
+            run = (
+                f"run {_baseline_schemas(_schemas_of(unrecorded))}"
+                if scope is not None
+                else "run azsqlcd baseline"
+            )
             raise refused(
                 "BASELINE_REQUIRED",
                 f"{unrecorded[0]} is in the table model of this release, has no managed row in this "
@@ -1622,6 +1643,17 @@ def compute_plan(
         refresh = [] if units[0].kind == "nontx" else table_hooks.refresh_set(session, work)
         units = (_with_table_steps(units[0], refresh, table_keys),)
 
+    if leaving:
+        # a unit of its own, after the others: state writes only, no statement on an object
+        units = (
+            *units,
+            Unit("tx", tuple(Step(id=f"unscope:{key}", kind="unscope", object_key=key) for key in leaving)),
+        )
+        notes.append(
+            f"{len(leaving)} managed object(s) left [scope] (first: {leaving[0]}): the deploy marks their "
+            "rows as no longer managed (status dropped). Nothing is sent to them and nothing is dropped; "
+            "an object that comes back is compared again by azsqlcd baseline --schema"
+        )
     unmanaged_kinds = names.MODULE_KINDS + (() if table_hooks is None else ("TABLE", "SEQUENCE", "SYNONYM"))
     # The history table of a system-versioned table is a row of sys.objects that the engine owns:
     # it has no file and no managed row, and it is not an unmanaged object. Without a table model
@@ -1671,6 +1703,7 @@ def compute_plan(
     tables = sorted(key for key in table_keys if key.startswith("TABLE:"))
     facts = catalog.table_facts(session, tables)
     return sealed(
+        outcome=WORK if units else plan.outcome,
         touched=tuple(
             Touched(key, rows[fold(key)].catalog_sha256 if fold(key) in rows else None)
             for key in sorted(touched)

@@ -657,19 +657,30 @@ def _not_as_deployed(capture: dict[str, Any]) -> str:
     return "; ".join(found)
 
 
-def _compare(session: Session, bundle: Bundle, env: str, scope: Scope | None = None) -> _Compared:
+def _compare(
+    session: Session,
+    bundle: Bundle,
+    env: str,
+    scope: Scope | None = None,
+    recorded: Collection[str] = frozenset(),
+) -> _Compared:
     """Each module file of the release against the live module of its name; then the modules with no file.
 
     The engine resolves the name of a file (catalog.capture_modules with keys), so a module that
     a deploy of the file would overwrite is never `missing here`. scope: only the files and the
-    live modules that it manages are compared.
+    live modules that it manages are compared. recorded: case-folded keys that have a managed row
+    already (`baseline --schema`): neither their files nor their live modules are compared.
     """
-    files = {key: file for key, file in plan.module_files(bundle.files).items() if in_scope(scope, key)}
+    files = {
+        key: file
+        for key, file in plan.module_files(bundle.files).items()
+        if in_scope(scope, key) and fold(key) not in recorded
+    }
     asked = catalog.capture_modules(session, list(files))
     every = {
         key: found
         for key, found in catalog.capture_modules(session, None, scope).items()
-        if in_scope(scope, key)
+        if in_scope(scope, key) and fold(key) not in recorded
     }
     indexed = {key.casefold() for key in catalog.indexed_views(session)}
     without_case = {key.casefold(): key for key in every}
@@ -735,16 +746,19 @@ def _snapshot_path() -> str:
     return f"onboarding/{REFERENCE_ENV}/snapshot.json"
 
 
-def _model_keys(hooks: tables.Hooks, scope: Scope | None) -> list[str]:
-    """The keys of the table model of the release that the scope manages."""
-    return [key for key in hooks.model if in_scope(scope, key)]
+def _model_keys(
+    hooks: tables.Hooks, scope: Scope | None, recorded: Collection[str] = frozenset()
+) -> list[str]:
+    """The keys of the table model of the release that the scope manages and that have no managed
+    row (recorded: case-folded keys that have one)."""
+    return [key for key in hooks.model if in_scope(scope, key) and fold(key) not in recorded]
 
 
 def _engine_named(
-    session: Session, hooks: tables.Hooks, scope: Scope | None = None
+    session: Session, hooks: tables.Hooks, scope: Scope | None = None, recorded: Collection[str] = frozenset()
 ) -> tuple[tuple[str, ...], str]:
     """(one line for each constraint of the model that the engine named here, the rename script)."""
-    found = hooks.engine_named(session, _model_keys(hooks, scope))
+    found = hooks.engine_named(session, _model_keys(hooks, scope, recorded))
     lines = tuple(
         f"{item.table_key} {item.kind} {names.quote(item.live_name)} -> {names.quote(item.fixed_name)}"
         for item in found
@@ -753,7 +767,11 @@ def _engine_named(
 
 
 def _compare_tables(
-    session: Session, bundle: Bundle, hooks: tables.Hooks | None, scope: Scope | None = None
+    session: Session,
+    bundle: Bundle,
+    hooks: tables.Hooks | None,
+    scope: Scope | None = None,
+    recorded: Collection[str] = frozenset(),
 ) -> _Tables:
     """Report only: the table-class objects of this database against the reference snapshot."""
     if hooks is None:
@@ -761,7 +779,7 @@ def _compare_tables(
     data = bundle.files.get(_snapshot_path())
     if data is None:
         # nothing to compare with; the names that a baseline that writes refuses need no snapshot
-        engine_named, rename_sql = _engine_named(session, hooks, scope)
+        engine_named, rename_sql = _engine_named(session, hooks, scope, recorded)
         return _Tables(modelled=True, engine_named=engine_named, rename_sql=rename_sql)
     try:
         snapshot = json.loads(data)
@@ -769,8 +787,8 @@ def _compare_tables(
         snapshot = None
     if not isinstance(snapshot, dict):
         raise refused("SNAPSHOT_INVALID", f"{_snapshot_path()} of the release is not a JSON object")
-    compared = tables.compare_with_snapshot(session, snapshot, _model_keys(hooks, scope), scope)
-    engine_named, rename_sql = _engine_named(session, hooks, scope)
+    compared = tables.compare_with_snapshot(session, snapshot, _model_keys(hooks, scope, recorded), scope)
+    engine_named, rename_sql = _engine_named(session, hooks, scope, recorded)
     return _Tables(True, compared, engine_named=engine_named, rename_sql=rename_sql)
 
 
@@ -954,10 +972,12 @@ def baseline(
     as it is.
 
     With a [scope] only what it manages is compared and recorded. schema (`baseline --schema`):
-    one schema that [scope] of the release manages, onboarded alone. Only its module files and its
-    table-class objects are compared and recorded, with a baseline step of its own; no row of
-    another schema is read or written. It is refused (ALREADY_BASELINED) when this database
-    records a managed object of the schema, whatever other baseline step there is.
+    one schema that [scope] of the release manages. Its module files and table-class objects that
+    have no managed row are compared and recorded, with a baseline step of its own: a schema that
+    is onboarded, an object that enters the scope in a recorded schema, an object that comes back
+    into the scope (the deploy marked its row dropped when it left). A row with the status managed
+    is not read and not written, of this schema or of another. It is refused (ALREADY_BASELINED)
+    when nothing is left to record, whatever other baseline step there is.
 
     Raises ToolError REFUSED before any batch: ENV_NOT_CONFIGURED, TARGET_NOT_CONFIGURED,
     BASELINE_ACK_INVALID, OUT_OF_SCOPE (a schema that [scope] of the release does not manage).
@@ -1003,8 +1023,9 @@ def baseline(
             )
         recorded = _bound_state(session, config, env)
         baselined = schema is None and any(step.kind == "baseline" for step in recorded.steps)
-        compared = _compare(session, bundle, env, scope)
-        return result(compared, baselined, None, _compare_tables(session, bundle, table_hooks, scope))
+        held = _held(recorded) if schema is not None else frozenset()
+        compared = _compare(session, bundle, env, scope, held)
+        return result(compared, baselined, None, _compare_tables(session, bundle, table_hooks, scope, held))
 
     done: list[tuple[_Compared, bool, _Tables]] = []
 
@@ -1016,19 +1037,19 @@ def baseline(
         )
         # Part 2 (c) 8: the modules are recorded, and the table model came later
         tables_only = schema is None and baselined and table_hooks is not None and not table_rows
+        # baseline --schema: only what has no managed row of its own is compared and recorded
+        held = _held(recorded) if schema is not None else frozenset()
         if schema is not None:
-            held = sorted(
-                key
-                for key, row in recorded.objects.items()
-                if row.status == "managed" and fold(names.schema_of(key)) == fold(schema)
-            )
-            if held:
+            missing = _model_keys(table_hooks, scope, held) if table_hooks else []
+            files = plan.module_files(bundle.files)
+            missing += [key for key in files if in_scope(scope, key) and fold(key) not in held]
+            if not missing:
                 raise refused(
                     "ALREADY_BASELINED",
-                    f"this database records {len(held)} managed object(s) of the schema "
-                    f"{names.quote(schema)} (first: {held[0]}): it was onboarded before. An object that "
-                    "changed since is drift (azsqlcd drift, azsqlcd resolve --accept-drift)",
-                    objects=held,
+                    f"nothing to record for the schema {names.quote(schema)}: each of its objects in the "
+                    "release has a managed row in this database, or the release holds no file of it. An "
+                    "object that changed since is drift (azsqlcd drift, azsqlcd resolve --accept-drift)",
+                    schema=schema,
                 )
         elif baselined and not tables_only:
             raise refused(
@@ -1037,7 +1058,7 @@ def baseline(
                 "since is drift (azsqlcd drift, azsqlcd resolve --accept-drift); a module that the tool "
                 "does not manage is adopted with azsqlcd resolve --adopt-module",
             )
-        compared = _Compared((), {}, {}) if tables_only else _compare(session, bundle, env, scope)
+        compared = _Compared((), {}, {}) if tables_only else _compare(session, bundle, env, scope, held)
         differing = [item.object_key for item in compared.items if item.status == DIFFERS]
         unacknowledged = [key for key in differing if key not in acknowledged]
         if unacknowledged:
@@ -1052,7 +1073,9 @@ def baseline(
             )
         # a constraint that the engine named reads back as the constraint of the model, and would be
         # recorded under the name of the file: a name that this database does not have
-        engine_named, rename_sql = _engine_named(session, table_hooks, scope) if table_hooks else ((), "")
+        engine_named, rename_sql = (
+            _engine_named(session, table_hooks, scope, held) if table_hooks else ((), "")
+        )
         if engine_named:
             raise refused(
                 "CONSTRAINT_NAMES",
@@ -1066,7 +1089,7 @@ def baseline(
             )
         # the read-back raises READBACK_MISMATCH for an object that differs from the model or is
         # missing; in this frame nothing was executed, so it leaves as a refusal
-        keys = _model_keys(table_hooks, scope) if table_hooks else []
+        keys = _model_keys(table_hooks, scope, held) if table_hooks else []
         read = table_hooks.read_back(session, bundle, keys, None) if table_hooks else {}
         table_captures = {key: capture for key, capture in read.items() if capture is not None}
         table = _Tables(table_hooks is not None, recorded=len(table_captures) if table_hooks else None)
@@ -1116,6 +1139,12 @@ def baseline(
     )
     compared, tables_only, table = done[0]
     return result(compared, tables_only, report, table)
+
+
+def _held(recorded: State) -> frozenset[str]:
+    """Case-folded keys of the managed rows. A row that the deploy marked when its object left
+    [scope] has the status dropped: such an object is compared again when it comes back."""
+    return frozenset(fold(key) for key, row in recorded.objects.items() if row.status == "managed")
 
 
 def _schema_scope(config: Config, schema: str) -> Scope:

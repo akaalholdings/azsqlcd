@@ -1174,6 +1174,118 @@ def test_a_withdrawal_after_a_schema_left_the_scope_proves_and_generates_nothing
     assert db.table(("dbo", "rates")) is not None  # the excluded table is still there
 
 
+RATES_WIDE = dataclasses.replace(
+    RATES, columns=(*RATES.columns, Column("Name", TypeRef("nvarchar", length=50), True))
+)
+RATES_VIEW = (
+    "schema/views/dbo.vw_Rates.sql",
+    "CREATE OR ALTER VIEW [dbo].[vw_Rates] AS\nSELECT [Code] FROM [dbo].[Rates];\n",
+)
+RATES_VIEW_KEY = names.object_key("VIEW", "dbo", "vw_Rates")
+
+
+def status_of(db: FakeDatabase, key: str) -> str | None:
+    return next((row["status"] for row in db.rows("object") if row["object_key"] == key), None)
+
+
+def test_an_object_that_enters_the_scope_in_a_recorded_schema_is_recorded_by_the_baseline_of_its_schema(
+    tmp_path, capsys, monkeypatch
+):
+    """Review M1: plan and deploy asked for a baseline, and both baselines were ALREADY_BASELINED."""
+    project = Project(tmp_path, capsys, table_model=False)
+    db = project.database()
+    db.out_of_band(*emit.emit_create_script(Model((SALES, CUSTOMER, ORDER, RATES, TEMP_LOAD))))
+    db.out_of_band(*(text for _, text in MODULES.values()))
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]\nexclude_objects = ["dbo.temp_*"]'))
+    project.write_objects(SALES, CUSTOMER, ORDER, RATES)
+    for path, text in MODULES.values():
+        project.write(path, text)
+    project.write("migrations/migrations.sum", "azsqlcd-sum 1\nbaseline\n")
+    monkeypatch.chdir(tmp_path)
+    first = project.release("onboard sales and dbo")
+    confirm = ["--confirm-database", "sales"]
+    assert project.tool("baseline", *first.where, *confirm, db=db).code == 0
+
+    # the pattern goes, and dbo.temp_Load comes in as the database has it
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(TEMP_LOAD)
+    second = project.release("dbo.temp_Load is managed now")
+    assert "azsqlcd baseline --schema dbo" in second.verified  # PRF000
+    early = project.tool("plan", *second.where, "--out", str(project.out("plan")), db=db)
+    assert (early.code, early.reason) == (22, "BASELINE_REQUIRED")
+    assert "azsqlcd baseline --schema dbo" in early.err
+    rows = db.rows("object")
+
+    done = project.tool("baseline", *second.where, "--schema", "dbo", *confirm, db=db)
+
+    assert done.code == 0, done.err
+    assert db.rows("object")[: len(rows)] == rows and status_of(db, TEMP_LOAD.key) == "managed"
+    assert len(db.rows("object")) == len(rows) + 1
+    again = project.tool("baseline", *second.where, "--schema", "dbo", *confirm, db=db)
+    assert (again.code, again.reason) == (22, "ALREADY_BASELINED") and "nothing to record" in again.err
+    sent = len(db.ddl)
+    assert project.deploy(second, db).code == 0 and db.ddl[sent:] == []
+
+
+def test_a_schema_that_leaves_the_scope_and_comes_back_is_compared_with_its_files_again(
+    tmp_path, capsys, monkeypatch
+):
+    """Review M2: the old rows of dbo counted as managed after dbo came back, so its changed file was
+    never compared until a read-back failed one release later."""
+    project = Project(tmp_path, capsys)
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(SALES, CUSTOMER, ORDER, RATES)
+    project.write(*RATES_VIEW)
+    db = deployed(project, project.release("create", "create_all"))
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    for path in (names.path_for("TABLE", "dbo", "Rates"), RATES_VIEW[0]):
+        (project.repo / path).unlink()
+    left = project.release("dbo leaves the scope")
+    out = project.out("plan")
+    assert project.tool("plan", *left.where, "--out", str(out), db=db).code == 0
+    steps = [
+        step["id"] for unit in json.loads((out / "plan.json").read_text())["units"] for step in unit["steps"]
+    ]
+    assert steps == [f"unscope:{RATES_KEY}", f"unscope:{RATES_VIEW_KEY}"]
+    sent = len(db.ddl)
+
+    assert project.deploy(left, db).code == 0
+
+    # the rows say: no longer managed. The objects stay, and nothing was sent
+    assert db.ddl[sent:] == [] and db.table(("dbo", "Rates")) is not None and db.module(RATES_VIEW_KEY)
+    assert status_of(db, RATES_KEY) == status_of(db, RATES_VIEW_KEY) == "dropped"
+    updates = len(db.sent("UPDATE [azsqlcd].[object]"))
+    assert project.deploy(left, db).code == 0  # marked once: the next deploy has nothing to do
+    assert len(db.sent("UPDATE [azsqlcd].[object]")) == updates
+
+    # dbo comes back, and its table file is not what the database has
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(RATES_WIDE)
+    project.write(*RATES_VIEW)
+    back = project.release("dbo comes back")
+    assert "azsqlcd baseline --schema dbo" in back.verified  # PRF000
+    for command in (
+        ["plan", *back.where, "--out", str(project.out("plan"))],
+        ["deploy", *back.where, "--inline-plan", "--out", str(project.out("r"))],
+    ):
+        refused = project.tool(*command, db=db)
+        assert (refused.code, refused.reason) == (22, "BASELINE_REQUIRED"), refused.err
+        assert "azsqlcd baseline --schema dbo" in refused.err
+    monkeypatch.chdir(tmp_path)
+    baseline = ["baseline", *back.where, "--schema", "dbo", "--confirm-database", "sales"]
+    differs = project.tool(*baseline, db=db)
+    assert (differs.code, differs.reason) == (22, "READBACK_MISMATCH"), differs.err
+    assert status_of(db, RATES_KEY) == "dropped"  # refused: nothing was recorded
+
+    # a DBA aligns the database with the file; the baseline of dbo records both objects again
+    db.out_of_band("ALTER TABLE [dbo].[Rates] ADD [Name] nvarchar(50) NULL;")
+    assert project.tool(*baseline, db=db).code == 0
+    assert status_of(db, RATES_KEY) == status_of(db, RATES_VIEW_KEY) == "managed"
+    sent = len(db.ddl)
+    assert project.deploy(back, db).code == 0 and db.ddl[sent:] == []
+    assert project.tool("drift", *back.where, db=db).out.strip() == "no drift"
+
+
 def test_without_a_scope_no_read_is_limited_and_no_schema_is_listed(project, tmp_path):
     first = release_1(project)
     db = deployed(project, first)
