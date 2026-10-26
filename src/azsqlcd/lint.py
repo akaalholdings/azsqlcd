@@ -108,6 +108,7 @@ CODES: dict[str, str] = {
     "CYCLE_BROKEN": WARNING,
     "EXA001": WARNING,
     "MODULE_DUPLICATE": ERROR,
+    "OUT_OF_SCOPE": ERROR,  # an object file for an object that [scope] of azsqlcd.toml does not manage
     "DIR001": ERROR,
     "DIR002": WARNING,
     "TMB002": ERROR,
@@ -1834,15 +1835,57 @@ def _tombstone_findings(files: Mapping[str, bytes], parsed: _Parsed) -> list[Fin
     return out
 
 
-def _read_project(files: Mapping[str, bytes]) -> tuple[config.Project | None, str | None]:
-    """([project] of azsqlcd.toml, None), or (None, why the file gives no project). A revision
-    without a project has every switch of the project off."""
+def _read_config(files: Mapping[str, bytes]) -> tuple[config.Config | None, str | None]:
+    """(azsqlcd.toml, None), or (None, why the revision has no config)."""
     if _CONFIG_PATH not in files:
         return None, f"{_CONFIG_PATH} does not exist"
     try:
-        return config.load_config(_utf8(_CONFIG_PATH, files[_CONFIG_PATH])).project, None
+        return config.load_config(_utf8(_CONFIG_PATH, files[_CONFIG_PATH])), None
     except ToolError as e:
         return None, e.message
+
+
+def _read_project(files: Mapping[str, bytes]) -> tuple[config.Project | None, str | None]:
+    """([project] of azsqlcd.toml, None), or (None, why the file gives no project). A revision
+    without a project has every switch of the project off."""
+    found, problem = _read_config(files)
+    return (None if found is None else found.project), problem
+
+
+def _file_keys(path: str, parsed: _Parsed) -> list[str]:
+    """The keys that an object file can be of. A module file names its object in its header; a
+    table-class file is read from its name, <schema>.<name>.sql, so a schema name with a dot gives
+    one key for each dot of the stem."""
+    kind = _kind(path)
+    if kind in names.MODULE_KINDS:
+        return [m.key for m in parsed.modules if m.path == path]
+    if kind is None:
+        return []
+    stem = names.key_for_path(path)[1]
+    if kind == "SCHEMA":
+        return [names.object_key(kind, None, stem)]
+    return [
+        names.object_key(kind, stem[:at], stem[at + 1 :])
+        for at, char in enumerate(stem)
+        if char == "." and 0 < at < len(stem) - 1
+    ]
+
+
+def _scope_findings(files: Mapping[str, bytes], parsed: _Parsed, scope: config.Scope | None) -> list[Finding]:
+    """OUT_OF_SCOPE: a file for an object that [scope] does not manage. The config and the files
+    contradict each other: plan, drift and export do not see the object, so its file would never
+    be deployed, compared or recorded. A file that cannot be read is reported by its own rule."""
+    out: list[Finding] = []
+    for path in sorted(files) if scope is not None else ():
+        keys = _file_keys(path, parsed)
+        reasons = [config.out_of_scope(scope, key) for key in keys]
+        if keys and all(reasons):
+            message = (
+                f"{keys[0]} is outside [scope] of {_CONFIG_PATH}: {reasons[0]}. The tool does not manage "
+                "it, so the repository holds no file for it. Remove the file, or change [scope]"
+            )
+            out.append(_finding("OUT_OF_SCOPE", path, 1, message))
+    return out
 
 
 def lint_repo(
@@ -1865,10 +1908,11 @@ def lint_repo(
     if parsed is None:
         parsed = _parse(files)
     out = list(parsed.findings)
-    project, problem = _read_project(files)
+    found, problem = _read_config(files)
     if problem is not None:
         out.append(_finding("CONFIG_INVALID", _CONFIG_PATH, 1, problem))
-    data_batches = project is not None and project.data_batches
+    data_batches = found is not None and found.project.data_batches
+    out += _scope_findings(files, parsed, None if found is None else found.scope)
     for path in files:
         out += secret_findings(path, files[path])
     out += _path_findings(files, table_file_check)
@@ -1968,14 +2012,17 @@ def lint_change(
     revision that cannot be read raises ToolError, because no rule can be decided without it.
 
     MODULE_CASE (warning): a module file is renamed and the new name differs in letter case only.
-    That is one object for the database, so no tombstone is asked for (TMB001).
+    That is one object for the database, so no tombstone is asked for (TMB001). Nor for a module
+    file that is removed because [scope] no longer manages its object: the tool drops nothing.
 
     parsed: parse_revision(head_files) when the caller has it already; else the files are read here.
     """
     base_chain = _read_sum(base_files)
     base_tombstones = {t.object_key for t in _read_tombstones(base_files)}
     head = parsed if parsed is not None else _parse(head_files)
-    project, _ = _read_project(head_files)
+    found, _ = _read_config(head_files)
+    project = None if found is None else found.project
+    scope = None if found is None else found.scope
     data_batches = project is not None and project.data_batches
     table_model = project is not None and project.table_model
     out: list[Finding] = []
@@ -2039,6 +2086,8 @@ def lint_change(
                     "letter case that the object was created with)"
                 )
                 out.append(_finding("MODULE_CASE", twin, 1, message))
+            elif key is not None and not config.in_scope(scope, key):
+                continue  # it leaves [scope]: the tool stops managing it and never drops it
             elif not _has_tombstone(path, key, head.tombstones):
                 entry = key if key is not None else f"{_kind(path)}:[<schema>].[<name>]"
                 message = (

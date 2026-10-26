@@ -9,8 +9,11 @@ from azsqlcd.config import (
     DEFAULT_MODULE_CHUNK,
     DEFAULT_SERVER_SUFFIXES,
     ENVIRONMENTS,
+    Scope,
     Target,
+    in_scope,
     load_config,
+    out_of_scope,
     resolve_target,
     targets_matrix,
 )
@@ -605,3 +608,108 @@ def test_only_one_bom_at_the_start_is_removed():
         with pytest.raises(ToolError) as e:
             load_config(text)
         assert (e.value.exit_code, e.value.reason_code) == (Exit.REFUSED, "CONFIG_INVALID")
+
+
+# ------------------------------------------------------------------ [scope]
+SCOPE = """
+[scope]
+schemas = ["sales", "dbo"]
+exclude = ["dba", "scratch"]
+exclude_objects = ["dbo.temp_*"]
+"""
+
+
+def test_without_a_scope_table_every_schema_and_every_object_is_in_scope():
+    config = load_config(VALID)
+    assert config.scope is None
+    for key in ("TABLE:[scratch].[Load]", "SCHEMA:[dba]", "TABLE:[dbo].[temp_x]", "VIEW:[azsqlcd].[x]"):
+        assert out_of_scope(config.scope, key) is None and in_scope(config.scope, key)
+
+
+def test_the_scope_table_is_read_with_its_three_lists():
+    assert load_config(VALID + SCOPE).scope == Scope(("sales", "dbo"), ("dba", "scratch"), ("dbo.temp_*",))
+    only = load_config(VALID + '\n[scope]\nschemas = ["sales"]\n').scope
+    assert only == Scope(("sales",))
+
+
+@pytest.mark.parametrize(
+    ("key", "why"),
+    [
+        ("TABLE:[sales].[Order]", None),
+        ("PROCEDURE:[SALES].[usp_Place]", None),  # names compare without letter case, as the catalog
+        ("SCHEMA:[sales]", None),
+        ("TABLE:[dbo].[Customer]", None),
+        ("TABLE:[dbo].[tempx]", None),  # '_' of the pattern is a letter, not a wildcard
+        ("TABLE:[dbo].[temp_load]", "it matches 'dbo.temp_*' of [scope] exclude_objects"),
+        ("TABLE:[DBO].[TEMP_Load]", "it matches 'dbo.temp_*' of [scope] exclude_objects"),
+        ("TABLE:[dba].[Job]", "the schema [dba] is in [scope] exclude"),
+        ("SCHEMA:[Scratch]", "the schema [Scratch] is in [scope] exclude"),
+        ("VIEW:[reporting].[vw_x]", "the schema [reporting] is not in [scope] schemas"),
+        ("SCHEMA:[reporting]", "the schema [reporting] is not in [scope] schemas"),
+    ],
+)
+def test_an_object_is_in_scope_when_its_schema_is_managed_and_no_pattern_matches_it(key, why):
+    scope = load_config(VALID + SCOPE).scope
+    assert out_of_scope(scope, key) == why
+    assert in_scope(scope, key) is (why is None)
+
+
+def test_a_star_is_every_schema_that_exclude_does_not_name():
+    scope = load_config(VALID + '\n[scope]\nschemas = ["*"]\nexclude = ["dba"]\n').scope
+    assert scope is not None and scope.every_schema
+    assert in_scope(scope, "TABLE:[reporting].[x]") and in_scope(scope, "SCHEMA:[anything]")
+    assert out_of_scope(scope, "TABLE:[DBA].[x]") == "the schema [DBA] is in [scope] exclude"
+    assert scope.listed("reporting")
+
+
+def test_a_question_mark_is_one_character_and_a_pattern_can_hold_wildcards_in_the_schema_too():
+    scope = Scope(("*",), (), ("*.tmp?", "etl.stage[1]"))
+    assert not in_scope(scope, "TABLE:[sales].[tmp1]") and not in_scope(scope, "TABLE:[dbo].[TMPX]")
+    assert in_scope(scope, "TABLE:[sales].[tmp12]") and in_scope(scope, "TABLE:[sales].[tmp]")
+    # brackets are letters of the name: no character class
+    assert not in_scope(scope, "TABLE:[etl].[stage[1]]]") and in_scope(scope, "TABLE:[etl].[stage1]")
+
+
+def test_a_scope_cut_to_one_schema_keeps_the_patterns_and_drops_the_lists():
+    scope = load_config(VALID + SCOPE).scope
+    assert scope is not None
+    only = scope.only("reporting")
+    assert only == Scope(("reporting",), (), ("dbo.temp_*",))
+    assert in_scope(only, "TABLE:[reporting].[x]") and not in_scope(only, "TABLE:[sales].[Order]")
+
+
+@pytest.mark.parametrize(
+    ("table", "key"),
+    [
+        ('schemas = ["sales"]\nexclude = ["Sales"]', "scope.exclude[0]"),  # in both lists
+        ('schemas = ["*", "sales"]', "scope.schemas[0]"),  # * stands alone
+        ('schemas = ["sales", "*"]', "scope.schemas[1]"),
+        ('schemas = ["sales"]\nexclude = ["*"]', "scope.exclude[0]"),
+        ('schemas = ["sales"]\nexclude_objects = ["temp_*"]', "scope.exclude_objects[0]"),  # no dot
+        ('schemas = ["sales", "SALES"]', "scope.schemas[1]"),  # a duplicate, without letter case
+        ('schemas = ["sales"]\nexclude = ["dba", "Dba"]', "scope.exclude[1]"),
+        ('schemas = ["sales"]\nexclude_objects = ["dbo.t*", "DBO.T*"]', "scope.exclude_objects[1]"),
+        ('schemas = ["azsqlcd"]', "scope.schemas[0]"),  # the schema of the tool itself
+        ('schemas = ["sales"]\nexclude = ["AzSqlCd"]', "scope.exclude[0]"),
+        ('schemas = ["sales"]\nexclude_objects = ["azsqlcd.*"]', "scope.exclude_objects[0]"),
+        ("schemas = []", "scope.schemas"),
+        ('schemas = "sales"', "scope.schemas"),
+        ('schemas = ["sales", ""]', "scope.schemas"),
+        ('exclude = ["dba"]', "scope.schemas"),  # schemas is the one key that [scope] needs
+        ('schemas = ["sales"]\nmodules = ["x"]', "scope.modules"),
+    ],
+)
+def test_a_scope_that_contradicts_itself_or_the_tool_is_refused_by_its_key_path(table, key):
+    assert refused_key(VALID + f"\n[scope]\n{table}\n") == key
+
+
+def test_a_refused_scope_names_the_problem_and_never_echoes_the_value():
+    with pytest.raises(ToolError) as e:
+        load_config(VALID + '\n[scope]\nschemas = ["secret_schema_name"]\nexclude = ["SECRET_schema_name"]\n')
+    message = "azsqlcd.toml: scope.exclude[0]: is also in scope.schemas; a schema is in one list"
+    assert e.value.message == message
+    assert "secret" not in e.value.message.lower()
+    with pytest.raises(ToolError) as e:
+        load_config(VALID + "\n[scope]\nexclude = []\n")
+    example = 'Add the key schemas to the table [scope], for example: schemas = ["sales"]'
+    assert e.value.message.endswith(example)

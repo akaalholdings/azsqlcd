@@ -1,0 +1,6 @@
+# a module, a table, a schema and a synonym whose schema is excluded, not listed, or whose name a pattern of exclude_objects matches
+OUT_OF_SCOPE schema/procedures/scratch.usp_Load.sql:1
+OUT_OF_SCOPE schema/schemas/scratch.sql:1
+OUT_OF_SCOPE schema/synonyms/reporting.Orders.sql:1
+OUT_OF_SCOPE schema/tables/dbo.temp_Load.sql:1
+OUT_OF_SCOPE schema/views/reporting.vw_Sales.sql:1

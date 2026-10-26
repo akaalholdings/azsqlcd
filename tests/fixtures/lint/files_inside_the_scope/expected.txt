@@ -1,0 +1,2 @@
+# the schemas in another letter case, and names that the pattern dbo.temp_* comes close to: '_' is a letter of the pattern
+# near-miss: OUT_OF_SCOPE

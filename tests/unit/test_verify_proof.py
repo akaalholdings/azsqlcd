@@ -1385,3 +1385,95 @@ def test_a_function_with_a_tombstone_from_an_earlier_pull_request_is_not_read_ag
     )
 
     assert errors(check(repo)) == []
+
+
+# ------------------------------------------------------------------ [scope]: a schema enters or leaves
+def scoped(schemas: str, exclude: str = "") -> str:
+    """The config of the fixtures with a [scope] table: schemas and exclude as TOML list bodies."""
+    return R.TOML + f"\n[scope]\nschemas = [{schemas}]\nexclude = [{exclude}]\n"
+
+
+BILLING = {
+    "schema/schemas/billing.sql": "CREATE SCHEMA [billing];\n",
+    "schema/tables/billing.Invoice.sql": (
+        "CREATE TABLE [billing].[Invoice] (\n    [InvoiceId] int NOT NULL,\n"
+        "    CONSTRAINT [PK_Invoice] PRIMARY KEY CLUSTERED ([InvoiceId])\n);\n"
+    ),
+    "schema/views/billing.vw_Open.sql": "CREATE OR ALTER VIEW [billing].[vw_Open]\nAS\nSELECT 1 AS [One];\n",
+}
+
+
+def test_a_schema_that_enters_the_scope_brings_its_files_with_no_migration_and_is_named_for_baseline(
+    tmp_path: Path,
+):
+    # onboarding one schema at a time: the files are the export of a database that has them, so
+    # there is no base model to prove them against; `baseline --schema` records them
+    repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales"')})
+    R.put(repo, {"azsqlcd.toml": scoped('"sales", "billing"'), **BILLING})
+    found = check(repo)
+    assert errors(found) == []
+    message = the(found, "PRF000").message
+    assert "2 table-class object(s) enter [scope]" in message and "SCHEMA:[billing]" in message
+    assert "azsqlcd baseline --schema billing" in message
+
+    # the files of the schema are taken as they are: a migration of the same pull request on them
+    # is replayed on those files, and here the engine would refuse the table that exists
+    create = "CREATE TABLE [billing].[Invoice] (\n    [InvoiceId] int NOT NULL\n);\nGO\n"
+    R.put(repo, one("0001__invoice.sql", create))
+    assert [code for code, _, _ in errors(check(repo))] == ["PRF001"]
+
+
+def test_files_of_a_schema_that_the_scope_does_not_list_are_out_of_scope_and_nothing_takes_them_as_they_are(
+    tmp_path: Path,
+):
+    repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales"')})
+    R.put(repo, BILLING)
+    found = errors(check(repo))
+    assert [(code, path) for code, path, _ in found if code == "OUT_OF_SCOPE"] == [
+        ("OUT_OF_SCOPE", path) for path in sorted(BILLING)
+    ]
+    assert ("PRF002", "migrations/migrations.sum", 1) in found
+
+
+def test_a_schema_that_leaves_the_scope_takes_its_files_out_with_no_migration_and_no_tombstone(
+    tmp_path: Path,
+):
+    # the tool stops managing the schema: it drops nothing, so no migration and no tombstone
+    repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales", "billing"'), **BILLING})
+    R.put(repo, {"azsqlcd.toml": scoped('"sales"', '"billing"'), **dict.fromkeys(BILLING)})
+    assert errors(check(repo)) == []
+
+    # a module of a schema that stays managed still needs its tombstone
+    R.put(repo, {"azsqlcd.toml": scoped('"sales", "billing"')})
+    R.git(repo, "checkout", "-q", "main", "--", *BILLING)
+    R.put(repo, {"schema/views/billing.vw_Open.sql": None})
+    assert errors(check(repo)) == [("TMB001", "schema/views/billing.vw_Open.sql", 1)]
+
+
+def test_without_a_scope_change_the_proof_is_what_it_was(tmp_path: Path):
+    repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales", "billing"'), **BILLING})
+    R.put(repo, {"schema/tables/billing.Invoice.sql": None})
+    assert errors(check(repo)) == [("PRF002", "migrations/migrations.sum", 1)]
+
+
+def test_gen_takes_a_schema_that_enters_the_scope_as_it_is_and_writes_only_the_other_change(tmp_path: Path):
+    repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales"')})
+    R.put(repo, {"azsqlcd.toml": scoped('"sales", "billing"'), **BILLING, R.ORDER: WITH_NOTE})
+    generated = gen.generate(repo, "main", "add_note")
+    assert generated.text is not None and "[billing]" not in generated.text
+    assert generated.text.endswith(ADD_NOTE)
+    gen.write_result(repo, generated)
+    assert errors(check(repo)) == []
+
+
+def test_a_raw_batch_for_an_object_outside_the_scope_is_a_raw_batch_for_an_unmanaged_object(tmp_path: Path):
+    repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales"', '"etl"')})
+    batch = (
+        raw("TABLE:[etl].[Log]")
+        .replace("[audit].[Log]", "[etl].[Log]")
+        .replace("[audit].[LogOld]", "[etl].[Old]")
+    )
+    R.put(repo, one("0001__raw.sql", batch))
+    assert errors(check(repo)) == []
+    R.put(repo, one("0001__raw.sql", batch.replace("[etl].[Log]", "[sales].[Log]")))
+    assert [code for code, _, _ in errors(check(repo))] == ["RAW001"]

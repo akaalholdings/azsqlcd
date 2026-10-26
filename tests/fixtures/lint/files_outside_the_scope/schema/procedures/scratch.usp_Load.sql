@@ -1,0 +1,3 @@
+CREATE OR ALTER PROCEDURE [scratch].[usp_Load]
+AS
+SELECT 1 AS [One];

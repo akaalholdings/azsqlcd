@@ -8,10 +8,13 @@ Keys with a default: project.module_chunk (100: what the template has; it sizes 
 transactions of a first converge), project.server_suffixes, project.data_batches, env.<name>.gated
 and env.<name>.auth. A setting that decides what a deploy may do (table_model, min_token_minutes,
 drift, the lock limits, the identities) has no default.
+
+[scope] is optional. Without it every schema is managed, as before the table existed.
 """
 
 from __future__ import annotations
 
+import functools
 import re
 import tomllib
 from collections.abc import Collection
@@ -20,6 +23,7 @@ from typing import Any
 
 from azsqlcd import names
 from azsqlcd.errors import ToolError, refused
+from azsqlcd.model import fold
 
 # Promotion order, then the environment of the live tests.
 ENVIRONMENTS = ("dev", "sandbox", "test", "preprod", "prod", "disposable")
@@ -68,7 +72,78 @@ _EXAMPLES = {
     "id": _EXAMPLE_TARGETS,
     "server": _EXAMPLE_TARGETS,
     "database": _EXAMPLE_TARGETS,
+    "schemas": 'schemas = ["sales"]',
 }
+# [scope] schemas = ["*"]: every schema that [scope] exclude does not name
+EVERY_SCHEMA = "*"
+TOOL_SCHEMA = "azsqlcd"  # state.SCHEMA; config.py cannot import state, which imports it
+
+
+@functools.cache
+def _pattern(text: str) -> re.Pattern[str]:
+    """A pattern of exclude_objects as a regular expression: * and ? are wildcards, all else is a letter."""
+    return re.compile("".join({"*": ".*", "?": "."}.get(c, re.escape(c)) for c in fold(text)), re.DOTALL)
+
+
+@dataclass(frozen=True)
+class Scope:
+    """[scope] of azsqlcd.toml: the schemas that the tool manages, so a database is onboarded one
+    schema at a time.
+
+    schemas: the managed schemas, as written; (EVERY_SCHEMA,) is every schema that exclude does not
+    name. exclude: schemas that were reviewed and are not managed. exclude_objects: patterns
+    'schema.name' of objects in a managed schema that are not managed; * and ? are wildcards. Names
+    are compared without letter case (model.fold), as the catalog compares them. A schema in neither
+    list is not managed either: plan and drift report it (SCHEMA_UNSCOPED).
+    """
+
+    schemas: tuple[str, ...]
+    exclude: tuple[str, ...] = ()
+    exclude_objects: tuple[str, ...] = ()
+
+    @property
+    def every_schema(self) -> bool:
+        return self.schemas == (EVERY_SCHEMA,)
+
+    def has_schema(self, schema: str) -> bool:
+        """The schema is managed: listed (or every schema) and not excluded."""
+        if fold(schema) in {fold(name) for name in self.exclude}:
+            return False
+        return self.every_schema or fold(schema) in {fold(name) for name in self.schemas}
+
+    def listed(self, schema: str) -> bool:
+        """The schema is in schemas or in exclude: somebody decided about it."""
+        return self.every_schema or fold(schema) in {fold(name) for name in (*self.schemas, *self.exclude)}
+
+    def pattern_of(self, schema: str, name: str) -> str | None:
+        """The first pattern of exclude_objects that 'schema.name' matches; None when none does."""
+        text = fold(f"{schema}.{name}")
+        return next((p for p in self.exclude_objects if _pattern(p).fullmatch(text)), None)
+
+    def only(self, schema: str) -> Scope:
+        """This scope cut to one schema: the read of `export --schema` and `baseline --schema`."""
+        return Scope((schema,), (), self.exclude_objects)
+
+
+def out_of_scope(scope: Scope | None, key: str) -> str | None:
+    """Why the object of a key is not managed under the scope; None when it is. With no [scope]
+    every object is in scope. The key of a schema is in scope when the schema is managed."""
+    if scope is None:
+        return None
+    _, schema, name = names.parse_object_key(key)
+    owner = name if schema is None else schema
+    if fold(owner) in {fold(item) for item in scope.exclude}:
+        return f"the schema {names.quote(owner)} is in [scope] exclude"
+    if not scope.has_schema(owner):
+        return f"the schema {names.quote(owner)} is not in [scope] schemas"
+    pattern = None if schema is None else scope.pattern_of(schema, name)
+    if pattern is not None:
+        return f"it matches '{pattern}' of [scope] exclude_objects"
+    return None
+
+
+def in_scope(scope: Scope | None, key: str) -> bool:
+    return out_of_scope(scope, key) is None
 
 
 @dataclass(frozen=True)
@@ -115,6 +190,7 @@ class Config:
     env: dict[str, Environment]
     unmanaged_objects: tuple[str, ...]  # object keys
     unmanaged_dependants: tuple[str, ...]  # [ack] unmanaged_dependants, text as written
+    scope: Scope | None = None  # None: no [scope] table, every schema is managed
 
 
 def _fail(path: str, problem: str) -> ToolError:
@@ -283,7 +359,7 @@ def load_config(text: str) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise refused("CONFIG_INVALID", f"azsqlcd.toml is not valid TOML: {e}") from None
     _reject_secret_keys(doc, "")
-    _table(doc, "", ("project", "identities", "env"), ("unmanaged", "ack"))
+    _table(doc, "", ("project", "identities", "env"), ("unmanaged", "ack", "scope"))
 
     p = _table(
         doc["project"],
@@ -341,7 +417,36 @@ def load_config(text: str) -> Config:
         env=env,
         unmanaged_objects=unmanaged,
         unmanaged_dependants=_strings(ack, "unmanaged_dependants", "ack"),
+        scope=_scope(doc["scope"]) if "scope" in doc else None,
     )
+
+
+def _scope(raw: object) -> Scope:
+    """[scope]. Every name is compared without letter case: a duplicate, a schema in both lists or
+    the schema of the tool is refused in any spelling."""
+    table = _table(raw, "scope", ("schemas",), ("exclude", "exclude_objects"))
+    lists = {key: _strings(table, key, "scope") for key in ("schemas", "exclude", "exclude_objects")}
+    if not lists["schemas"]:
+        raise _fail("scope.schemas", f'must name at least one schema, or be ["{EVERY_SCHEMA}"]')
+    for key, values in lists.items():
+        seen: set[str] = set()
+        for i, value in enumerate(values):
+            path = f"scope.{key}[{i}]"
+            schema = value.split(".", 1)[0] if key == "exclude_objects" else value
+            if fold(schema) == fold(TOOL_SCHEMA):
+                raise _fail(path, f"names the schema of the tool ({TOOL_SCHEMA}), which is never managed")
+            if value == EVERY_SCHEMA and (key != "schemas" or len(values) > 1):
+                raise _fail(path, f"'{EVERY_SCHEMA}' is every schema: it stands alone, in scope.schemas")
+            if key == "exclude_objects" and "." not in value:
+                raise _fail(path, "must be a pattern schema.name, for example dbo.temp_*")
+            if fold(value) in seen:
+                raise _fail(path, "is listed more than once")
+            seen.add(fold(value))
+    managed = {fold(name) for name in lists["schemas"]}
+    for i, name in enumerate(lists["exclude"]):
+        if fold(name) in managed:
+            raise _fail(f"scope.exclude[{i}]", "is also in scope.schemas; a schema is in one list")
+    return Scope(lists["schemas"], lists["exclude"], lists["exclude_objects"])
 
 
 def resolve_target(config: Config, env: str, target_id: str) -> tuple[Environment, Target]:

@@ -63,7 +63,7 @@ CODES: dict[str, str] = {
     "NF000": ERROR,  # A14: the file says something that the model does not hold
     "MDL001": ERROR,  # the head model does not fit together
     "MODEL_INVALID": ERROR,  # table-class files do not parse, so there is no model and no proof
-    "PRF000": WARNING,  # no proof: table_model is false, or this pull request sets it to true
+    "PRF000": WARNING,  # no proof: table_model false, switched to true here, or objects enter [scope]
     "PRF001": ERROR,  # the new migrations do not give the head model
     "PRF002": ERROR,  # a table-class file changes and the pull request adds no migration
     "PRF003": ERROR,  # allow SET_NOT_NULL, or LONG_LOCK of a clustered drop, is missing or matches nothing
@@ -212,6 +212,52 @@ def _config(files: Mapping[str, bytes]) -> config.Config:
     if data is None:
         raise refused("CONFIG_INVALID", f"{release.CONFIG_PATH} does not exist")
     return config.load_config(_text(release.CONFIG_PATH, data))
+
+
+def _base_scope(base_files: Mapping[str, bytes], head: config.Config) -> config.Scope | None:
+    """[scope] at the base revision. A base config that cannot be read, or none, gives the scope
+    of the head revision: then no object enters or leaves the scope, the strict side."""
+    try:
+        return _config(base_files).scope
+    except ToolError:
+        return head.scope
+
+
+def _scoped_start(
+    base: Model, head: Model, base_scope: config.Scope | None, head_scope: config.Scope | None
+) -> tuple[Model, list[str]]:
+    """The base model as the scope of the head revision sees it, and the keys that enter the scope.
+
+    An object that leaves the scope is left out: the tool stops managing it and drops nothing. An
+    object of the head files that enters it (a schema onboarded by this change) is taken as its
+    file says: no base model can prove it, and `baseline --schema` records it as the database has it.
+    """
+    if base_scope == head_scope:
+        return base, []
+    kept = [
+        obj
+        for obj in base.values()
+        if config.in_scope(head_scope, obj.key) and config.in_scope(base_scope, obj.key)
+    ]
+    entered = [
+        obj
+        for obj in head.values()
+        if config.in_scope(head_scope, obj.key) and not config.in_scope(base_scope, obj.key)
+    ]
+    return Model([*kept, *entered]), sorted(obj.key for obj in entered)
+
+
+def _entered(keys: Sequence[str]) -> Finding:
+    schemas = sorted(
+        {names.parse_object_key(key)[1] or names.parse_object_key(key)[2] for key in keys}, key=fold
+    )
+    message = (
+        f"{len(keys)} table-class object(s) enter [scope] in this pull request (first: {keys[0]}): their "
+        "files are taken as they are, there is no base model to prove them against. After the merge run "
+        + ", then ".join(f"azsqlcd baseline --schema {schema}" for schema in schemas)
+        + " on every target"
+    )
+    return Finding("PRF000", WARNING, release.CONFIG_PATH, 1, message)
 
 
 def _base_table_model(base_files: Mapping[str, bytes]) -> bool | None:
@@ -545,11 +591,15 @@ def _managed_keys(head_files: Mapping[str, bytes], head: Model) -> set[str]:
 
 
 def _raw_findings(
-    new: Sequence[tuple[chain.ChainEntry, chain.Migration]], unmanaged: Collection[str], managed: set[str]
+    new: Sequence[tuple[chain.ChainEntry, chain.Migration]],
+    unmanaged: Collection[str],
+    managed: set[str],
+    scope: config.Scope | None = None,
 ) -> list[Finding]:
     """RAW001 and RAW002 for the raw batches of the new migrations.
 
-    RAW001 reads the directive: the object that the batch is for is unmanaged. RAW002 reads the
+    RAW001 reads the directive: the object that the batch is for is unmanaged, or outside [scope]
+    (the tool does not manage it either). RAW002 reads the
     text: a raw batch is not replayed and not read back, so it names no managed object. The
     token scan of modules.scan_references: strings and comments do not count, a one-part name is
     an object of schema dbo.
@@ -561,7 +611,7 @@ def _raw_findings(
             if batch.kind != "raw":
                 continue
             own = fold(batch.raw_object or "")
-            if own not in unmanaged:
+            if own not in unmanaged and not _outside(scope, batch.raw_object or ""):
                 message = (
                     f"a raw batch for {batch.raw_object}, which [unmanaged] objects of "
                     f"{release.CONFIG_PATH} does not list. A raw batch is for an unmanaged object only: "
@@ -583,6 +633,14 @@ def _raw_findings(
                 )
                 out.append(Finding("RAW002", ERROR, path, batch.first_line - 1 + first.line, message))
     return out
+
+
+def _outside(scope: config.Scope | None, text: str) -> bool:
+    """The text is the key of an object that [scope] does not manage. No scope: nothing is outside."""
+    try:
+        return not config.in_scope(scope, text)
+    except ValueError:  # not an object key: lint reports the directive
+        return False
 
 
 def _replay(
@@ -1035,15 +1093,21 @@ def _draft(
 
 
 def _start_model(
-    base_files: Mapping[str, bytes], head_files: Mapping[str, bytes], root: release.StrPath, base: str
+    base_files: Mapping[str, bytes],
+    head_files: Mapping[str, bytes],
+    root: release.StrPath,
+    base: str,
+    head: Model,
 ) -> Model:
     """The model that a new migration starts from: the base revision, then the migrations that the
     working tree has already added to the chain. So a second `gen` on one branch writes only what
     the first did not. When the branch withdraws a merged migration with no replacement, the start
     is the model without it, as in the proof (WDR004); base is the revision whose first-parent
-    history holds that migration."""
+    history holds that migration. An object that enters [scope] on the branch is in the start as
+    its file says, as in the proof: gen writes no CREATE for a schema that is onboarded."""
     base_chain, head_chain = _chain(base_files), _chain(head_files)
-    start = load_model(base_files)
+    cfg = _config(head_files)
+    start = _scoped_start(load_model(base_files), head, _base_scope(base_files, cfg), cfg.scope)[0]
     if _withdrawn_alone(base_files, base_chain, head_chain):
         try:
             start = _model_without(root, base, base_files, base_chain, head_chain)
@@ -1165,7 +1229,7 @@ def generate(root: release.StrPath, base_ref: str, name: str, renames: Sequence[
                 file=entry.file,
                 line=1,
             )
-    start = _start_model(base_files, head_files, root, merge_base)
+    start = _start_model(base_files, head_files, root, merge_base, head)
     body = _draft(base_files, head_files, start, head, specs)
     if not body:
         others = (p for p in base_files.keys() | head_files.keys() if p.startswith("schema/"))
@@ -1570,7 +1634,7 @@ def _prove(
     unmanaged = {fold(key) for key in cfg.unmanaged_objects}
     # the managed keys need every module file of the revision: read them for a raw batch only (N5-03)
     has_raw = any(batch.kind == "raw" for _, migration in new for batch in migration.batches)
-    out += _raw_findings(new, unmanaged, _managed_keys(head_files, head) if has_raw else set())
+    out += _raw_findings(new, unmanaged, _managed_keys(head_files, head) if has_raw else set(), cfg.scope)
     out += _unbind_findings(base_files, new)
     out += _tombstone_findings(base_files, head_files, head)
 
@@ -1590,7 +1654,9 @@ def _prove(
             out.append(Finding("PRF004", ERROR, f"migrations/{entry.file}", 1, message))
         return out
 
-    base = load_model(base_files)
+    base, entered = _scoped_start(load_model(base_files), head, _base_scope(base_files, cfg), cfg.scope)
+    if entered:
+        out.append(_entered(entered))
     withdrawn = _withdrawn_alone(base_files, base_chain, head_chain)
     start: Model | None = base
     if withdrawn:
