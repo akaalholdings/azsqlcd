@@ -286,15 +286,15 @@ and `tables.py` are not in the map of "Build contracts".
 | `emit.py` | model to canonical CREATE text, operation to SQL, the NF000 token check | lex, model, names, parse |
 | `replay.py` | operations applied to a model, with precondition checks | model, names |
 | `diff.py` | model x model to ordered operations; refusals; `classify` | lex, model, names, replay |
-| `config.py` | `azsqlcd.toml`; `resolve_target`, `targets_matrix` | errors, names |
+| `config.py` | `azsqlcd.toml`; `resolve_target`, `targets_matrix`; `Scope`, `in_scope`, `out_of_scope` | errors, model (`fold`), names |
 | `chain.py` | `migrations.sum`, migration files and batches, tombstones | errors, lex, names |
 | `modules.py` | module files: normal form, checksum, dependency order, header rewrites | errors, lex, names |
 | `release.py` | build from git, manifest, digest, in-memory bundle read, tool digest, the one git entry point | chain, errors |
 | `lint.py` | findings with codes, batch classifier, allow lines, secret rule | chain, config, errors, lex, modules, names |
 | `session.py` | the only importer of the driver; `Session`, `connect`; the sign-in: `Credential` (a token provider or a `SqlLogin`), `AzureCliTokenProvider`, `ManagedIdentityTokenProvider`, `credential_from_environment`, `auth_kind` | errors, sqlerrors |
 | `state.py` | setup script; reads and write statements of schema `azsqlcd` | config, errors, names, session, sqlerrors |
-| `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts | errors, names, session, sqlerrors, state |
-| `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, errors, lex, model, names, session, state |
+| `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts; `schema_condition`, `list_schemas` | config, errors, names, session, sqlerrors, state |
+| `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables only), chain, config, errors, lex, model, modules, names, release, session, sqlerrors, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
@@ -336,8 +336,8 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 | `plan --out DIR` | `DIR/plan.json`. Outputs: `pending` (`true` or `false`), `plan_sha256` | 0 / 22 / 24 / 25 |
 | `deploy (--expect-plan-file FILE \| --inline-plan) --out DIR [--approved-by S] [--approved-utc TIME] [--triggering-actor S] [--ci-run-url S]` | `DIR/report.json` for every end; `DIR/plan.json` with `--inline-plan`. `--approved-utc` is an ISO time with a time zone. Output: `plan_sha256` | 0 / 21 / 22 / 23 / 24 / 25 |
 | `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
-| `export --root DIR --env E --target T --out DIR` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
-| `baseline [--report-only] --confirm-database NAME [--out DIR]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
+| `export --root DIR --env E --target T --out DIR [--schema NAME]` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
+| `baseline [--report-only] --confirm-database NAME [--out DIR] [--schema NAME]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
 | `resolve --confirm-database NAME --reason TEXT (--mark-applied M \| --mark-not-applied M \| --accept-drift KEY \| --adopt-module KEY \| --clear-run RUN_ID \| --rebind-environment ENV) [--force-no-readback] [--out DIR]` | With `--out`: `DIR/report.json`. `--force-no-readback` is for `--mark-applied` only. `--rebind-environment` must name the environment of `--env` | 0 / 21 / 22 / 23 / 24 / 25 |
 
 Ends and outputs:
@@ -720,6 +720,48 @@ code is now, where it differs from the text above:
   field of the model and a part of the capture.
 - Not proven: all of it ran against fakes only. `docs/known-gaps.md`, section 14, has the scope
   cut, the assumptions about the engine and the limits.
+
+### Schema scope (2026-10-26)
+
+Owner decision of 2026-10-26: the whole database comes under the tool, onboarded one schema at a
+time. `docs/setup.md`, section 7, "One schema at a time", is the procedure; `docs/runbook.md` has
+the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
+
+- `azsqlcd.toml` takes the optional table `[scope]`: `schemas` (required in the table; `["*"]` is
+  every schema that is not excluded), `exclude`, `exclude_objects` (patterns `schema.name`, `*` and
+  `?`). `config.Scope`, `config.out_of_scope(scope, key)`. Names are compared with `model.fold`.
+  Without the table, `Config.scope` is None and every function behaves as before: no batch
+  changes, no output changes.
+- Reads. `catalog.schema_condition` limits a read of every object to the schemas of the scope in
+  the engine (`IN` or `NOT IN` a subquery on `sys.schemas`): `list_user_objects`,
+  `capture_modules` with no keys, and the eleven queries of `catalog_tables.read_model` with no
+  keys (argument `scope`). A pattern of `exclude_objects` is decided in Python on the rows: such an
+  object is not read into the model, is in no list, and still holds its name in its schema. An
+  external table of the scope is skipped by its type (`CatalogRead.external_tables`, no column
+  read); without a scope it stays `UNSUPPORTED`. `catalog.list_schemas` reads the schema names
+  for `SCHEMA_UNSCOPED`; it is sent only with a scope whose `schemas` is not `["*"]`.
+- Plan, drift, runner: `plan.scoped_state` leaves out the rows of objects outside the scope, so a
+  schema that leaves the scope is not planned, compared, orphaned or dropped. The unmanaged list
+  holds objects of the scope only. A plan note for each `SCHEMA_UNSCOPED` schema and one for the
+  number of external tables; notes are outside `plan_sha256`. `drift` gives the class `unscoped`,
+  which is not drift (exit 0). Under a scope, `NAME_COLLISION` of modules whose schemas record no
+  managed object, and the table `BASELINE_REQUIRED` of such schemas, name
+  `azsqlcd baseline --schema`.
+- Export and baseline of one schema: `onboard.export(..., schema)` and `onboard.baseline(...,
+  schema)`, `--schema` on the command line. The export reads that schema with the patterns of the
+  config; a need of a file in another schema that the scope manages counts as managed. The command
+  line merges the captures into `onboarding/<env>/snapshot.json` of `--root`
+  (`tables.merge_snapshot`) and prints what to add to `[scope] schemas`; it does not edit
+  `azsqlcd.toml`. The baseline of a schema compares and records that schema only, with a baseline
+  step of its own, and is refused when the state holds a managed object of the schema.
+- Lint and proof: `OUT_OF_SCOPE` (error) for an object file outside the scope; `TMB001` is not
+  given for a module that leaves the scope; `RAW001` is not given for a raw batch for an object
+  outside it. `gen` and the proof start from the base model as the head scope sees it: objects
+  that leave the scope are left out, objects that enter it are taken as their files say (`PRF000`
+  names `baseline --schema`).
+- New reason code `OUT_OF_SCOPE` (22). New finding codes `OUT_OF_SCOPE` (lint) and
+  `SCHEMA_UNSCOPED` (plan note, drift class `unscoped`).
+- Not done: `onboard.yml` passes no `--schema`. Proven against fakes only.
 
 ---
 

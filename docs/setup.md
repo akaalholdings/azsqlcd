@@ -234,7 +234,8 @@ account, three things differ:
    Use the failover-group listener name as `server` when the database is in a failover group.
    Rules that the tool checks (`CONFIG_INVALID`):
    - Every key is required except `gated`, `auth` (default `"oidc"`; section 2, "Three ways to
-     sign in"), `[unmanaged]`, `[ack]`, and in `[project]` `module_chunk` (default 100),
+     sign in"), `[unmanaged]`, `[ack]`, `[scope]` (section 7, "One schema at a time"), and in
+     `[project]` `module_chunk` (default 100),
      `data_batches` (default `false`) and `server_suffixes` (default: the four Azure SQL Database
      suffixes). A target server that ends with none of the suffixes is `CONFIG_INVALID`. An
      unknown key is an error. The message for a missing required key names the key, its table
@@ -515,6 +516,78 @@ a temporal table came back byte-equal in the live run (13 of 14 table files and 
 differed). The exported files are the model at onboarding only. Do not copy an export over a
 repository that already runs with `table_model = true`: `verify` then fails with `PRF002` and
 `gen` refuses (`COMPUTED_CHANGE`, `USER_TYPE_CHANGE`). `schema/_tombstones.toml` is not exported.
+
+### One schema at a time
+
+A database with many schemas is put under the tool one schema at a time. The optional table
+`[scope]` of `azsqlcd.toml` says which schemas the tool manages:
+
+```toml
+[scope]
+schemas = ["sales", "dbo"]            # the managed schemas; ["*"] = every schema not excluded
+exclude = ["dba", "scratch"]          # schemas that were reviewed and are not managed
+exclude_objects = ["dbo.temp_*"]      # schema.name patterns inside managed schemas; * and ? are wildcards
+```
+
+Without `[scope]` every schema is managed, as before. With it:
+
+- The tool manages every object of a schema in `schemas`, except an object whose `schema.name`
+  matches a pattern of `exclude_objects` (`*` is any text, `?` one character, every other
+  character is itself: `_` and `[` are no wildcards), an object of `[unmanaged] objects`, a history
+  table of a temporal table (as before) and an external table. External tables are skipped by
+  their type everywhere; a report gives their number, never one line for each.
+- What the scope does not manage is invisible: `export`, `plan` and `drift` do not read the
+  schemas outside it, list no object of them as unmanaged and compare nothing there. A row of the
+  state for an object that left the scope is left as it is and is not compared.
+- A schema of the database in neither `schemas` nor `exclude` (`schemas` is not `["*"]`) is the
+  finding `SCHEMA_UNSCOPED`: a note of the plan (output, `plan.json`, job summary) and a line of
+  `drift` with the class `unscoped`. It never fails a command and does not change an exit code.
+- A file of the repository for an object outside the scope is `OUT_OF_SCOPE` in `lint`, `build`
+  and `verify`: the config and the files contradict each other.
+- A managed table with a foreign key to a table outside the scope stays unmanaged at export
+  (`DEPENDS_ON_UNMANAGED`), as with a key to an unmanaged table. A managed module may reference an
+  object outside the scope, as it may reference an unmanaged one.
+- Rules of the table (`CONFIG_INVALID`, the message names the key path): `schemas` is required and
+  not empty; `"*"` stands alone in `schemas`; no schema is in both lists; no entry is listed twice;
+  a pattern holds a dot; no list names `azsqlcd`, the schema of the tool. Names are compared without
+  letter case, as the catalog compares them.
+
+Onboarding, first schema: list it in `[scope] schemas` (and `exclude` what was reviewed), then
+follow "Existing database" above. The export writes files for the managed objects only, and
+`export.md` has a part "Scope".
+
+Each further schema, here `billing` (the order dev, sandbox, test, preprod, prod holds as above):
+
+1. Export the schema alone from the reference environment:
+   `azsqlcd export --root . --env prod --target <target> --out ../export --schema billing`.
+   It writes the files of `billing` only. `onboarding/prod/snapshot.json` is the snapshot of the
+   repository with the captures of `billing` added; the captures of the other schemas stay as they
+   are. A key of `billing` to a table of a schema that the scope manages already is kept. The
+   command prints what to add: `Add "billing" to [scope] schemas of azsqlcd.toml`. The tool never
+   edits `azsqlcd.toml`. A schema in `exclude` or the schema `azsqlcd` is refused (`OUT_OF_SCOPE`).
+2. One pull request: `schema/**` of `billing` and `onboarding/prod/` of the export, the
+   `[unmanaged] objects` list of `export.md`, and `"billing"` in `[scope] schemas`. No change to
+   the files of the other schemas. `verify` gives the warning `PRF000`: the objects that enter the
+   scope are taken as their files say, and the message names `azsqlcd baseline --schema billing`.
+   `gen` writes no `CREATE` for them. Merge; the merge creates release r<b>.
+3. For each environment: `azsqlcd baseline --report-only --schema billing ...`, then
+   `azsqlcd baseline --schema billing --bundle <dir> --digest <digest> --env <env> --target <target> --confirm-database <database>`.
+   It compares and records the modules and the table-class objects of `billing` only, with a
+   baseline step whose note starts with `schema [billing]:`. No row of another schema is read or
+   written. Until it ran, the plan of r<b> stops with `BASELINE_REQUIRED` and names the command. A
+   second run is `ALREADY_BASELINED`; a schema that `[scope]` of the release does not manage is
+   `OUT_OF_SCOPE`.
+4. Deploy r<b> as usual.
+
+Repeat until the plan has no `SCHEMA_UNSCOPED` note: every schema is in `schemas` or in `exclude`.
+
+To stop managing a schema, move it from `schemas` to `exclude` and delete its files in one pull
+request: no migration and no tombstone are needed, and the tool drops nothing (`PRF000`, no
+`TMB001`). Its rows stay in the state and are no longer compared.
+
+Limit: the workflow `onboard.yml` does not pass `--schema` in this version. Run the export and the
+two baselines of a schema from a workstation (section 2, "Three ways to sign in"), with the plan
+identity for `export` and `--report-only` and the deploy identity for the baseline that writes.
 
 ### Withdraw and replace a merged migration
 
