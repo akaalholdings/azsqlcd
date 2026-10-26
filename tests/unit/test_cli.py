@@ -258,7 +258,7 @@ def literal_calls() -> list[tuple[str, list[str]]]:
 
 
 EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}")
-SWITCHES = ("inputs.gated", "steps.audit.outputs.approved_by", "inputs.force_no_readback")
+SWITCHES = ("inputs.gated", "steps.audit.outputs.approved_by", "inputs.force_no_readback", "inputs.schema")
 RESOLVE_ACTIONS = yaml.safe_load(
     (REPO / "templates" / "db-repo" / ".github" / "workflows" / "resolve.yml").read_text(encoding="utf-8")
 )[True]["workflow_dispatch"]["inputs"]["action"]["options"]  # YAML reads the key `on` as true

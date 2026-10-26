@@ -422,9 +422,9 @@ COMMANDS = {
         {"--inline-plan"},
     ),
     "drift": ({"--bundle", "--digest", "--env", "--target", "--ci"}, set()),
-    "export": ({"--root", "--env", "--target", "--out", "--ci"}, set()),
+    "export": ({"--root", "--env", "--target", "--out", "--schema", "--ci"}, set()),
     "baseline": (
-        {"--bundle", "--digest", "--env", "--target", "--confirm-database", "--ci"},
+        {"--bundle", "--digest", "--env", "--target", "--confirm-database", "--schema", "--ci"},
         {"--report-only"},
     ),
     "resolve": (
@@ -1255,8 +1255,57 @@ def test_onboard_accepts_only_its_three_actions_and_baseline_needs_the_database_
     tmp_path: Path, action: str, confirm: str, ok: bool
 ):
     script = step_script(WORKFLOWS / "onboard.yml", "targets", "inputs")
-    env = {"ACTION": action, "RELEASE": "r3", "TARGET": "sales-dev", "CONFIRM_DATABASE": confirm}
+    env = {
+        "ACTION": action,
+        "RELEASE": "r3",
+        "TARGET": "sales-dev",
+        "CONFIRM_DATABASE": confirm,
+        "SCHEMA": "",
+    }
     assert (run_step(script, tmp_path, env).returncode == 0) is ok
+
+
+@needs_bash
+@pytest.mark.parametrize("schema, ok", [("", True), ("billing", True), ("billing\n--report-only", False)])
+def test_onboard_refuses_a_schema_that_could_add_an_argument(tmp_path: Path, schema: str, ok: bool):
+    script = step_script(WORKFLOWS / "onboard.yml", "targets", "inputs")
+    env = {
+        "ACTION": "export",
+        "RELEASE": "r3",
+        "TARGET": "sales-dev",
+        "CONFIRM_DATABASE": "",
+        "SCHEMA": schema,
+    }
+    assert (run_step(script, tmp_path, env).returncode == 0) is ok
+
+
+def test_onboard_passes_one_schema_to_the_export_and_to_both_baselines():
+    """docs/setup.md, section 7, "One schema at a time": the dispatch form takes a schema, and the
+    reusable workflow gives it to every command as --schema, or nothing when it is empty."""
+    inputs = load(WORKFLOWS / "onboard.yml")[True]["workflow_call"]["inputs"]
+    assert inputs["schema"] == {
+        "description": inputs["schema"]["description"],
+        "type": "string",
+        "default": "",
+    }
+    calls = [
+        lines
+        for where, lines in tool_calls()
+        if where.startswith(".github/workflows/onboard.yml") and lines[0] != "targets"
+    ]
+    assert sorted(lines[0] for lines in calls) == ["baseline", "baseline", "export"]
+    for lines in calls:
+        at = lines.index("${{ inputs.schema && '--schema' || '' }}")
+        assert lines[at + 1] == "${{ inputs.schema }}"
+    for caller in (TEMPLATE, REPO / "examples" / "demo-db"):
+        doc = load(caller / ".github" / "workflows" / "onboard.yml")
+        form = triggers(doc)["workflow_dispatch"]["inputs"]
+        assert form["schema"]["type"] == "string" and form["schema"]["default"] == ""
+        called = jobs(caller / ".github" / "workflows" / "onboard.yml")["onboard"]["with"]
+        assert called["schema"] == "${{ inputs.schema }}"
+        assert set(called) <= set(inputs), (
+            "the caller passes an input that the reusable workflow does not have"
+        )
 
 
 def test_onboard_reads_with_the_plan_identity_and_writes_only_behind_the_deploy_environment():

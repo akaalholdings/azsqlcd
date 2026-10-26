@@ -25,6 +25,10 @@ on:
         description: Name of the database (baseline-report and baseline)
         type: string
         default: ''
+      schema:
+        description: One schema of [scope], to onboard schema by schema (empty for the whole scope)
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -52,4 +56,5 @@ jobs:
       release: ${{ needs.release.outputs.release }}
       digest: ${{ needs.release.outputs.digest }}
       confirm_database: ${{ inputs.confirm_database }}
+      schema: ${{ inputs.schema }}
       runs-on: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod"}' || '{"group":"azsql-nonprod"}' }}

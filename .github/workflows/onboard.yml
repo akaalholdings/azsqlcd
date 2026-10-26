@@ -33,6 +33,10 @@ on:
         description: Name of the database (baseline-report and baseline). The tool compares it with the target.
         type: string
         default: ''
+      schema:
+        description: One schema of [scope] (export, baseline-report and baseline); empty for the whole scope.
+        type: string
+        default: ''
       runs-on:
         description: 'JSON. Runner of the database jobs, for example {"group":"azsql-nonprod"}. Ephemeral runners only.'
         type: string
@@ -60,6 +64,7 @@ jobs:
           RELEASE: ${{ inputs.release }}
           TARGET: ${{ inputs.target }}
           CONFIRM_DATABASE: ${{ inputs.confirm_database }}
+          SCHEMA: ${{ inputs.schema }}
         run: |
           set -euo pipefail
           case "$ACTION" in
@@ -71,7 +76,7 @@ jobs:
           name='^r[0-9]+$'
           if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
           # One argument per line: a line break in a value would add an argument.
-          for value in "$TARGET" "$CONFIRM_DATABASE"; do
+          for value in "$TARGET" "$CONFIRM_DATABASE" "$SCHEMA"; do
             case "$value" in
               *$'\n'*|*$'\r'*) echo "::error::an input holds a line break"; exit 1 ;;
             esac
@@ -165,6 +170,8 @@ jobs:
             ${{ inputs.target }}
             --out
             export
+            ${{ inputs.schema && '--schema' || '' }}
+            ${{ inputs.schema }}
             --ci
             github
       - if: ${{ inputs.action == 'baseline-report' }}
@@ -184,6 +191,8 @@ jobs:
             ${{ inputs.target }}
             --confirm-database
             ${{ inputs.confirm_database }}
+            ${{ inputs.schema && '--schema' || '' }}
+            ${{ inputs.schema }}
             --ci
             github
       # Also after a tool exit that is not 0: the report of a baseline that differs is the result.
@@ -260,6 +269,8 @@ jobs:
             ${{ inputs.target }}
             --confirm-database
             ${{ inputs.confirm_database }}
+            ${{ inputs.schema && '--schema' || '' }}
+            ${{ inputs.schema }}
             --ci
             github
       # The triage log of the tool: statement classes, hashes and error numbers; no SQL text, no data.
