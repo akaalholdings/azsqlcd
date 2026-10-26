@@ -108,7 +108,7 @@ does not end the transaction (X3); the guard outside a transaction is (0, 1, new
 |---|---|---|
 | L1 | The driver connects with an access token of `AzureCliCredential` on Windows with Python 3.14 and on the runner image (passed on macOS with Python 3.12: gate G-D5 on that machine only) | `SELECT @@SPID` returns on both machines; a closed session is gone from the server; `runner.set_session_options` passes |
 | L8 | The engine writes DEFAULT, CHECK, computed and filter expressions in one normal form on every database | A fixed input set on two databases gives equal text |
-| L12 | The first connect to a paused serverless database succeeds inside 180 seconds | Connect to a paused database; record the error texts |
+| L12 | The first connect to a paused serverless database succeeds inside 180 seconds | Connect to a paused database; record the error texts. Live 2026-10-26: the first attempt ended after 15 seconds with `TCP Provider: Timeout error [258]` (SQLSTATE 08001) and was not retried. Fixed: this text is transient at connect |
 | L13 | A session outlives the expiry of its token, or ends cleanly | Hold a session 90 minutes past expiry with one statement every 5 minutes and one long statement over the expiry; record the token life right after `azure/login` |
 | L14 | `db_ddladmin`, VIEW DEFINITION, VIEW DATABASE STATE and the grants of `setup-sql` are enough for deploy and plan, also for CREATE SCHEMA | Run every statement kind and every catalog read with both principals; record each missing right |
 | X5 (rest) | A loss of the network after COMMIT reached the server ends as exit 23, or as 24 `CONNECTION_LOST_COMMITTED` when the locking read decides. The kill case passed; `CONNECTION_LOST_COMMITTED` was never seen live | No controlled test (`docs/live-testing.md`, section 7) |
@@ -168,7 +168,7 @@ Driver and session (`session.py`, `sqlerrors.py`).
 | The first diagnostic record of a failed batch is the engine error; the driver keeps one record and cuts it at about 512 characters | X1 for single errors; no test yet for a batch with several records |
 | `close()` on a dead connection raises an error that the tool can suppress | L5 |
 | `AzureCliTokenProvider` with the real credential; the `az` call has the library timeout of 10 seconds | L1 |
-| No login timeout is set, so a connect attempt that starts inside the 180-second budget can end after it | L12 |
+| No login timeout is set by the tool. The driver ends a connect attempt after 15 seconds (L12, 2026-10-26), so an attempt that starts inside the 180-second budget can end up to 15 seconds after it | L12 |
 | A token that expires on an open session | L13 |
 | Connection values with hostile characters are safe in the braced form that `session.open_session` writes (checked against the Python parser of the driver only) | No test yet |
 | A message in another language, or with a changed wording, gives no error number: class OTHER, no retry, exit 21 | X1 for the session language `us_english`; no test for a server that ignores `SET LANGUAGE` |
@@ -451,7 +451,7 @@ an operator or a developer sees. Until the owner says otherwise, the row is how 
 | `clear-run` leaves the run row `unknown`; a `resolve` step with a fixed note makes the plan pass | LOOK shows the old status | `runner.py` `clear_run`; `plan.py` `clear_run_note` |
 | After `RUN_NOT_CLOSED` the release is applied and not recorded until the next deploy. If the operator then jumps two releases, the A7 exemption can apply once | Runbook: promote the same release first | `runner.py` `_outside_unit` |
 | `BASELINE_REQUIRED` has no "the database has user objects" condition: a chain that starts with `baseline` always needs the step | An empty database with such a chain must be baselined too | `plan.py` `pending_work` |
-| A connect error that is not in the transient list is `CONNECT_FAILED` at once; a network blip at connect (08001, a login timeout) is not retried | RERUN | `session.py` `connect` |
+| A connect error that is not in the transient list is `CONNECT_FAILED` at once; a network blip at connect (a login timeout, an 08001 text other than a TCP timeout) is not retried. A TCP timeout at connect is retried inside the budget since 2026-10-26 (L12) | RERUN | `session.py` `connect`; `sqlerrors.py` `classify` |
 
 ### Table model (`table_model = true`)
 

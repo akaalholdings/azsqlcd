@@ -280,6 +280,17 @@ def test_a_transient_number_is_transient_only_at_connect(number):
     assert classify(number, None, "", at_connect=False) is ErrorClass.OTHER
 
 
+# Live 2026-10-26 (spike L12): the first connect to a paused serverless database ends after the
+# login timeout of the driver (15 s) with this text, while the database resumes.
+PAUSED_DATABASE_TIMEOUT = "[Microsoft]TCP Provider: Timeout error [258]. "
+
+
+def test_a_tcp_timeout_is_transient_at_connect_only():
+    assert classify(None, "08001", PAUSED_DATABASE_TIMEOUT, at_connect=True) is ErrorClass.TRANSIENT_CONNECT
+    assert classify(None, "08001", PAUSED_DATABASE_TIMEOUT, at_connect=False) is ErrorClass.SESSION_LOST
+    assert sql_error(PAUSED_DATABASE_TIMEOUT, sqlstate="08001", at_connect=True).number is None
+
+
 @pytest.mark.parametrize("number", sorted(GOVERNANCE_NUMBERS))
 def test_a_governance_error_is_never_transient(number):
     assert classify(number, None, "", at_connect=True) is ErrorClass.GOVERNANCE

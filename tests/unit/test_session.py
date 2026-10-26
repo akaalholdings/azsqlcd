@@ -351,6 +351,15 @@ def test_a_transient_error_that_clears_gives_the_session():
     assert clock.sleeps == [5, 10]
 
 
+def test_the_first_connect_to_a_paused_database_is_retried_until_it_has_resumed():
+    # live spike L12 (2026-10-26): the first attempt times out while the serverless database resumes
+    clock, live = Clock(), object()
+    timeout = sql_error("[Microsoft]TCP Provider: Timeout error [258]. ", sqlstate="08001", at_connect=True)
+    opener = Opener(timeout, live)
+    assert connect_with(opener, clock=clock) is live
+    assert clock.sleeps == [5]
+
+
 @pytest.mark.parametrize(
     "error",
     [

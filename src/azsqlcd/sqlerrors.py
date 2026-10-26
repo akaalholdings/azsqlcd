@@ -173,6 +173,12 @@ def parse_number(text: str) -> int | None:
 
 
 # ------------------------------------------------------------------ class
+# A connect that the gateway holds longer than the login timeout of the driver (15 s): the first
+# connect to a paused serverless database while it resumes (live spike L12, 2026-10-26). A login
+# timeout (HYT00) and the other 08001 texts stay not transient.
+_CONNECT_TIMEOUT = "TCP Provider: Timeout error"
+
+
 def classify(number: int | None, sqlstate: str | None, text: str, *, at_connect: bool) -> ErrorClass:
     """The class that selects the reaction. Without a number, a recognised engine message gives it."""
     if number is None:
@@ -183,7 +189,7 @@ def classify(number: int | None, sqlstate: str | None, text: str, *, at_connect:
         return ErrorClass.LOCK_TIMEOUT
     if number == DEADLOCK_NUMBER:
         return ErrorClass.DEADLOCK
-    if at_connect and number in TRANSIENT_CONNECT_NUMBERS:
+    if at_connect and (number in TRANSIENT_CONNECT_NUMBERS or (number is None and _CONNECT_TIMEOUT in text)):
         return ErrorClass.TRANSIENT_CONNECT
     if sqlstate is not None and (sqlstate.startswith("08") or sqlstate == "40003"):
         return ErrorClass.SESSION_LOST

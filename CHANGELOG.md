@@ -70,6 +70,10 @@ number and date. Version numbers follow semantic versioning.
 
 ### Fixed
 
+- A connect that ends with a TCP timeout (`TCP Provider: Timeout error`) is retried inside the
+  180-second connect budget. The first connect to a paused serverless database ends that way
+  while the database resumes (live spike L12). Before, it was 24 `CONNECT_FAILED` at once. A login
+  timeout and the other connect errors are not retried, as before.
 - `lint`, `THREE_PART_NAME`: the old form `DROP INDEX schema.table.index` was reported as a
   cross-database name when the statement was not the first statement of its batch: behind `IF`,
   in `BEGIN ... END`, in `ELSE`, in `BEGIN TRY`, or after another statement. It is now accepted
