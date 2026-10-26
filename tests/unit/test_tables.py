@@ -1757,9 +1757,10 @@ def test_the_snapshot_of_one_schema_replaces_the_captures_of_that_schema_only():
         "captures": {"SCHEMA:[sales]": {"a": 1}, CUSTOMER_KEY: {"c": 3}, INVOICE.key: {"d": 4}},
         "column_order": {CUSTOMER_KEY: ["CustomerId"], INVOICE.key: ["CustomerId"]},
     }
-    with pytest.raises(ToolError) as e:
-        tables.merge_snapshot({"format": 2}, new, "billing")
-    assert e.value.reason_code == "SNAPSHOT_INVALID"
+    for bad in ({"format": 2}, {"format": 1, "captures": {"not a key": {}}, "column_order": {}}):
+        with pytest.raises(ToolError) as e:
+            tables.merge_snapshot(bad, new, "billing")
+        assert e.value.reason_code == "SNAPSHOT_INVALID"
 
 
 def test_an_object_that_azsqlcd_toml_lists_as_unmanaged_is_skipped_and_stays_in_the_list():

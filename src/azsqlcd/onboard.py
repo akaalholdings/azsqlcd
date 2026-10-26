@@ -1020,7 +1020,7 @@ def baseline(
             held = sorted(
                 key
                 for key, row in recorded.objects.items()
-                if row.status == "managed" and fold(plan.schema_of(key)) == fold(schema)
+                if row.status == "managed" and fold(names.schema_of(key)) == fold(schema)
             )
             if held:
                 raise refused(

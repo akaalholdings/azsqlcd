@@ -923,10 +923,9 @@ def export_tables(
 
     def elsewhere(key: str) -> bool:
         """A need in a schema that is managed already, outside the schema of this export."""
-        _, owner, name = names.parse_object_key(key)
         return (
             schema is not None
-            and fold(owner or name) != fold(schema)
+            and fold(names.schema_of(key)) != fold(schema)
             and in_scope(config.scope, key)
             and fold(key) not in by_config
         )
@@ -998,14 +997,16 @@ def merge_snapshot(old: Mapping[str, Any], new: Mapping[str, Any], schema: str) 
             "export of one schema adds its captures to it",
         )
 
-    def other(key: str) -> bool:
-        _, owner, name = names.parse_object_key(key)
-        return fold(owner or name) != fold(schema)
-
+    try:
+        kept = {key for key in (*captures, *order) if fold(names.schema_of(key)) != fold(schema)}
+    except ValueError:
+        raise refused(
+            "SNAPSHOT_INVALID", "the snapshot of the repository holds a key that is no object key"
+        ) from None
     return {
         "format": SNAPSHOT_FORMAT,
-        "captures": {k: v for k, v in captures.items() if other(k)} | dict(new["captures"]),
-        "column_order": {k: v for k, v in order.items() if other(k)} | dict(new["column_order"]),
+        "captures": {k: v for k, v in captures.items() if k in kept} | dict(new["captures"]),
+        "column_order": {k: v for k, v in order.items() if k in kept} | dict(new["column_order"]),
     }
 
 

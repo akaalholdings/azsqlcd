@@ -93,6 +93,13 @@ def parse_object_key(key: str) -> tuple[str, str | None, str]:
     return kind, parts[0], parts[1]
 
 
+def schema_of(key: str) -> str:
+    """The schema that the object of a key is in; for the key of a schema, the schema itself.
+    Raises ValueError as parse_object_key does."""
+    _, schema, name = parse_object_key(key)
+    return name if schema is None else schema
+
+
 def file_name_problem(name: str) -> str | None:
     """Why one file or folder name cannot be in a repository that Windows must check out too.
 

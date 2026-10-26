@@ -422,19 +422,13 @@ def scoped_state(recorded: State, scope: Scope | None) -> State:
     )
 
 
-def schema_of(key: str) -> str:
-    """The schema that an object of the key is in; for a schema key, the schema itself."""
-    _, schema, name = names.parse_object_key(key)
-    return name if schema is None else schema
-
-
 def _new_schemas(keys: Collection[str], recorded: State) -> list[str]:
     """The schemas of the keys in which this database records no managed object: schemas that the
     release onboards. In the spelling of the first key, in the order of the names without case."""
-    held = {fold(schema_of(key)) for key, row in recorded.objects.items() if row.status == "managed"}
+    held = {fold(names.schema_of(key)) for key, row in recorded.objects.items() if row.status == "managed"}
     found: dict[str, str] = {}
     for key in sorted(keys):
-        found.setdefault(fold(schema_of(key)), schema_of(key))
+        found.setdefault(fold(names.schema_of(key)), names.schema_of(key))
     return [schema for folded, schema in sorted(found.items()) if folded not in held]
 
 
@@ -1462,7 +1456,7 @@ def compute_plan(
     taken = {_fold(found.schema, found.name) for found in user_objects}
     collisions = [c.key for c in work.module_changes if c.action == "create" and _fold_key(c.key) in taken]
     onboarding = _new_schemas(collisions, recorded) if collisions and scope is not None else []
-    if onboarding and len(onboarding) == len({fold(schema_of(key)) for key in collisions}):
+    if onboarding and len(onboarding) == len({fold(names.schema_of(key)) for key in collisions}):
         # every module that collides is in a schema with no managed object: the release onboards it
         raise refused(
             "BASELINE_REQUIRED",
