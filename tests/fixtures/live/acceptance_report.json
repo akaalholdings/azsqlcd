@@ -1,0 +1,419 @@
+{
+  "tool_version": "0.1.0",
+  "tool_digest": "824af30e78a9dcccc872c1a5e765c7df10933d2653649a0d0c5810b59f1818da",
+  "checks": [
+    {
+      "name": "the script of setup-sql makes the state and the users; a second run changes nothing",
+      "covers": "A2",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "a plan reads and changes nothing",
+      "covers": "plan algorithm; syntax check under SET PARSEONLY ON",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "a token with too little life stops before the connect",
+      "covers": "Token cannot be minted, or has too little life",
+      "result": "pass",
+      "expected": "24 TOKEN_TOO_SHORT",
+      "seen": "24 TOKEN_TOO_SHORT",
+      "detail": ""
+    },
+    {
+      "name": "a deploy with the expected plan applies the migration and the modules",
+      "covers": "deploy algorithm",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a module deploys by checksum and is not sent again",
+      "covers": "modules by checksum; exit 0, nothing to do",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "the plan of a release that changes nothing has a run row to write",
+      "covers": "A6",
+      "result": "pass",
+      "expected": "0 RECORD",
+      "seen": "0 RECORD",
+      "detail": ""
+    },
+    {
+      "name": "a no-op deploy records the release",
+      "covers": "A6",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a plan hash mismatch sends no DDL",
+      "covers": "Stale plan",
+      "result": "pass",
+      "expected": "22 STALE_PLAN",
+      "seen": "22 STALE_PLAN",
+      "detail": ""
+    },
+    {
+      "name": "an older release on a newer database sends nothing",
+      "covers": "A6, ahead and consistent",
+      "result": "pass",
+      "expected": "0 ALREADY_PAST",
+      "seen": "0 ALREADY_PAST",
+      "detail": ""
+    },
+    {
+      "name": "only the module whose file changed is sent",
+      "covers": "modules by checksum",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a failing batch leaves no step row and the run is failed",
+      "covers": "Run-time error in batch N, tx",
+      "result": "pass",
+      "expected": "21 BATCH_FAILED",
+      "seen": "21 BATCH_FAILED",
+      "detail": ""
+    },
+    {
+      "name": "a lock timeout on a user table is a clean stop",
+      "covers": "Lock timeout 1222 on a user object",
+      "result": "pass",
+      "expected": "24 LOCK_TIMEOUT",
+      "seen": "24 LOCK_TIMEOUT",
+      "detail": ""
+    },
+    {
+      "name": "the second runner started inside the first one",
+      "covers": "test set-up",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "a second runner exits 25 while the first holds the lock",
+      "covers": "Applock not granted",
+      "result": "pass",
+      "expected": "25 LOCK_NOT_GRANTED",
+      "seen": "25 LOCK_NOT_GRANTED",
+      "detail": ""
+    },
+    {
+      "name": "a plan sees that a run is live and stops",
+      "covers": "A4",
+      "result": "pass",
+      "expected": "25 RUN_LIVE",
+      "seen": "25 RUN_LIVE",
+      "detail": ""
+    },
+    {
+      "name": "the first runner ends as if it were alone",
+      "covers": "Applock not granted",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "the nontx marker is committed before dispatch; a session lost in the step is 'outcome unknown'",
+      "covers": "Connection lost, nontx step",
+      "result": "pass",
+      "expected": "23 CONNECTION_LOST_NONTX",
+      "seen": "23 CONNECTION_LOST_NONTX",
+      "detail": ""
+    },
+    {
+      "name": "the next deploy marks step and run unknown and refuses",
+      "covers": "Runner killed or job cancelled; nontx: exit 22 until resolve",
+      "result": "pass",
+      "expected": "22 STEP_UNRESOLVED",
+      "seen": "22 STEP_UNRESOLVED",
+      "detail": ""
+    },
+    {
+      "name": "resolve mark-not-applied refuses while the index exists",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "22 NOT_PROVEN_ABSENT",
+      "seen": "22 NOT_PROVEN_ABSENT",
+      "detail": ""
+    },
+    {
+      "name": "resolve mark-applied closes the step",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a plan refuses while an unknown run is not cleared",
+      "covers": "A5",
+      "result": "pass",
+      "expected": "22 RUN_UNKNOWN",
+      "seen": "22 RUN_UNKNOWN",
+      "detail": ""
+    },
+    {
+      "name": "resolve clear-run, after a lost nontx step",
+      "covers": "A5",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "after the resolve of the nontx step the release is recorded",
+      "covers": "A6",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "an error in a nontx step is 'outcome unknown'",
+      "covers": "Error in a nontx step, connection alive",
+      "result": "pass",
+      "expected": "23 NONTX_FAILED",
+      "seen": "23 NONTX_FAILED",
+      "detail": ""
+    },
+    {
+      "name": "resolve mark-not-applied, when the catalog proves that nothing remains",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "resolve clear-run, after a failed nontx step",
+      "covers": "A5",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "the next deploy sends the nontx migration again",
+      "covers": "Error in a nontx step, connection alive",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a session killed in the middle of the transaction is read as rolled back on a new session",
+      "covers": "Connection lost, tx segment (after spike L6)",
+      "result": "pass",
+      "expected": "24 CONNECTION_LOST_ROLLED_BACK",
+      "seen": "24 CONNECTION_LOST_ROLLED_BACK",
+      "detail": ""
+    },
+    {
+      "name": "a plan after the reconciled run has no dead run to report",
+      "covers": "A4",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the next deploy applies the release",
+      "covers": "Connection lost, tx segment (after spike L6)",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a batch that ends the transaction is seen by the guard",
+      "covers": "Guard not (1,1) and no error raised",
+      "result": "pass",
+      "expected": "23 GUARD_FAILED",
+      "seen": "23 GUARD_FAILED",
+      "detail": ""
+    },
+    {
+      "name": "a plan refuses while the run is unknown",
+      "covers": "A5",
+      "result": "pass",
+      "expected": "22 RUN_UNKNOWN",
+      "seen": "22 RUN_UNKNOWN",
+      "detail": ""
+    },
+    {
+      "name": "resolve clear-run, after a failed guard",
+      "covers": "A5",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "resolve mark-applied of a transactional migration needs a read-back or the force flag",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "22 READBACK_REQUIRED",
+      "seen": "22 READBACK_REQUIRED",
+      "detail": ""
+    },
+    {
+      "name": "resolve mark-applied with force records the migration",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "after the resolve of the guard failure the release is recorded",
+      "covers": "A6",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a data batch that changes a managed object fails the read-back",
+      "covers": "Read-back differs, or an untouched object changed",
+      "result": "pass",
+      "expected": "21 UNTOUCHED_CHANGED",
+      "seen": "21 UNTOUCHED_CHANGED",
+      "detail": ""
+    },
+    {
+      "name": "the same release passes when the batch changes no object",
+      "covers": "Read-back differs, or an untouched object changed",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "drift on a module that the release does not touch is reported (drift = \"report\")",
+      "covers": "drift",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "a create over an unmanaged name is refused",
+      "covers": "collision",
+      "result": "pass",
+      "expected": "22 NAME_COLLISION",
+      "seen": "22 NAME_COLLISION",
+      "detail": ""
+    },
+    {
+      "name": "resolve adopt-module",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "drift on a touched module blocks the plan",
+      "covers": "drift",
+      "result": "pass",
+      "expected": "22 DRIFT_TOUCHED",
+      "seen": "22 DRIFT_TOUCHED",
+      "detail": ""
+    },
+    {
+      "name": "resolve accept-drift",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "the plan names what it overwrites and drops",
+      "covers": "destructive list",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the deploy overwrites the accepted and the adopted module and drops the tombstoned one",
+      "covers": "tombstone; OVERWRITE_MODULE",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a module that does not parse is refused before any batch",
+      "covers": "Compile error in a batch (caught by PARSEONLY)",
+      "result": "pass",
+      "expected": "22 PARSEONLY_FAILED",
+      "seen": "22 PARSEONLY_FAILED",
+      "detail": ""
+    },
+    {
+      "name": "the next release with the fix deploys; the broken release is skipped",
+      "covers": "A7, a module-only release may be skipped",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a database that is bound to another environment is refused",
+      "covers": "fence",
+      "result": "pass",
+      "expected": "22 FENCE_META_MISMATCH",
+      "seen": "22 FENCE_META_MISMATCH",
+      "detail": ""
+    },
+    {
+      "name": "resolve rebind-environment",
+      "covers": "A16",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "after the rebind a deploy runs again",
+      "covers": "fence",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    }
+  ],
+  "totals": {
+    "pass": 50,
+    "fail": 0,
+    "not run": 0,
+    "not applicable": 0
+  },
+  "not_provoked": [
+    "Refresh of a managed dependant fails; blocker on a changed column: need the table model (table_model = true), which this script does not use. Spike item X3 proves the read behind them.",
+    "Governance error 40552, 9002, 40549, 40550, 40551, 40544: cannot be made safely. Not tested.",
+    "Transient error at connect, serverless resume: spike item L12.",
+    "Token expires on an open session: spike item L13.",
+    "Loss of the network after COMMIT reached the server: not automated; docs/live-testing.md, section 7."
+  ]
+}

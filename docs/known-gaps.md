@@ -15,8 +15,9 @@ repeated on the final commit, so the tree as it stands now did not run against a
 whole. The unit tests use fakes at the session boundary. Do not use the tool on a
 production database before the open tests of section 2 pass.
 
-Partitioned tables and indexes (2026-10-13) are in the table model. That work ran on no
-database: unit tests with fakes only. Section 14 lists what it does not do and what is not
+Partitioned tables and indexes (2026-10-13) are in the table model. The first pass of
+`scripts/live_tables.py` (17 checks) passed on one Azure SQL Database on 2026-10-26
+(`docs/live-testing.md`, section 12). Section 14 lists what it does not do and what is not
 proven.
 
 Scope decision of the owner (2026-10-07): structural changes only. Data batches are switched off
@@ -270,7 +271,7 @@ scenario reads a table through these modules. A column that does not exist fails
 | Driver value types of the table queries: bit, tinyint, `decimal(38,0)`, `char(2)` padding, the `sql_variant` seed and increment of `sys.identity_columns` | No test yet |
 | Catalog values: vector length `(max_length - 8) / 4`; `fill_factor` 0 or 100 for FILLFACTOR = 100; `data_compression` per partition; `sys.sequences.cache_size` NULL for NO CACHE and for the default size; the spelling of `sys.synonyms.base_object_name`; the rows of the backing object of a table type | No test yet |
 | A persisted computed column that is declared NOT NULL when the engine already derives it gives the same catalog row | No test yet |
-| Partitioned tables: `sys.partition_schemes` joined through `sys.indexes.data_space_id`; `sys.index_columns.partition_ordinal`; `sys.stats.is_incremental`; the count of different compressions of the partitions of one index, read with a derived table inside the index query. Section 14 has each assumption | `live_tables.py`, first pass (P2, P4): not run |
+| Partitioned tables: `sys.partition_schemes` joined through `sys.indexes.data_space_id`; `sys.index_columns.partition_ordinal`; `sys.stats.is_incremental`; the count of different compressions of the partitions of one index, read with a derived table inside the index query. Section 14 has each assumption | `live_tables.py`, first pass (P2, P4): passed 2026-10-26 |
 | `sys.sql_expression_dependencies`: `is_schema_bound_reference` and `referenced_minor_id` per column; `sys.database_principals` shows schema owners to the plan identity (a hidden owner quarantines the schema) | L14 for the grants; else no test yet |
 | Which sub-objects the engine refuses on DROP COLUMN, ALTER COLUMN and `sp_rename` (the blocker scan counts hypothetical indexes; a foreign key blocks a table rename by the design rule) | No test yet |
 | How the engine writes DEFAULT, CHECK, computed and filter text, which the table captures hold | L8 |
@@ -1146,7 +1147,7 @@ fixture pairs for its state.
 | N1-F4, N5-06 | minor | One plan reads the whole recorded state four to five times; a first converge asks `has_index` once for each view | None needed; cost only |
 | N2-F1 | major | A release that failed on a module cannot be fixed by a later pull request that only changes the module: `CATCHUP_REQUIRED` sends the operator back to the release that fails. Owner decision on A7 needed. Since wave 3 the `DEPENDANT_BROKEN` message says what to do. The `CATCHUP_REQUIRED` message now gives both cases, and a scenario test walks the way out on the fake engine (section 13) | Withdraw the migration and add its statements again as a replacement (`allow REPLACEMENT_EDGE`), with the module change in the same pull request |
 | N2-F5 | minor | A migration withdrawn with no replacement: `drift` does not report the database that ran it | Compare that database with the table files by hand |
-| N3-F2 | major | No rule and no guidance for the owner of a schema that a migration creates: `CREATE SCHEMA` by the deploy principal makes that principal the owner. Owner decision needed (ownership chains, a later change of identity); spike L14 does not cover both `CREATE SCHEMA` forms | Write `CREATE SCHEMA [x] AUTHORIZATION [dbo]` by hand if the deploy principal may do that, or let an administrator create the schema |
+| N3-F2 | major | No rule and no guidance for the owner of a schema that a migration creates: `CREATE SCHEMA` by the deploy principal makes that principal the owner. Owner decision needed (ownership chains, a later change of identity). Live 2026-10-26 (L14): a `db_ddladmin` member with the grants of `setup-sql` may run `CREATE SCHEMA`; the engine refuses it `CREATE SCHEMA ... AUTHORIZATION [dbo]` (the text names Entra group membership and a missing database user). The test principal is a user made from a SID, so a real managed identity can differ | Let an administrator create the schema with `AUTHORIZATION [dbo]`, or accept the deploy principal as the owner |
 | N3-F3 | minor | The first `gen` in a repository with no `origin/main` fails with a raw git message | `git fetch origin main`, or give `--base` |
 | N3-F5 | minor | `PRF002` tells the author to hand-write a migration for a column that is not last; no migration can pass (`ORD001`) | Put the new column last |
 | N3-F6 | minor | No generated path for an online index build | Hand-write the non-transactional migration |
@@ -1653,11 +1654,11 @@ Two reviewers reproduced eight findings. Each has a regression test.
 ## 14. Partitioned tables and indexes (2026-10-13)
 
 This work put partitioned tables and indexes into the table model. Source: the reports of the
-three engineers, checked against the code. Nothing of this section ran against a database: no
-connection was allowed. Every rule of the engine below comes from the product documentation. The
-unit tests use a fake engine that holds the names of partition schemes and nothing more. Do not
-use the tool on a partitioned table of a production database before the first pass of
-`scripts/live_tables.py` passes (`docs/live-testing.md`, section 5a).
+three engineers, checked against the code. The first pass of `scripts/live_tables.py` (17
+checks, P1 to P5) passed on one Azure SQL Database (General Purpose, serverless) on 2026-10-26
+(`docs/live-testing.md`, section 12). A rule of the engine that the pass does not reach comes from
+the product documentation. The unit tests use a fake engine that holds the names of partition
+schemes and nothing more.
 
 ### What this work closes
 

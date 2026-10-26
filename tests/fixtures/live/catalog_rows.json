@@ -207,7 +207,7 @@
           "azsqlcd_spike",
           "x3_t",
           null,
-          1718297181,
+          1696725097,
           false,
           true,
           false
@@ -216,7 +216,7 @@
           "azsqlcd_spike",
           "x3_t",
           "a",
-          1718297181,
+          1696725097,
           false,
           true,
           false
@@ -229,7 +229,7 @@
           "azsqlcd_spike",
           "x3_t",
           null,
-          1718297181,
+          1696725097,
           false,
           true,
           false
@@ -238,7 +238,7 @@
           "azsqlcd_spike",
           "x3_t",
           "a",
-          1718297181,
+          1696725097,
           false,
           true,
           false
@@ -258,6 +258,128 @@
       "sqlstate": null,
       "text": "[Microsoft][SQL Server]Invalid column name 'b'.",
       "redacted": "[Microsoft][SQL Server]Invalid column name <redacted>."
+    },
+    "procedure with a #temp table joined to the table": [
+      [
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          null,
+          1696725097,
+          false,
+          false,
+          false
+        ]
+      ]
+    ],
+    "procedure with a #temp table that uses the column": [
+      [
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          null,
+          1696725097,
+          false,
+          false,
+          false
+        ]
+      ]
+    ],
+    "procedure with UPDATE alias FROM #temp AS alias": [
+      [
+        [
+          "azsqlcd_spike",
+          "x3_t",
+          null,
+          1696725097,
+          false,
+          false,
+          false
+        ],
+        [
+          null,
+          "x",
+          null,
+          null,
+          false,
+          false,
+          false
+        ]
+      ]
+    ]
+  },
+  "temporal_table": {
+    "tables_while_versioned": [
+      [
+        "x9_t",
+        2,
+        "SYSTEM_VERSIONED_TEMPORAL_TABLE",
+        "x9_t_history"
+      ],
+      [
+        "x9_t_history",
+        1,
+        "HISTORY_TABLE",
+        null
+      ]
+    ],
+    "period": [
+      [
+        "SYSTEM_TIME",
+        1,
+        "valid_from",
+        "valid_to"
+      ]
+    ],
+    "generated_columns": [
+      [
+        "valid_from",
+        1,
+        "AS_ROW_START",
+        true
+      ],
+      [
+        "valid_to",
+        2,
+        "AS_ROW_END",
+        true
+      ]
+    ],
+    "tables_after_versioning_off": [
+      [
+        "x9_t",
+        0,
+        "NON_TEMPORAL_TABLE",
+        null
+      ],
+      [
+        "x9_t_history",
+        0,
+        "NON_TEMPORAL_TABLE",
+        null
+      ]
+    ]
+  },
+  "masked_columns": [
+    {
+      "input": "default()",
+      "engine": "default()"
+    },
+    {
+      "input": "email()",
+      "engine": "email()"
+    },
+    {
+      "input": "random(1, 5)",
+      "engine": "random(1, 5)"
+    },
+    {
+      "input": "partial(1, \"xx\", 0)",
+      "engine": "partial(1, \"xx\", 0)"
+    },
+    {
+      "input": "datetime(\"Y\")",
+      "engine": "datetime(\"Y\")"
     }
-  }
+  ]
 }

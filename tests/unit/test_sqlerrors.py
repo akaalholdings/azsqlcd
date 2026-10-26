@@ -154,7 +154,7 @@ LOST_WHILE_WAITING = "session killed while the client waits for a batch"
 
 
 def test_the_live_fixture_holds_a_text_for_every_number_of_the_spike():
-    assert len(LIVE_ERRORS) == 32
+    assert len(LIVE_ERRORS) == 33  # 2026-10-26: X9, the drop of a system-versioned table
     assert {case["expected_number"] for case in LIVE_ERRORS.values()} - {None} == LIVE_NUMBERS
     assert all(case["text"].startswith("[Microsoft]") for case in LIVE_ERRORS.values())
 
@@ -216,7 +216,7 @@ def test_the_live_fixture_holds_texts_that_keep_their_names_and_texts_that_lose_
     assert len(kept) == 2 and all(c["redacted"] == c["text"] for c in kept)
     of_the_statement = [c for c in live if c["text"].removeprefix(ODBC).startswith(NAMES_OF_THE_STATEMENT)]
     assert len(of_the_statement) == 11 and all(R in c["redacted"] for c in of_the_statement)
-    assert sum(R in c["redacted"] for c in live) == 23
+    assert sum(R in c["redacted"] for c in live) == 24
 
 
 def test_the_raw_driver_text_with_its_label_gives_the_same_number():

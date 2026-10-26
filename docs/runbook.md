@@ -519,8 +519,8 @@ A table, a `PRIMARY KEY` or `UNIQUE` constraint and an index can be on a partiti
 the column. It does not hold the partition function, the scheme, the boundaries or the number of
 partitions: a DBA owns them. `SPLIT`, `MERGE`, `SWITCH` and `TRUNCATE ... WITH (PARTITIONS ...)`
 are operations of the DBA, outside the tool. `docs/setup.md`, section 7, "Partitioned tables", has
-the form of the table file. Nothing of this section ran on a database
-(`docs/known-gaps.md`, section 14).
+the form of the table file. The live checks of `scripts/live_tables.py`, first pass, passed on
+2026-10-26 (`docs/known-gaps.md`, section 14).
 
 `gen` writes: `CREATE TABLE` of a partitioned table; each key and index with the `ON` clause of
 its file; the add and the drop of a column, a constraint and an index; `ALTER COLUMN` of a column

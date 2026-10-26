@@ -87,10 +87,12 @@ All commands run in the root of the tool repository.
        --items L8 --out /tmp/azsqlcd-d2 --compare-normal-forms tests/fixtures/live/normal_forms.json
    ```
 
-4. L12 on the serverless database. Pause it first, then start the script at once.
+4. L12 on the serverless database. The Azure CLI has no pause command for a serverless
+   database: it pauses by itself when no session is open for the auto-pause delay. A database of
+   the free offer reports a fixed delay of 60 minutes; on 2026-10-26 it paused within 16 minutes.
+   Open no session on it, check that the status is `Paused`, then start the script at once.
 
    ```
-   az sql db pause --resource-group RG --server NAME --name D2
    az sql db show --resource-group RG --server NAME --name D2 --query status
    uv run --extra db python scripts/live_spike.py --server S --database D2 --confirm-disposable-database D2 \
        --items L12 --expect-paused
@@ -156,7 +158,7 @@ the waits and the number of connections in the scripts.
 | L12 | Up to 3 minutes of connect, plus the pause |
 | Driver contract | 2 minutes |
 | Acceptance | 59 to 75 seconds, measured. About 100 connections |
-| Table model (`live_tables.py`) | 37 seconds, measured, for the pass without partitions. The pass for partitioned tables was not run: no time yet |
+| Table model (`live_tables.py`) | 37 seconds, measured on 2026-10-07, for the pass without partitions. Both passes ran on 2026-10-26 (section 12); not timed |
 | L13 | The life of the token (60 to 90 minutes) plus 90 minutes |
 | GitHub checklist (section 8) | The blueprint estimates 8 owner hours, plus 4 to 8 hours of one-time Azure and GitHub setup |
 
@@ -409,6 +411,8 @@ Write the result of each item into `docs/known-gaps.md` (section 2, table "GitHu
 | `LIVE_BOUND_ENVIRONMENT` after an acceptance run that was stopped | The last scenario was interrupted | `UPDATE azsqlcd.meta SET environment = 'disposable';` |
 | Acceptance: the first check after a kill fails with another reason code | `session.py` did not classify the lost session as `SESSION_LOST` | Keep the report. The exit code is still 23 or 24. Compare with `first_execute.error` of spike item L5 |
 | L17 `inconclusive` | The index build ended before it was seen | Use more rows: `--items L17 --rows 2000000` |
+| Exit 24 with `OpenSSL library could not be loaded` (macOS) | Homebrew links `openssl` to OpenSSL 4. The driver loads OpenSSL 1.0, 1.1 or 3 only | Start each command with `DYLD_LIBRARY_PATH=/opt/homebrew/opt/openssl@3/lib`. Install `openssl@3` first if it is not there |
+| A run fails with 23 `CONNECTION_LOST_TX` or 24, then `Client with IP address ... is not allowed` | The machine sends SQL traffic from more than one public address (a VPN, a second network). The address that a web page shows is not always the one that the server sees | Read the address from the refusal of a connect with the plain driver, add a firewall rule for each address, and run the script again |
 
 ## 10. First live results (2026-10-07)
 
@@ -671,3 +675,56 @@ of this list as run, that section wins.
   were not written to.
 - The GitHub checklist (section 8). After these runs the workflows ran on GitHub Actions up to
   the Azure login step (`docs/known-gaps.md`, section 12); every step after the login is open.
+
+## 12. Second live run (2026-10-26)
+
+Code: the branch of partitioned tables (0.1.0, the three sign-in modes, partitioned tables).
+Place: one logical server in North Europe with two databases, General Purpose, serverless,
+2 vCores, free offer. Machine: macOS, Python 3.12, mssql-python 1.15.0. Both databases and the
+server were deleted the same day. Where this section names an item of the list "Still not
+proven" (section 11) as run, this section wins.
+
+| Run | Sign-in | Result |
+|---|---|---|
+| `live_tables.py`, both passes | Entra (Azure CLI) | 35 pass, 0 fail. The first pass (partitioned tables, P1 to P5) is 17 of them |
+| `live_acceptance.py` | Entra (Azure CLI) | 50 pass, 0 fail |
+| `live_acceptance.py` | SQL login (`AZSQLCD_AUTH=sql`) | 49 pass, 0 fail, 1 not applicable (the check of the token life). The password is in no line of the output |
+| `tests/live` | Entra (Azure CLI) | 19 passed |
+| `live_spike.py`, every automatic item | Entra (Azure CLI) | Every item passes. L8 is `inconclusive` on one database, as designed. The five driver gates pass: keep mssql-python |
+| L8 on the second database | Entra (Azure CLI) | Pass: the normal forms of the two databases have 0 differences. Both databases are on one server |
+| L14, the deploy principal | Entra (Azure CLI) | 8 of 9 statements and every read pass. The engine refuses `CREATE SCHEMA ... AUTHORIZATION [dbo]` (`docs/known-gaps.md`, N3-F2) |
+| L14, the plan principal | Entra (Azure CLI) | Every statement is refused and every read passes, as designed |
+| L12 | Entra (Azure CLI) | Before the fix: one attempt ended after 15 s with `TCP Provider: Timeout error [258]` (SQLSTATE 08001), class `SESSION_LOST`, not retried: fail. With the fix (`TCP Provider: Timeout error` is transient at connect): two attempts end after 15 s each, the third connects in 5.6 s; about 51 s with the waits of 5 and 10 s: pass |
+| L13 | Entra (Azure CLI) | Partial. The token had 45 minutes left at the start. A short statement every 5 minutes passed from 45 minutes before the expiry to 15 minutes after it, and one long statement across the expiry passed: the session outlives the expiry of its token. Then the machine slept, and the run was stopped. The 90 minutes after the expiry are not proven |
+
+What the run found:
+
+- Two defects of the live scripts, fixed with a unit test: the cleanup stopped on a statistics
+  tree (object type `ST`), and the `SPLIT` check split a partition that held rows.
+- In one run the machine started to send SQL traffic from a second public address. The deploy of
+  `live_tables.py` lost its session inside the transaction and could not open a new one. The tool
+  ended with 23 `CONNECTION_LOST_TX` and the message "the outcome could not be read on a new
+  session". After a firewall rule for the second address, the next run from the start passed.
+  This is not the case of section 7: the session was lost before `COMMIT`.
+
+Engine facts:
+
+- With a columnstore index on a table of the scheme, `ALTER PARTITION FUNCTION ... SPLIT` works
+  on an empty partition only.
+- `STATISTICS_INCREMENTAL = ON` makes a row in `sys.objects` of type `ST`, with no
+  `type_desc`, parent 0, in the schema of the table (name `_ST_<object id>_<stats id>_...`). The
+  object list of the tool gives it no kind, so plan and drift never list it as unmanaged.
+- `CREATE TABLE` on a partition scheme that does not exist: "Invalid partition scheme ...
+  specified." The driver gives no error number with it, as for the texts of X1.
+- An index on a partitioned table that does not hold the partitioning column gets it from the
+  engine: `sys.index_columns` has a row with `key_ordinal` 0 and `partition_ordinal` 1. The
+  reader reads the index as its file says (P4).
+- The free offer allows only the default auto-pause delay (60 minutes, as `az sql db show`
+  reports it), and the Azure CLI has no pause command for a serverless database. Still, the
+  database paused within 16 minutes of its last session, twice (section 3, step 4).
+- The driver ends a connect attempt after 15 seconds. A paused database needs about 35 to 50
+  seconds before a connect passes.
+
+Still not proven after this run: L13 for the full 90 minutes after the expiry; gate G-D5 on Windows with Python 3.14 and on the runner image;
+sign-in with a managed identity (it needs a machine in Azure); L8 across two servers; the loss of
+the network during `COMMIT` (section 7); the GitHub checklist (section 8).

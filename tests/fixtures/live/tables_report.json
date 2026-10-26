@@ -1,0 +1,290 @@
+{
+  "tool_version": "0.1.0",
+  "checks": [
+    {
+      "name": "verify has no error for the migration of the partitioned tables (r2)",
+      "covers": "gen, proof",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "a plan for a table on a partition scheme that the database does not have is refused",
+      "covers": "PARTITION_SCHEME_MISSING",
+      "result": "pass",
+      "expected": "22 PARTITION_SCHEME_MISSING",
+      "seen": "22 PARTITION_SCHEME_MISSING",
+      "detail": ""
+    },
+    {
+      "name": "the deploy refuses for the same reason before any statement runs",
+      "covers": "PARTITION_SCHEME_MISSING",
+      "result": "pass",
+      "expected": "22 PARTITION_SCHEME_MISSING",
+      "seen": "22 PARTITION_SCHEME_MISSING",
+      "detail": ""
+    },
+    {
+      "name": "the plan passes when the scheme exists",
+      "covers": "partition scheme check",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the deploy creates the partitioned tables and the read-back agrees with the catalog",
+      "covers": "partitioned heap, clustered table, clustered columnstore table; read-back of the places",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "the reader round trip: each partitioned table is read and emitted as its file",
+      "covers": "catalog reader of partitioned tables; canonical form",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "a plan after the deploy finds nothing to do and no drift",
+      "covers": "drift of partitioned tables",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "gen writes the rebuild of a partitioned heap for all partitions (r3)",
+      "covers": "gen, proof; ALTER TABLE ... REBUILD PARTITION = ALL",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "the plan of the compression change",
+      "covers": "plan with table hooks",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the deploy compresses every partition of the heap and of the index; the read-back agrees",
+      "covers": "compression of a partitioned table: one compression for all partitions",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "verify has no error for the indexes without the partitioning column (r4)",
+      "covers": "gen, proof",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "an index that does not hold the partitioning column reads back as its file says",
+      "covers": "sys.index_columns.partition_ordinal: the column that the engine adds is no column of the index",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "the reader round trip with indexes that the engine added the partitioning column to",
+      "covers": "catalog reader of partitioned tables; canonical form",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "an aligned index that is created again on [PRIMARY] by hand is drift",
+      "covers": "drift of the place of an index",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "the same index created with no ON clause is on the scheme of the table: no drift",
+      "covers": "an index without a place on a partitioned table is aligned by the engine",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "a SPLIT of the partition function is no drift: boundaries are not design",
+      "covers": "captures hold the scheme and the column, not the partitions",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "the engine refuses CREATE TABLE on a partition scheme that does not exist",
+      "covers": "the error of the fake engine (1921, Invalid partition scheme)",
+      "result": "pass",
+      "expected": "an engine error that names the partition scheme",
+      "seen": "number None: [OTHER] [Microsoft][SQL Server]Invalid partition scheme <redacted> specified.",
+      "detail": ""
+    },
+    {
+      "name": "verify has no error for the generated migration (r2)",
+      "covers": "gen, proof",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "a plan with the table model reads and changes nothing",
+      "covers": "plan algorithm with table hooks",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the deploy creates the tables in one transaction and the read-back agrees with the catalog",
+      "covers": "deploy algorithm with table hooks; read-back of table-class objects",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a second deploy of the release sends nothing",
+      "covers": "exit 0, nothing to do",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "verify has no error for the generated migration (r3)",
+      "covers": "gen, proof",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "the plan of the structural change",
+      "covers": "plan algorithm with table hooks",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the deploy adds the columns and the indexes; the read-back agrees with the catalog",
+      "covers": "deploy algorithm with table hooks",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a plan after the deploy finds nothing to do and no drift",
+      "covers": "drift of table-class objects",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "a column that was added by hand is reported as drift (drift = \"report\")",
+      "covers": "drift of table-class objects",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "drift on a table that the release changes blocks the plan",
+      "covers": "drift",
+      "result": "pass",
+      "expected": "22 DRIFT_TOUCHED",
+      "seen": "22 DRIFT_TOUCHED",
+      "detail": ""
+    },
+    {
+      "name": "the deploy refuses for the same reason and sends nothing",
+      "covers": "drift",
+      "result": "pass",
+      "expected": "22 DRIFT_TOUCHED",
+      "seen": "22 DRIFT_TOUCHED",
+      "detail": ""
+    },
+    {
+      "name": "resolve mark-applied reads the catalog back against the model and records the migration",
+      "covers": "A16, read-back of a hand-applied migration",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "after the resolve the release is recorded and no drift stays",
+      "covers": "A6",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a plan after the resolve finds no drift",
+      "covers": "drift of table-class objects",
+      "result": "pass",
+      "expected": "0 NOOP",
+      "seen": "0 NOOP",
+      "detail": ""
+    },
+    {
+      "name": "verify has no error for the generated migration (r5)",
+      "covers": "gen, proof",
+      "result": "pass",
+      "expected": "all facts true",
+      "seen": "facts",
+      "detail": ""
+    },
+    {
+      "name": "the plan of a column drop names the drop as destructive",
+      "covers": "destructive list; plan step 8",
+      "result": "pass",
+      "expected": "0 WORK",
+      "seen": "0 WORK",
+      "detail": ""
+    },
+    {
+      "name": "the deploy drops the column and deploys the changed view in one transaction",
+      "covers": "A12; modules after migrations in one unit of work",
+      "result": "pass",
+      "expected": "0 OK",
+      "seen": "0 OK",
+      "detail": ""
+    },
+    {
+      "name": "a column drop that breaks a managed procedure is stopped, and the unit of work is rolled back",
+      "covers": "A12, dependant of an altered table",
+      "result": "pass",
+      "expected": "21 DEPENDANT_BROKEN",
+      "seen": "21 DEPENDANT_BROKEN",
+      "detail": ""
+    }
+  ],
+  "totals": {
+    "pass": 35,
+    "fail": 0,
+    "not run": 0
+  }
+}

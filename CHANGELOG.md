@@ -35,7 +35,8 @@ number and date. Version numbers follow semantic versioning.
   `gen` writes it for a compression change of a partitioned heap. It needs `allow LONG_LOCK` in
   a transactional migration, as `REBUILD WITH (...)` does.
 - `scripts/live_tables.py` has a first pass for partitioned tables (17 checks). It makes and
-  drops its own partition function and scheme. Not run yet.
+  drops its own partition function and scheme. It passed on Azure SQL Database on 2026-10-26
+  (`docs/live-testing.md`, section 12).
 
 - Sign-in with a managed identity: with `AZSQLCD_AUTH=managed-identity` a database command asks
   the managed identity of the machine for the token and needs no Azure CLI.
@@ -74,6 +75,11 @@ number and date. Version numbers follow semantic versioning.
   180-second connect budget. The first connect to a paused serverless database ends that way
   while the database resumes (live spike L12). Before, it was 24 `CONNECT_FAILED` at once. A login
   timeout and the other connect errors are not retried, as before.
+- `scripts/live_spike.py`: the cleanup stopped on a statistics tree (object type `ST`) that the
+  engine makes for incremental statistics. The tree goes with its table; the cleanup leaves it.
+- `scripts/live_tables.py`: the `SPLIT` check split a partition that held rows. With a columnstore
+  index on the scheme the engine splits an empty partition only. The function has one boundary
+  more, and the check splits the empty last partition.
 - `lint`, `THREE_PART_NAME`: the old form `DROP INDEX schema.table.index` was reported as a
   cross-database name when the statement was not the first statement of its batch: behind `IF`,
   in `BEGIN ... END`, in `ELSE`, in `BEGIN TRY`, or after another statement. It is now accepted

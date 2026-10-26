@@ -1,0 +1,146 @@
+{
+  "default": [
+    {
+      "input": "int: 0",
+      "engine": "((0))"
+    },
+    {
+      "input": "int: (0)",
+      "engine": "((0))"
+    },
+    {
+      "input": "int: -1",
+      "engine": "((-1))"
+    },
+    {
+      "input": "int: 1+2",
+      "engine": "((1)+(2))"
+    },
+    {
+      "input": "int: NULL",
+      "engine": "(NULL)"
+    },
+    {
+      "input": "nvarchar(10): N'x'",
+      "engine": "(N'x')"
+    },
+    {
+      "input": "varchar(10): 'x'",
+      "engine": "('x')"
+    },
+    {
+      "input": "datetime2(3): getdate()",
+      "engine": "(getdate())"
+    },
+    {
+      "input": "datetime2(3): SYSUTCDATETIME()",
+      "engine": "(sysutcdatetime())"
+    },
+    {
+      "input": "uniqueidentifier: newid()",
+      "engine": "(newid())"
+    },
+    {
+      "input": "bit: CAST(0 AS bit)",
+      "engine": "(CONVERT([bit],(0)))"
+    },
+    {
+      "input": "date: CONVERT(date, '20200101')",
+      "engine": "(CONVERT([date],'20200101'))"
+    },
+    {
+      "input": "decimal(9, 2): 1.50",
+      "engine": "((1.50))"
+    },
+    {
+      "input": "varbinary(4): 0x00",
+      "engine": "(0x00)"
+    }
+  ],
+  "check": [
+    {
+      "input": "[c] > 0",
+      "engine": "([c]>(0))"
+    },
+    {
+      "input": "c>0 and c<10",
+      "engine": "([c]>(0) AND [c]<(10))"
+    },
+    {
+      "input": "[c] IN (1, 2, 3)",
+      "engine": "([c]=(3) OR [c]=(2) OR [c]=(1))"
+    },
+    {
+      "input": "[c] BETWEEN 1 AND 5",
+      "engine": "([c]>=(1) AND [c]<=(5))"
+    },
+    {
+      "input": "[s] LIKE 'a%'",
+      "engine": "([s] like 'a%')"
+    },
+    {
+      "input": "LEN([s]) > 0",
+      "engine": "(len([s])>(0))"
+    },
+    {
+      "input": "[c] IS NOT NULL OR [s] <> N''",
+      "engine": "([c] IS NOT NULL OR [s]<>N'')"
+    },
+    {
+      "input": "NOT ([c] = 1)",
+      "engine": "(NOT [c]=(1))"
+    }
+  ],
+  "computed": [
+    {
+      "input": "[a] + [b]",
+      "engine": "([a]+[b])"
+    },
+    {
+      "input": "isnull(a, 0) * 2",
+      "engine": "(isnull([a],(0))*(2))"
+    },
+    {
+      "input": "CONVERT(varchar(10), [a])",
+      "engine": "(CONVERT([varchar](10),[a]))"
+    },
+    {
+      "input": "CAST([a] AS bigint)",
+      "engine": "(CONVERT([bigint],[a]))"
+    },
+    {
+      "input": "UPPER([s])",
+      "engine": "(upper([s]))"
+    },
+    {
+      "input": "CASE WHEN [a] > 0 THEN 1 ELSE 0 END",
+      "engine": "(case when [a]>(0) then (1) else (0) end)"
+    },
+    {
+      "input": "[a] % 2",
+      "engine": "([a]%(2))"
+    }
+  ],
+  "filter": [
+    {
+      "input": "[c] IS NOT NULL",
+      "engine": "([c] IS NOT NULL)"
+    },
+    {
+      "input": "[c] > 0 AND [c] < 100",
+      "engine": "([c]>(0) AND [c]<(100))"
+    },
+    {
+      "input": "[s] = 'A'",
+      "engine": "([s]='A')"
+    },
+    {
+      "input": "[c] IN (1, 2)",
+      "engine": "([c] IN ((1), (2)))"
+    },
+    {
+      "input": "[d] >= '20200101'",
+      "engine": "([d]>='20200101')"
+    }
+  ]
+}

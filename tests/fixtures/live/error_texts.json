@@ -132,7 +132,7 @@
     "class": "DEADLOCK",
     "number": 1205,
     "sqlstate": null,
-    "text": "[Microsoft][SQL Server]Transaction (Process ID 100) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.",
+    "text": "[Microsoft][SQL Server]Transaction (Process ID 96) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.",
     "redacted": "[Microsoft][SQL Server]Transaction <redacted> was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction."
   },
   "18456 connect to a database that does not exist": {
@@ -198,5 +198,13 @@
     "sqlstate": null,
     "text": "[Microsoft]Unspecified error occurred on SQL Server. Connection may have been terminated by the server.",
     "redacted": "[Microsoft]Unspecified error occurred on SQL Server. Connection may have been terminated by the server."
+  },
+  "X9 DROP TABLE of a table with SYSTEM_VERSIONING = ON": {
+    "expected_number": null,
+    "class": "OTHER",
+    "number": null,
+    "sqlstate": null,
+    "text": "[Microsoft][SQL Server]Drop table operation failed on table 'DATABASE_NAME.azsqlcd_spike.x9_t' because it is not a supported operation on system-versioned temporal tables.",
+    "redacted": "[Microsoft][SQL Server]Drop table operation failed on table <redacted> because it is not a supported operation on system-versioned temporal tables."
   }
 }
