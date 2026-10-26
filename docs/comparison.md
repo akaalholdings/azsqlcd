@@ -1,6 +1,6 @@
 # azsqlcd: design choices, next to other families of tools
 
-Read this first: **azsqlcd is not production-ready.** Version 0.1.0 was built on 2026-10-07. Its
+Read this first: **azsqlcd is not production-ready.** Version 0.2.0 was released on 2026-10-26. Its
 live scripts and its command line ran on disposable Azure SQL Databases, and its workflows ran on
 GitHub Actions up to the Azure login step. `README.md`, section "Status", says what ran and what
 did not. Where this document and `README.md` differ, `README.md` wins.

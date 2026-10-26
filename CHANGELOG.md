@@ -6,6 +6,8 @@ number and date. Version numbers follow semantic versioning.
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-26
+
 ### Added
 
 - Partitioned tables and indexes in the table model (`table_model = true`). A table, a

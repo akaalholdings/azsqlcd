@@ -45,7 +45,7 @@ jobs:
   # `contents: write` is only the upper limit that release.yml declares for a push.
   release:
     if: ${{ github.ref == 'refs/heads/main' }}
-    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.1.0
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.2.0
     permissions:
       contents: write
     with:
@@ -53,7 +53,7 @@ jobs:
 
   resolve:
     needs: release
-    uses: akaalholdings/azsqlcd/.github/workflows/resolve.yml@v0.1.0
+    uses: akaalholdings/azsqlcd/.github/workflows/resolve.yml@v0.2.0
     permissions:
       contents: read
       id-token: write

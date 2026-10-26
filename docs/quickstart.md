@@ -30,7 +30,7 @@ azsqlcd --version
 ```
 
 ```
-azsqlcd 0.1.0
+azsqlcd 0.2.0
 ```
 
 The offline commands use the Python standard library only. `uv sync --frozen` also installs the

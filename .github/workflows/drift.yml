@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: build
-        uses: akaalholdings/azsqlcd@v0.1.0
+        uses: akaalholdings/azsqlcd@v0.2.0
         with:
           args: |
             build
@@ -46,7 +46,7 @@ jobs:
             --ci
             github
       - id: targets
-        uses: akaalholdings/azsqlcd@v0.1.0
+        uses: akaalholdings/azsqlcd@v0.2.0
         with:
           args: |
             targets
@@ -96,7 +96,7 @@ jobs:
           client-id: ${{ matrix.target.plan_client_id }}
           tenant-id: ${{ matrix.target.tenant_id }}
           allow-no-subscriptions: true
-      - uses: akaalholdings/azsqlcd@v0.1.0
+      - uses: akaalholdings/azsqlcd@v0.2.0
         with:
           db: true
           args: |

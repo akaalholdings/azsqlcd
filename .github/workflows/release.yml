@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: build
-        uses: akaalholdings/azsqlcd@v0.1.0
+        uses: akaalholdings/azsqlcd@v0.2.0
         with:
           args: |
             build
@@ -115,7 +115,7 @@ jobs:
         shell: bash
         run: echo "sha=$(git rev-parse --verify 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: akaalholdings/azsqlcd@v0.1.0
+        uses: akaalholdings/azsqlcd@v0.2.0
         with:
           args: |
             build
