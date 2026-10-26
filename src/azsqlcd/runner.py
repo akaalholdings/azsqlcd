@@ -37,7 +37,7 @@ from typing import Any, Protocol
 
 from azsqlcd import catalog, chain, lex, lint, modules, names, plan, release, state
 from azsqlcd.catalog import Difference
-from azsqlcd.config import Config, resolve_target
+from azsqlcd.config import Config, out_of_scope, resolve_target
 from azsqlcd.errors import Exit, ToolError, failed, locked, refused, retry_safe, unknown
 from azsqlcd.model import fold
 from azsqlcd.modules import ModuleFile
@@ -2047,6 +2047,14 @@ def adopt_module(
         if kind not in names.MODULE_KINDS:
             raise _not_applicable(
                 "--adopt-module needs a module key, for example PROCEDURE:[sales].[usp_x]", object=object_key
+            )
+        outside = out_of_scope(config.scope, object_key)
+        if outside is not None:
+            raise refused(
+                "OUT_OF_SCOPE",
+                f"{object_key} is outside [scope] of azsqlcd.toml: {outside}. The tool does not manage it, "
+                "so it is not adopted. Change [scope] by pull request first",
+                object=object_key,
             )
         if fold(object_key) in _stored_keys(_managed(recorded)):
             raise _not_applicable(f"{object_key} is managed already", object=object_key)

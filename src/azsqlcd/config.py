@@ -421,9 +421,25 @@ def load_config(text: str) -> Config:
     )
 
 
+def _name_problem(text: str) -> str | None:
+    """Why a schema name, or a part of a pattern, would not be read as the engine reads the name."""
+    if not text:
+        return "has an empty name part: a pattern is schema.name, both parts written"
+    if not text.isprintable():
+        return "holds a control character"
+    if text != text.strip():
+        # the engine compares names with the trailing spaces taken away: no catalog name has them
+        return "starts or ends with a space"
+    if "[" in text or "]" in text:
+        return "holds a bracket: write the name as the catalog holds it, without [ ]"
+    return None
+
+
 def _scope(raw: object) -> Scope:
     """[scope]. Every name is compared without letter case: a duplicate, a schema in both lists or
-    the schema of the tool is refused in any spelling."""
+    the schema of the tool is refused in any spelling. A name is written as the catalog holds it:
+    no brackets, no space at either end, no control character. A pattern is schema.name with both
+    parts written, and its schema part can match a managed schema."""
     table = _table(raw, "scope", ("schemas",), ("exclude", "exclude_objects"))
     lists = {key: _strings(table, key, "scope") for key in ("schemas", "exclude", "exclude_objects")}
     if not lists["schemas"]:
@@ -432,13 +448,23 @@ def _scope(raw: object) -> Scope:
         seen: set[str] = set()
         for i, value in enumerate(values):
             path = f"scope.{key}[{i}]"
-            schema = value.split(".", 1)[0] if key == "exclude_objects" else value
+            pattern = key == "exclude_objects"
+            schema = value.split(".", 1)[0] if pattern else value
             if fold(schema) == fold(TOOL_SCHEMA):
                 raise _fail(path, f"names the schema of the tool ({TOOL_SCHEMA}), which is never managed")
+            if value == EVERY_SCHEMA and pattern:
+                raise _fail(
+                    path,
+                    "must be a pattern schema.name; a whole schema that is not managed goes in scope.exclude",
+                )
             if value == EVERY_SCHEMA and (key != "schemas" or len(values) > 1):
                 raise _fail(path, f"'{EVERY_SCHEMA}' is every schema: it stands alone, in scope.schemas")
-            if key == "exclude_objects" and "." not in value:
+            if pattern and "." not in value:
                 raise _fail(path, "must be a pattern schema.name, for example dbo.temp_*")
+            for part in value.split(".", 1) if pattern else (value,):
+                problem = _name_problem(part)
+                if problem is not None:
+                    raise _fail(path, problem)
             if fold(value) in seen:
                 raise _fail(path, "is listed more than once")
             seen.add(fold(value))
@@ -446,7 +472,15 @@ def _scope(raw: object) -> Scope:
     for i, name in enumerate(lists["exclude"]):
         if fold(name) in managed:
             raise _fail(f"scope.exclude[{i}]", "is also in scope.schemas; a schema is in one list")
-    return Scope(lists["schemas"], lists["exclude"], lists["exclude_objects"])
+    found = Scope(lists["schemas"], lists["exclude"], lists["exclude_objects"])
+    for i, value in enumerate(found.exclude_objects):
+        schema = value.split(".", 1)[0]
+        if not any(c in schema for c in "*?") and not found.has_schema(schema):
+            raise _fail(
+                f"scope.exclude_objects[{i}]",
+                "its schema part names a schema that scope does not manage, so the pattern can never match",
+            )
+    return found
 
 
 def resolve_target(config: Config, env: str, target_id: str) -> tuple[Environment, Target]:

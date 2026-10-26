@@ -18,7 +18,7 @@ from itertools import batched
 from typing import Any
 
 from azsqlcd import names
-from azsqlcd.config import Scope
+from azsqlcd.config import Scope, in_scope
 from azsqlcd.errors import refused
 from azsqlcd.session import Session
 from azsqlcd.sqlerrors import SqlError
@@ -265,6 +265,28 @@ def capture_modules(
             objects=sorted(hidden),
         )
     return captures
+
+
+def capture_in_scope(scope: Scope | None, key: str, capture: dict[str, Any]) -> bool:
+    """The module of a capture is managed under [scope]: its key is in it, and a DML trigger
+    follows its table (the property `parent`). A trigger of a table outside the scope is outside."""
+    if not in_scope(scope, key):
+        return False
+    parent = capture.get("parent") if capture.get("kind") == "TRIGGER" else None
+    return not isinstance(parent, str) or in_scope(scope, f"TABLE:{parent}")
+
+
+def triggers_in_scope(session: Session, scope: Scope | None, keys: Collection[str]) -> set[str]:
+    """Of the trigger keys, those whose table [scope] manages; every key with no scope. One read of
+    the captures of those triggers (their parents), none with no scope or no trigger."""
+    triggers = [key for key in keys if names.parse_object_key(key)[0] == "TRIGGER"]
+    if scope is None or not triggers:
+        return set(triggers)
+    return {
+        key
+        for key, found in capture_modules(session, triggers).items()
+        if capture_in_scope(scope, key, found)
+    }
 
 
 # The type that list_user_objects gives the history table of a system-versioned table, in place of U.

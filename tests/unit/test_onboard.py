@@ -1700,7 +1700,7 @@ def test_export_does_not_lose_the_tables_when_the_session_still_parses_only_afte
 # ------------------------------------------------------------------ [scope]: the export of one schema
 def test_the_export_of_one_schema_says_what_to_add_to_the_scope_and_never_edits_the_file():
     scoped = load_config(
-        TOML + '\n[scope]\nschemas = ["sales"]\nexclude = ["dba"]\nexclude_objects = ["x.y*"]\n'
+        TOML + '\n[scope]\nschemas = ["sales"]\nexclude = ["dba"]\nexclude_objects = ["sales.y*"]\n'
     )
     assert onboard.scope_advice(scoped, "Billing") == (
         'Add "Billing" to [scope] schemas of azsqlcd.toml, in the pull request that adds these files. '
@@ -1714,7 +1714,7 @@ def test_the_export_of_one_schema_says_what_to_add_to_the_scope_and_never_edits_
         "azsqlcd.toml has no [scope]: every schema is managed, so the schema [billing] needs no entry"
     )
     # the read of the export: the one schema, with the patterns of the config
-    assert onboard.export_scope(scoped, "billing") == Scope(("billing",), (), ("x.y*",))
+    assert onboard.export_scope(scoped, "billing") == Scope(("billing",), (), ("sales.y*",))
     assert onboard.export_scope(CONFIG, "billing") == Scope(("billing",))
     assert onboard.export_scope(scoped, None) is scoped.scope and onboard.export_scope(CONFIG, None) is None
     for schema in ("dba", "DBA", "azsqlcd"):

@@ -1669,6 +1669,9 @@ def compute_plan(
         and fold(key) not in owned_by_engine
         and in_scope(scope, key)
     )
+    # a trigger follows its table out of the scope
+    kept = catalog.triggers_in_scope(session, scope, unmanaged)
+    unmanaged = [key for key in unmanaged if names.parse_object_key(key)[0] != "TRIGGER" or key in kept]
     notes += _temporal_notes(work.destructive, history)
     if scope is not None:
         external = sum(

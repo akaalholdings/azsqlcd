@@ -1286,6 +1286,133 @@ def test_a_schema_that_leaves_the_scope_and_comes_back_is_compared_with_its_file
     assert project.tool("drift", *back.where, db=db).out.strip() == "no drift"
 
 
+REPORTING = ("schema/schemas/reporting.sql", "CREATE SCHEMA [reporting];\n")
+REPORT_REFS = (
+    "schema/views/reporting.vw_Refs.sql",
+    "CREATE OR ALTER VIEW [reporting].[vw_Refs] AS\nSELECT [OrderId], [Reference] FROM [sales].[Order];\n",
+)
+REPORT_BOUND = (
+    "schema/views/reporting.vw_Bound.sql",
+    "CREATE OR ALTER VIEW [reporting].[vw_Bound] WITH SCHEMABINDING AS\n"
+    "SELECT [OrderId], [Reference] FROM [sales].[Order];\n",
+)
+
+
+def reporting_leaves(project: Project, *views: tuple[str, str], ack: str = "") -> tuple[FakeDatabase, Built]:
+    """Release 1 with the schema reporting and its views; then one release that takes reporting out
+    of the scope and widens [sales].[Order].[Reference], which the views use."""
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "reporting"]'))
+    for file in (REPORTING, *views):
+        project.write(*file)
+    db = deployed(project, release_1(project))
+    project.write("azsqlcd.toml", scoped_toml(f'schemas = ["sales"]\nexclude = ["reporting"]\n{ack}'))
+    for path, _ in (REPORTING, *views):
+        (project.repo / path).unlink()
+    project.write_objects(ORDER_WIDE)
+    return db, project.release("reporting leaves; a longer reference", "widen_reference")
+
+
+def test_a_schema_bound_module_that_leaves_the_scope_blocks_as_an_unmanaged_one_and_gets_no_unbind(project):
+    """Review minor 1: it was taken as managed. TABLE_BLOCKER asked for an unbind line, and the plan
+    then refused that line (DIRECTIVE_UNRESOLVED)."""
+    db, widen = reporting_leaves(project, REPORT_BOUND)
+
+    assert "unbind" not in "".join(widen.batches)  # gen unbinds no module that leaves the scope
+    plan = project.tool("plan", *widen.where, "--out", str(project.out("plan")), db=db)
+
+    assert (plan.code, plan.reason) == (22, "TABLE_BLOCKER")
+    blocker = "VIEW:[reporting].[vw_Bound] is schema-bound to [sales].[Order].[Reference] and is not managed"
+    assert blocker in plan.err
+
+
+def test_a_module_that_leaves_the_scope_is_a_dependant_as_an_unmanaged_one_and_is_never_refreshed(
+    tmp_path, capsys
+):
+    """Review minor 2: it was refreshed by the deploy, which a broken view could fail."""
+    project = Project(tmp_path / "a", capsys)
+    db, widen = reporting_leaves(project, REPORT_REFS)
+    plan = project.tool("plan", *widen.where, "--out", str(project.out("plan")), db=db)
+    assert (plan.code, plan.reason) == (22, "TABLE_BLOCKER")
+    assert "VIEW:[reporting].[vw_Refs] uses [sales].[Order] and is not managed" in plan.err
+
+    # [ack] unmanaged_dependants takes it, as for an unmanaged view; the deploy does not refresh it
+    project = Project(tmp_path / "b", capsys)
+    ack = '[ack]\nunmanaged_dependants = ["[reporting].[vw_Refs] -> [sales].[Order].[Reference]"]'
+    db, widen = reporting_leaves(project, REPORT_REFS, ack=ack)
+    sent = len(db.ddl)
+    assert project.deploy(widen, db).code == 0
+    assert not any("reporting" in batch for batch in db.ddl[sent:])
+    assert status_of(db, "VIEW:[reporting].[vw_Refs]") == "dropped"  # left the scope: marked
+
+
+def test_a_module_outside_the_scope_cannot_be_adopted(project):
+    """Review minor 3: resolve --adopt-module made a managed row that nothing would ever compare."""
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["scratch"]'))
+    first = release_1(project)
+    db = deployed(project, first)
+    db.out_of_band(
+        "CREATE SCHEMA [scratch];", "CREATE OR ALTER PROCEDURE [scratch].[usp_Tmp] AS\nSELECT 1 AS [One];\n"
+    )
+    rows = db.rows("object")
+
+    adopt = project.tool(
+        "resolve", *first.where, *RESOLVE, "--adopt-module", "PROCEDURE:[scratch].[usp_Tmp]", db=db
+    )
+
+    assert (adopt.code, adopt.reason) == (22, "OUT_OF_SCOPE") and "[scope] exclude" in adopt.err
+    assert db.rows("object") == rows
+
+
+def test_the_export_of_a_schema_that_the_database_does_not_have_is_refused(tmp_path, capsys):
+    """Review minor 4: a typo exported nothing and said to add the schema to [scope]."""
+    project = Project(tmp_path, capsys, table_model=False)
+    db = estate(project)
+    project.write("azsqlcd.toml", TOML.format(table_model="false") + SCOPE)
+    out = tmp_path / "x"
+    root = ["--root", str(project.repo), *TARGET, "--out", str(out)]
+
+    done = project.tool("export", *root, "--schema", "biling", db=db)
+
+    assert (done.code, done.reason) == (22, "SCHEMA_NOT_FOUND") and "[biling]" in done.err
+    assert not out.exists() or not any(out.rglob("*.md"))
+    assert project.tool("export", *root, "--schema", "BILLING", db=db).code == 0  # names without case
+
+
+def test_a_trigger_follows_its_table_out_of_the_scope(tmp_path, capsys):
+    """Review minor 7: the trigger of a table that a pattern excludes was exported and listed."""
+    project = Project(tmp_path, capsys, table_model=False)
+    db = project.database()
+    db.out_of_band(*emit.emit_create_script(Model((TEMP_LOAD, CURRENCY))))
+    trigger = (
+        "CREATE OR ALTER TRIGGER [dbo].[tr_Load] ON [dbo].[temp_Load] AFTER INSERT AS\n"
+        "BEGIN\n    SET NOCOUNT ON;\nEND;\n"
+    )
+    db.out_of_band(trigger)
+    project.write(
+        "azsqlcd.toml",
+        TOML.format(table_model="false") + '\n[scope]\nschemas = ["dbo"]\nexclude_objects = ["dbo.temp_*"]\n',
+    )
+    project.main = project.commit("scope")
+    out = tmp_path / "x"
+    done = project.tool("export", "--root", str(project.repo), *TARGET, "--out", str(out), db=db)
+    assert done.code == 0, done.err
+    assert not (out / "schema" / "triggers").exists()
+    assert "tr_Load" not in (out / "onboarding" / "dev" / "export.md").read_text()
+
+    # a file for it is outside the scope too, and plan and drift do not list it as unmanaged
+    project.write("schema/triggers/dbo.tr_Load.sql", trigger)
+    lint = project.tool("lint", "--root", str(project.repo))
+    assert lint.code == 22 and "schema/triggers/dbo.tr_Load.sql:1: error OUT_OF_SCOPE" in lint.out
+    (project.repo / "schema/triggers/dbo.tr_Load.sql").unlink()
+    project.git("update-ref", "refs/remotes/origin/main", project.main)
+    built = project.build()
+    out = project.out("plan")
+    assert project.tool("plan", *built.where, "--out", str(out), db=db).code == 0
+    assert json.loads((out / "plan.json").read_text())["unmanaged"] == []
+    drift = project.tool("drift", *built.where, db=db)
+    assert drift.code == 0 and "tr_Load" not in drift.out
+
+
 def test_without_a_scope_no_read_is_limited_and_no_schema_is_listed(project, tmp_path):
     first = release_1(project)
     db = deployed(project, first)

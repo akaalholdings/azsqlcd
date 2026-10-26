@@ -78,7 +78,7 @@ from azsqlcd.model import (
     fold,
 )
 from azsqlcd.parse import ParseError, parse_object_file, parse_statement
-from azsqlcd.plan import TableFindings, Work
+from azsqlcd.plan import TableFindings, Work, scoped_state
 from azsqlcd.release import Bundle
 from azsqlcd.session import Session
 from azsqlcd.state import ObjectRow, State
@@ -316,7 +316,13 @@ class Hooks:
         if not config.project.table_model:
             raise ValueError("table hooks are for a project with table_model = true")
         self._bundle = bundle
+        self._scope = config.scope
         self.model = head_model(bundle.files)
+
+    def _managed(self, recorded: State) -> dict[str, ObjectRow]:
+        """The managed rows of the objects of [scope]. A module outside it is a dependant as an
+        unmanaged module is: a blocker unless [ack] lists it, never unbound, never refreshed."""
+        return _managed(scoped_state(recorded, self._scope))
 
     # -------------------------------------------------------------- what the release changes
     def _touched(self, ops: Iterable[Operation]) -> list[str]:
@@ -442,7 +448,7 @@ class Hooks:
 
     # -------------------------------------------------------------- plan step 8
     def _blockers(self, session: Session, work: Work, config: Config, recorded: State) -> list[str]:
-        rows = _managed(recorded)
+        rows = self._managed(recorded)
         managed = {fold(key) for key in rows}
         known: set[str] = set()
         for key, row in rows.items():
@@ -517,7 +523,7 @@ class Hooks:
 
     def _dependants(self, session: Session, work: Work, recorded: State) -> tuple[list[str], list[str]]:
         """(pre-broken, refresh set): the managed, unchanged dependants of the touched tables."""
-        managed = {fold(key): row for key, row in _managed(recorded).items()}
+        managed = {fold(key): row for key, row in self._managed(recorded).items()}
         changed = {fold(key) for key in (*(c.key for c in work.module_changes), *work.drops, *work.unbinds)}
         tables = [key for key in self.touched_table_objects(work) if key.startswith("TABLE:")]
         broken: list[str] = []
@@ -564,7 +570,7 @@ class Hooks:
             tables.setdefault(fold(target.table_key), target.table_key)
         if not tables:
             return []
-        managed = {fold(key): key for key in _managed(state.read_state(session))}
+        managed = {fold(key): key for key in self._managed(state.read_state(session))}
         dropped = {fold(key) for key in work.drops}
         return sorted(
             managed[fold(dependant.key)]

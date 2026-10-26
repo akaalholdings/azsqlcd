@@ -793,7 +793,9 @@ def _blocked(op: Operation) -> tuple[str, str | None] | None:
 
 
 def _bound_blockers(
-    base_files: Mapping[str, bytes], tables: Mapping[str, Collection[str] | None]
+    base_files: Mapping[str, bytes],
+    tables: Mapping[str, Collection[str] | None],
+    scope: config.Scope | None = None,
 ) -> list[tuple[modules.ModuleFile, str]]:
     """The schema-bound modules of the base revision that block a statement on one of the tables,
     and the schema-bound modules on top of those; dependants first. With each module: what it
@@ -803,14 +805,19 @@ def _bound_blockers(
     changes the table itself. A module blocks a column that it names: '*' is not allowed in a
     schema-bound module, so it names every column that it is bound to. The token scan does not
     know which table a column name belongs to; a column of the same name in another table of
-    the module counts.
+    the module counts. A module that [scope] of the head revision does not manage is not taken:
+    the plan treats it as an unmanaged module, and an unbind line for it is refused there.
     """
     if not tables:
         return []
     # read_module decides what is schema-bound; a file without the word cannot be (N5-07: 65 of
     # 4,500 files hold it, and reading all of them was half of the time of gen)
     worded = {path: data for path, data in base_files.items() if b"schemabinding" in data.lower()}
-    bound = [m for m in _module_files(worded, names.MODULE_KINDS) if m.schema_bound]
+    bound = [
+        m
+        for m in _module_files(worded, names.MODULE_KINDS)
+        if m.schema_bound and config.in_scope(scope, m.key)
+    ]
     edges = modules.build_edges(bound, ())
     columns = {fold(key): wanted for key, wanted in tables.items()}
     why: dict[str, str] = {}
@@ -847,10 +854,12 @@ def _unbind_line(module: modules.ModuleFile) -> str:
     return f"{lex.DIRECTIVE_PREFIX}unbind {names.qualified(module.schema, module.name)}"
 
 
-def _unbind_lines(base_files: Mapping[str, bytes], tables: Collection[str]) -> list[str]:
+def _unbind_lines(
+    base_files: Mapping[str, bytes], tables: Collection[str], scope: config.Scope | None = None
+) -> list[str]:
     """`unbind` lines for the schema-bound modules of the base revision that name one of the
     tables, and for the schema-bound modules on top of those; dependants first."""
-    return [_unbind_line(m) for m, _ in _bound_blockers(base_files, dict.fromkeys(tables))]
+    return [_unbind_line(m) for m, _ in _bound_blockers(base_files, dict.fromkeys(tables), scope)]
 
 
 def _written_name(text: str) -> str:
@@ -862,7 +871,9 @@ def _written_name(text: str) -> str:
 
 
 def _unbind_findings(
-    base_files: Mapping[str, bytes], new: Sequence[tuple[chain.ChainEntry, chain.Migration]]
+    base_files: Mapping[str, bytes],
+    new: Sequence[tuple[chain.ChainEntry, chain.Migration]],
+    scope: config.Scope | None = None,
 ) -> list[Finding]:
     """PRF007: a new migration has a statement that a schema-bound module of the base revision
     blocks, and no `unbind` line for that module (live T3).
@@ -895,7 +906,7 @@ def _unbind_findings(
             for directive in batch.directives
             if isinstance(directive, chain.Unbind)
         }
-        for module, named in _bound_blockers(base_files, tables):
+        for module, named in _bound_blockers(base_files, tables, scope):
             line = _unbind_line(module)
             if _written_name(line.removeprefix(f"{lex.DIRECTIVE_PREFIX}unbind ")) in written:
                 continue
@@ -1102,7 +1113,7 @@ def _draft(
         batches.append("\n".join([*lines, statement, "GO"]))
     if refusals:
         raise _gen_refused(refusals)
-    return "\n".join([*_unbind_lines(base_files, blocked), *batches]) + "\n"
+    return "\n".join([*_unbind_lines(base_files, blocked, scope), *batches]) + "\n"
 
 
 def _start_model(
@@ -1650,7 +1661,7 @@ def _prove(
     # the managed keys need every module file of the revision: read them for a raw batch only (N5-03)
     has_raw = any(batch.kind == "raw" for _, migration in new for batch in migration.batches)
     out += _raw_findings(new, unmanaged, _managed_keys(head_files, head) if has_raw else set(), cfg.scope)
-    out += _unbind_findings(base_files, new)
+    out += _unbind_findings(base_files, new, cfg.scope)
     out += _tombstone_findings(base_files, head_files, head)
 
     # a base revision whose config cannot be read gets the strict path

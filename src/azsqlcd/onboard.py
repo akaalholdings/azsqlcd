@@ -421,7 +421,7 @@ def _read_modules(
     in no list. schema: the one schema of `export --schema`.
     """
     captures = catalog.capture_modules(session, None, scope)
-    captures = {key: capture for key, capture in captures.items() if in_scope(scope, key)}
+    captures = {key: found for key, found in captures.items() if catalog.capture_in_scope(scope, key, found)}
     facts = _export_facts(session, scope, schema)
     unmanaged = list(facts.outside)
     listed = {key.casefold() for key in config.unmanaged_objects}
@@ -563,6 +563,13 @@ def export(session: Session, config: Config, schema: str | None = None) -> Expor
     the objects that need it, so the export stops and names the object.
     """
     scope = export_scope(config, schema)
+    if schema is not None and fold(schema) not in {fold(name) for name in catalog.list_schemas(session)}:
+        raise refused(
+            "SCHEMA_NOT_FOUND",
+            f"the database has no schema {names.quote(schema)}: nothing to export. Check the name; it is "
+            "compared without letter case, as the catalog does",
+            schema=schema,
+        )
     table = tables.export_tables(session, config, scope, schema)
     exported, quarantined, skipped = _read_modules(session, config, scope, schema)
     secrets = sorted(path for path, data in table.files.items() if _secret_literal(data))
@@ -680,7 +687,7 @@ def _compare(
     every = {
         key: found
         for key, found in catalog.capture_modules(session, None, scope).items()
-        if in_scope(scope, key) and fold(key) not in recorded
+        if catalog.capture_in_scope(scope, key, found) and fold(key) not in recorded
     }
     indexed = {key.casefold() for key in catalog.indexed_views(session)}
     without_case = {key.casefold(): key for key in every}
@@ -1236,15 +1243,21 @@ def drift(
     # and is not an unmanaged object. Without table hooks no table is listed
     history = {} if table_hooks is None else catalog_tables.history_tables(session)
     owned_by_engine = {fold(key) for key in history}
-    for found in catalog.list_user_objects(session, scope):
-        if found.kind is not None and found.kind in kinds:
-            key = names.object_key(found.kind, found.schema, found.name)
-            if (
-                key.casefold() not in managed_without_case
-                and fold(key) not in owned_by_engine
-                and in_scope(scope, key)
-            ):
-                items.append(DriftItem(key, EXISTS, None, None, UNMANAGED))
+    candidates = [
+        key
+        for found in catalog.list_user_objects(session, scope)
+        if found.kind is not None and found.kind in kinds
+        if (key := names.object_key(found.kind, found.schema, found.name)).casefold()
+        not in managed_without_case
+        and fold(key) not in owned_by_engine
+        and in_scope(scope, key)
+    ]
+    triggers = catalog.triggers_in_scope(session, scope, candidates)
+    items += [
+        DriftItem(key, EXISTS, None, None, UNMANAGED)
+        for key in candidates
+        if names.parse_object_key(key)[0] != "TRIGGER" or key in triggers
+    ]
     if scope is not None and not scope.every_schema:
         items += [
             DriftItem(names.object_key("SCHEMA", None, name), SCHEMA_UNSCOPED, None, None, UNSCOPED)

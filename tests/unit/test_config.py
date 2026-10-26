@@ -713,3 +713,40 @@ def test_a_refused_scope_names_the_problem_and_never_echoes_the_value():
         load_config(VALID + "\n[scope]\nexclude = []\n")
     example = 'Add the key schemas to the table [scope], for example: schemas = ["sales"]'
     assert e.value.message.endswith(example)
+
+
+@pytest.mark.parametrize(
+    ("table", "key", "problem"),
+    [
+        ('schemas = ["sales "]', "scope.schemas[0]", "space"),  # the engine ignores a trailing space
+        ('schemas = [" sales"]', "scope.schemas[0]", "space"),
+        ('schemas = ["sales"]\nexclude = ["sales "]', "scope.exclude[0]", "space"),
+        ('schemas = ["[sales]"]', "scope.schemas[0]", "bracket"),
+        ('schemas = ["sales"]\nexclude_objects = ["[sales].[x*]"]', "scope.exclude_objects[0]", "bracket"),
+        ('schemas = ["sa\\tles"]', "scope.schemas[0]", "control"),
+        ('schemas = ["sales"]\nexclude_objects = ["sales.\\n"]', "scope.exclude_objects[0]", "control"),
+        ('schemas = ["sales"]\nexclude_objects = ["sales."]', "scope.exclude_objects[0]", "empty"),
+        ('schemas = ["sales"]\nexclude_objects = [".x"]', "scope.exclude_objects[0]", "empty"),
+        ('schemas = ["sales"]\nexclude_objects = ["sales. x"]', "scope.exclude_objects[0]", "space"),
+        ('schemas = ["sales"]\nexclude_objects = ["*"]', "scope.exclude_objects[0]", "scope.exclude"),
+        ('schemas = ["sales"]\nexclude_objects = ["scratch.x"]', "scope.exclude_objects[0]", "never match"),
+        (
+            'schemas = ["*"]\nexclude = ["dba"]\nexclude_objects = ["DBA.x"]',
+            "scope.exclude_objects[0]",
+            "never match",
+        ),
+    ],
+)
+def test_a_name_or_a_pattern_that_the_engine_would_read_otherwise_is_refused(table, key, problem):
+    """Review minor 6: these were accepted, and a name with a space or brackets matched nothing."""
+    with pytest.raises(ToolError) as e:
+        load_config(VALID + f"\n[scope]\n{table}\n")
+    assert e.value.detail["key"] == key
+    assert problem in e.value.message
+
+
+def test_a_pattern_with_a_wildcard_in_its_schema_part_is_kept_and_a_managed_schema_is_kept():
+    scope = load_config(
+        VALID + '\n[scope]\nschemas = ["sales"]\nexclude_objects = ["*.tmp*", "SALES.x?"]\n'
+    ).scope
+    assert scope == Scope(("sales",), (), ("*.tmp*", "SALES.x?"))
