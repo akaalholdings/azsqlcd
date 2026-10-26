@@ -383,14 +383,16 @@ FACT_KEY = names.object_key("TABLE", SCHEMA, "FactOrderLine")
 ARCHIVE_KEY = names.object_key("TABLE", SCHEMA, "OrderLineArchive")
 CREATE_PARTITIONING = (
     f"CREATE PARTITION FUNCTION {names.quote(PF_YEAR)} (date) AS RANGE RIGHT "
-    "FOR VALUES ('2024-01-01', '2025-01-01');",
+    "FOR VALUES ('2024-01-01', '2025-01-01', '2026-01-01');",
     f"CREATE PARTITION SCHEME {names.quote(PS_YEAR)} AS PARTITION {names.quote(PF_YEAR)} ALL TO ([PRIMARY]);",
 )
 SPLIT = (
     f"ALTER PARTITION SCHEME {names.quote(PS_YEAR)} NEXT USED [PRIMARY];",
-    f"ALTER PARTITION FUNCTION {names.quote(PF_YEAR)}() SPLIT RANGE ('2026-01-01');",
+    # the last partition holds no row: with a columnstore index on the scheme the engine splits an
+    # empty partition only (seen live 2026-10-26)
+    f"ALTER PARTITION FUNCTION {names.quote(PF_YEAR)}() SPLIT RANGE ('2027-01-01');",
 )
-PARTITIONS = 3  # of the function as the script creates it
+PARTITIONS = 4  # of the function as the script creates it
 FACT_FILE = f"""CREATE TABLE {FACT} (
     [OrderDate] date NOT NULL,
     [ProductKey] int NOT NULL,

@@ -499,6 +499,10 @@ def drop_schema_objects(session: Session, schema: str) -> list[str]:
         found = _in_schema(session, schema, objects)
         if not found:
             break
+        # ST: a statistics tree that the engine makes for incremental statistics; it goes with its table
+        found = [row for row in found if str(row[2]).strip() != "ST"]
+        if not found:
+            break
         unknown = sorted({str(code) for _, _, code in found} - set(_DROP_KIND))
         if unknown:
             raise RuntimeError(

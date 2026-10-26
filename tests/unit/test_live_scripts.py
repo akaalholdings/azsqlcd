@@ -288,6 +288,17 @@ def test_an_object_type_that_the_cleanup_does_not_know_stops_it_before_any_drop(
     assert writes(session.batches) == []
 
 
+def test_a_statistics_tree_of_the_engine_is_left_to_go_with_its_table():
+    # seen live 2026-10-26: STATISTICS_INCREMENTAL = ON makes an object of type ST, parent 0, in
+    # the schema of the table; DROP of it is not possible, it goes with the table
+    session = session_with([("azsqlcd_spike", "l2_t", "U"), ("azsqlcd_spike", "_ST_0D7A0286_00000005", "ST")])
+    sent = live_spike.remove_spike_objects(session)
+    drops = [batch for batch in sent if batch.startswith("DROP ")]
+    assert drops[0] == "DROP TABLE [azsqlcd_spike].[l2_t];"
+    assert not any("_ST_" in batch for batch in sent)
+    assert session.sent("DROP SCHEMA")
+
+
 def test_objects_that_stay_after_the_drops_fail_the_cleanup_and_keep_the_schema():
     session = FakeSession()
     session.respond("azsqlcd:live_objects */", [[("azsqlcd_spike", "stuck", "U")]])  # never goes away
