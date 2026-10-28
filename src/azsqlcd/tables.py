@@ -418,6 +418,29 @@ class Hooks:
         self._bundle = bundle
         self._scope = config.scope
         self.model = head_model(bundle.files)
+        # A35: the dependant reads of one plan, kept while the session and the Work are the same
+        # objects. compute_plan builds a new Work for each plan, so a new plan reads again
+        self._reads_of: tuple[Session, Work] | None = None
+        self._closures: dict[tuple[tuple[str, ...], tuple[str, ...]], catalog.Closure] = {}
+        self._broken: dict[str, list[str]] = {}
+
+    def _closure(
+        self, session: Session, work: Work, tables: Collection[str], modules: Collection[str]
+    ) -> catalog.Closure:
+        if self._reads_of is None or self._reads_of[0] is not session or self._reads_of[1] is not work:
+            self._reads_of, self._closures, self._broken = (session, work), {}, {}
+        roots = (tuple(tables), tuple(modules))
+        if roots not in self._closures:
+            self._closures[roots] = catalog.dependant_closure(session, tables, modules)
+        return self._closures[roots]
+
+    def _broken_now(self, session: Session, key: str) -> list[str]:
+        """catalog.broken_references, read once for each module in a plan (A35)."""
+        if self._reads_of is None or self._reads_of[0] is not session:
+            return catalog.broken_references(session, key)
+        if fold(key) not in self._broken:
+            self._broken[fold(key)] = catalog.broken_references(session, key)
+        return self._broken[fold(key)]
 
     def _managed(self, recorded: State) -> dict[str, ObjectRow]:
         """The managed rows of the objects of [scope]. A module outside it is a dependant as an
@@ -691,12 +714,12 @@ class Hooks:
         tables = [key for key in self.touched_table_objects(work) if key.startswith("TABLE:")]
         broken: list[str] = []
         refresh: list[str] = []
-        closure = catalog.dependant_closure(session, tables, _changed_modules(work))
+        closure = self._closure(session, work, tables, _changed_modules(work))
         for dependant in closure.dependants:
             row = managed.get(fold(dependant.key))
             if row is None or fold(dependant.key) in changed:
                 continue
-            if catalog.broken_references(session, dependant.key):
+            if self._broken_now(session, dependant.key):
                 broken.append(dependant.key)
             elif not dependant.schema_bound and row.capture.get("type") in REFRESHABLE:
                 refresh.append(dependant.key)
@@ -731,7 +754,7 @@ class Hooks:
             return [], ()
         managed = {fold(key): key for key in self._managed(recorded)}
         dropped = {fold(key) for key in work.drops}
-        closure = catalog.dependant_closure(session, list(tables.values()), changed)
+        closure = self._closure(session, work, list(tables.values()), changed)
         found = sorted(
             (managed[fold(dependant.key)], dependant.via)
             for dependant in closure.dependants
@@ -766,7 +789,7 @@ class Hooks:
         after the change that this result does not hold. Every key has an entry; an empty list
         says that the module was read and has no finding.
         """
-        return {key: sorted(catalog.broken_references(session, key)) for key in sorted(set(keys))}
+        return {key: sorted(self._broken_now(session, key)) for key in sorted(set(keys))}
 
     # -------------------------------------------------------------- A20
     def sub_object_collisions(self, session: Session, work: Work, state: State) -> list[str]:

@@ -246,3 +246,27 @@ def test_a_release_with_no_migration_whose_view_refresh_fails_names_the_module_f
         in failed.err
     )
     assert MODULE_FIX in failed.err and "withdraw the migration" not in failed.err
+
+
+def test_a_plan_reads_each_dependant_once_and_the_closure_once_for_each_set_of_roots(project):
+    """The plan read each dependant three times (pre-broken, findings, refresh set) and computed the
+    closure four times: 3062 batches for 1000 views on a changed view, where 28 were sent before."""
+    for n in range(5):
+        project.write(
+            f"schema/views/sales.vw_R{n}.sql",
+            f"CREATE OR ALTER VIEW [sales].[vw_R{n}] AS\nSELECT [Reference] FROM [sales].[vw_OpenOrders];\n",
+        )
+    db = deployed(project, release_1(project))
+    project.write(VIEW[0], VIEW[1].replace("WHERE [Status] = 0", "WHERE [Status] IN (0, 1)"))
+    changed = project.release("open means 0 or 1")
+    sent = len(db.batches)
+
+    plan = project.tool("plan", *changed.where, "--out", str(project.out("plan")), db=db)
+
+    assert plan.code == 0, plan.err
+    batches = db.batches[sent:]
+    reads = [batch for batch in batches if "azsqlcd:broken_references" in batch]
+    checked = [view(f"vw_R{n}") for n in range(5)] + [PROCEDURE_KEY]
+    assert all(plan.out.count(f"dependant to check: {key} ") == 1 for key in checked)
+    assert len(reads) == len(checked)
+    assert sum("azsqlcd:dependant_chain" in batch for batch in batches) == 2  # two levels, one closure
