@@ -824,6 +824,13 @@ What a hold does to the rest of the pipeline:
 - When a pull request adds `promote_to`, a merged migration that touches the product and other
   objects is held as a whole where it is still pending. `verify` gives the warning
   `MIXED_HOLD_MERGED`.
+- Keep the objects of a held migration in `[scope]` until the hold ends everywhere. A migration
+  that runs late (a held one after `promote_to` is raised, a parked one after `--unpark`) and
+  touches an object that `[scope]` of the release does not manage is refused with 22
+  `OUT_OF_SCOPE`: the release does not model that object. Withdraw the migration, or bring the
+  object back into `[scope]` with its file. When a pull request changes `[scope]`, `verify` gives
+  the warning `HOLD_OUT_OF_SCOPE` for each migration of a product with `promote_to` that touches
+  an object outside `[scope]`.
 
 The command `azsqlcd products` lists each product with its owners, its `promote_to` and the count
 of its object files. It reads only the working tree:
@@ -835,6 +842,9 @@ azsqlcd products --codeowners >> .github/CODEOWNERS
 ```
 
 `--env` reads no database: `azsqlcd plan` shows what a target holds and what is parked there.
+With `[env.<name>] not_managed`, the held items that the patterns take out of that environment are
+listed apart (`not managed in <env>: ...`), as the plan of the environment does: a migration that
+touches only matching objects, and a module that a pattern matches.
 `--codeowners` prints one line for each object file of a product that has owners, or one glob
 when every file in a folder that a pattern of the product matches is a file of the product. A
 space in a path is written as `\ `.
@@ -912,6 +922,11 @@ migration that this environment does not manage is skipped, also when it is a mi
 product that is held here: it does not run here after `promote_to` is raised. A parked migration
 stays parked. `drift` lists the parked migrations only; `plan` and `deploy` show the skipped and
 the held ones.
+
+A held migration that touches matching objects and managed objects is not refused while it is
+held: it does not run here. The other releases deploy past it. When `promote_to` is raised, the
+plan for that environment stops with 22 `MIXED_NOT_MANAGED`; split the migration then. A held
+migration that touches only matching objects is skipped for good, as above.
 
 ### Partitioned tables
 

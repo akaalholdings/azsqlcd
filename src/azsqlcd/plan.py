@@ -40,7 +40,7 @@ from azsqlcd import (
 )
 from azsqlcd.catalog import Difference, FenceFacts
 from azsqlcd.chain import Chain, ChainEntry, Migration
-from azsqlcd.config import Config, Scope, in_scope, resolve_target
+from azsqlcd.config import Config, Scope, in_scope, out_of_scope, resolve_target
 from azsqlcd.errors import ToolError, locked, refused
 from azsqlcd.model import Model, fold
 from azsqlcd.modules import ModuleFile
@@ -653,6 +653,31 @@ def _catch_up_past(
     ]
 
 
+def _refuse_late_out_of_scope(late: Sequence[Migration], scope: Scope) -> None:
+    """Refuse (OUT_OF_SCOPE) a migration that runs late past set-aside migrations (for example after
+    a park or a hold ended) and touches an object that the scope of this release does not manage. The release
+    does not model that object, so the read-back would fail (21) at each deploy. A7 sends such a
+    migration with its own release, where the object was still in the scope."""
+    for migration in late:
+        for schema, name in sorted(set_aside.footprint(migration).touched):
+            # out_of_scope reads only the schema and the name of the key
+            why = out_of_scope(scope, names.object_key("TABLE", schema, name))
+            if why is None:
+                continue
+            shown = f"{names.quote(schema)}.{names.quote(name)}"
+            raise refused(
+                "OUT_OF_SCOPE",
+                f"{migration.file} came with an earlier release and runs late here, past migrations that "
+                f"this environment sets aside or did, and it touches {shown}, which this release does not "
+                f"manage ({why}). The release does not model that object, so the deploy would fail its "
+                "read-back. Either withdraw "
+                f'{migration.file} by pull request (docs/setup.md, section "Withdraw and replace a merged '
+                'migration"), or bring the object back into [scope] with its file by pull request',
+                migration=migration.file,
+                object=shown,
+            )
+
+
 def _refuse_catch_up(
     pending: Sequence[ChainEntry],
     withdrawn_unapplied: Sequence[ChainEntry],
@@ -1030,6 +1055,7 @@ def pending_work(
     aside: Aside = set_aside.NOTHING,
     model: Model | None = None,
     hold: Hold | None = None,
+    scope: Scope | None = None,
 ) -> Work:
     """What a deploy of this release does to a database with this recorded state. Pure.
 
@@ -1048,6 +1074,8 @@ def pending_work(
     model: the head model, when tables are modelled; the independence check follows a rename with it.
     hold: the holds of the environment ([products], products.hold). The migrations of a held product
     are set aside (reason held); its module changes and drops are not sent. None: as before.
+    scope: the scope of the environment. A migration that runs late past set-aside migrations and
+    touches an object outside it is refused (OUT_OF_SCOPE).
     """
     _refuse_unresolved(recorded)
     files, manifest = bundle.files, bundle.manifest
@@ -1101,11 +1129,19 @@ def pending_work(
     # a migration skipped as not managed never runs here, so its release can always be deployed: A7
     # stays whole for it. Only a park, which can end, lets the later releases deploy past it
     parks = [entry for entry in held if aside.active[entry.file].reason != set_aside.NOT_MANAGED]
-    if not first_deploy and (parks or any(entry.file in aside.released for entry in entries)):
+    past = not first_deploy and (parks or any(entry.file in aside.released for entry in entries))
+    if past:
         catch_up_notes = _catch_up_past(entries, parks, manifest)
     else:
         catch_up_notes = _refuse_catch_up(entries, withdrawn_unapplied, recorded_seq, manifest, first_deploy)
     pending = tuple(_read_migration(files, entry) for entry in entries)
+    if past and scope is not None:
+        late = [
+            migration
+            for entry, migration in zip(entries, pending, strict=True)
+            if entry.file in aside.released or _added_in(entry, manifest) != manifest.release_seq
+        ]
+        _refuse_late_out_of_scope(late, scope)
 
     in_release = module_files(files)
     tombstones = (
@@ -1588,28 +1624,34 @@ def _with_urls(units: Sequence[Unit], repo_url: str, commit: str) -> tuple[Unit,
     return tuple(Unit(unit.kind, tuple(link(step) for step in unit.steps)) for unit in units)
 
 
+def module_out_of_scope(scope: Scope | None, key: str, module: ModuleFile) -> bool:
+    """The scope does not manage the module; a DML trigger follows its table (the name after ON)."""
+    table = modules.trigger_table(module) if module.kind == "TRIGGER" else None
+    return not in_scope(scope, key) or (table is not None and not in_scope(scope, table))
+
+
 def _managed_files(bundle: Bundle, scope: Scope | None) -> Bundle:
     """The release without the module files that [env.<name>] not_managed takes out of the scope:
     such a module is not sent. A DML trigger follows its table (the name after ON), as lint
     OUT_OF_SCOPE says for [scope]. With no not_managed: the release itself."""
     if scope is None or not scope.not_managed:
         return bundle
-
-    def outside(key: str, module: ModuleFile) -> bool:
-        table = modules.trigger_table(module) if module.kind == "TRIGGER" else None
-        return not in_scope(scope, key) or (table is not None and not in_scope(scope, table))
-
-    gone = {module.path for key, module in module_files(bundle.files).items() if outside(key, module)}
+    gone = {
+        module.path
+        for key, module in module_files(bundle.files).items()
+        if module_out_of_scope(scope, key, module)
+    }
     return replace(bundle, files={path: data for path, data in bundle.files.items() if path not in gone})
 
 
 def _not_managed_skips(
-    bundle: Bundle, recorded: State, aside: Aside, scope: Scope | None
+    bundle: Bundle, recorded: State, aside: Aside, scope: Scope | None, hold: Hold | None = None
 ) -> tuple[dict[str, tuple[ChainEntry, set_aside.SetAside]], list[str]]:
     """([env.<name>] not_managed) (the pending migrations that this plan skips and records,
     {migration id: (chain entry, why)}; every pending migration skipped here, new or recorded).
     A pending migration is one that pending_work takes: in the chain, not withdrawn, not applied
-    and not replaced by one that is. With no not_managed: nothing, and the chain is not read."""
+    and not replaced by one that is. hold: a held migration that mixes the two sides is held, not
+    refused. With no not_managed: nothing, and the chain is not read."""
     if scope is None or not scope.not_managed or chain.SUM_PATH not in bundle.files:
         return {}, []
     ch = chain.parse_sum(_utf8(bundle.files, chain.SUM_PATH, "CHAIN_INVALID"))
@@ -1627,7 +1669,7 @@ def _not_managed_skips(
     candidates = [
         (entry, _read_migration(bundle.files, entry)) for entry in pending if entry.file not in aside.active
     ]
-    found = not_managed.skips(candidates, scope)
+    found = not_managed.skips(candidates, scope, hold.held_migrations if hold is not None else ())
     skips = {file: (by_file[file], item) for file, item in found.items()}
     recorded_skips = {file for file, item in aside.active.items() if item.reason == set_aside.NOT_MANAGED}
     skipped = [entry.file for entry in pending if entry.file in found or entry.file in recorded_skips]
@@ -1721,14 +1763,14 @@ def compute_plan(
         ]
 
     aside = set_aside.read(session, config, recorded)
-    skips, skipped = _not_managed_skips(bundle, recorded, aside, scope)
+    hold = products.hold(config, env, bundle.files) if config.products else None
+    skips, skipped = _not_managed_skips(bundle, recorded, aside, scope, hold)
     if skips:
         aside = Aside({**aside.active, **{file: item for file, (_, item) in skips.items()}}, aside.released)
-    hold = products.hold(config, env, bundle.files) if config.products else None
     held_here = aside.active or (hold is not None and hold.held_migrations)
     model = table_hooks.model if table_hooks is not None and held_here else None
     work = pending_work(
-        _managed_files(bundle, scope), recorded, config.project.module_chunk, aside, model, hold
+        _managed_files(bundle, scope), recorded, config.project.module_chunk, aside, model, hold, scope
     )
     manifest = bundle.manifest
     recorded_sha = recorded.recorded_git_sha

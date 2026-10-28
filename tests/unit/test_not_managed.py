@@ -168,6 +168,13 @@ def test_a_migration_that_touches_managed_and_not_managed_objects_is_refused():
     assert e.value.detail["managed"] == ["[sales].[customer]"]
 
 
+def test_a_held_migration_that_mixes_both_sides_is_not_refused_and_a_held_one_side_is_still_skipped():
+    # a product holds it here, so it does not run here: the refusal waits for the hold to end
+    assert not_managed.skips([SALES, BOTH, LEGACY], SCOPE, held={BOTH[0].file, LEGACY[0].file}) == {
+        LEGACY[0].file: not_managed.skips([LEGACY], SCOPE)[LEGACY[0].file]
+    }
+
+
 def test_a_raw_batch_touches_every_name_of_its_text():
     raw = migration(
         "0005__copy.sql",

@@ -3061,3 +3061,116 @@ def test_a_product_migration_that_test_does_not_manage_is_skipped_there_not_held
     done = pipe.promote(r2, "test")
     assert done.code == 0, done.err
     assert dict(migrations(test))[r1.file] == "not_applied" and "TABLE:[sales].[Balance]" not in test.model
+
+
+BALANCE_LINE = Table(
+    "sales",
+    "BalanceLine",
+    (Column("LineId", INT, False), Column("Amount", INT, True)),
+    (PrimaryKey("PK_BalanceLine", True, (KeyColumn("LineId"),)),),
+)
+
+
+def test_a_held_migration_that_mixes_objects_that_test_does_not_manage_holds_and_blocks_nothing(pipe):
+    """A held migration does not run here, so MIXED_NOT_MANAGED does not apply to it while it is
+    held: a shared release deploys past it. When the hold is lifted, the refusal comes back."""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    text = toml().replace("[env.test]\n", '[env.test]\nnot_managed = ["sales.BalanceLine"]\n')
+    pipe.write("azsqlcd.toml", text + PRODUCT.format(promote_to="dev"))
+    pipe.push("balance stays in dev, and test does not manage its lines")
+    pipe.write_objects(BALANCE, BALANCE_LINE)
+    r1 = pipe.release("balance and its lines", "balance")
+    assert pipe.promote(r1, "dev").code == 0
+
+    planned, notes = plan_notes(pipe, r1, "test")
+    assert planned.code == 0, planned.err
+    assert f'held: {r1.file} (product balance, promote_to = "dev")' in notes
+    assert pipe.promote(r1, "test").code == 0
+    assert r1.file not in dict(migrations(test))
+
+    pipe.write_objects(ORDER_NOTE)
+    r2 = pipe.release("a note of an order", "order_note")
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert migrations(test)[-1] == (r2.file, "ok") and r1.file not in dict(migrations(test))
+
+    pipe.write("azsqlcd.toml", text + PRODUCT.format(promote_to="test"))
+    r3 = pipe.merge("balance reaches test")
+    assert pipe.promote(r3, "dev").code == 0
+    refused = pipe.promote(r3, "test")
+    assert (refused.code, refused.reason) == (22, "MIXED_NOT_MANAGED")
+    assert r1.file in refused.err
+
+
+OLD_RANK = with_columns(OLD, Column("Rank", TINY, False))
+
+
+def test_an_unparked_migration_of_an_object_that_left_scope_is_refused_by_the_plan_not_the_read_back(
+    pipe, tmp_path, monkeypatch
+):
+    """A parked migration whose object later leaves [scope] would run late after the unpark, and its
+    read-back would fail (21) at each deploy. The plan refuses it first, with the way out."""
+    monkeypatch.chdir(tmp_path)
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    parking(pipe, True)
+    pipe.write_objects(OLD_RANK)
+    r1 = pipe.release("a rank of old", "old_rank")
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    assert pipe.promote(r1, "test").code == 21
+
+    pipe.write(
+        "azsqlcd.toml", pipe.read("azsqlcd.toml") + '\n[scope]\nschemas = ["sales"]\nexclude = ["legacy"]\n'
+    )
+    pipe.delete("schema/tables/legacy.Old.sql", "schema/schemas/legacy.sql")
+    pipe.push("legacy leaves the scope")
+    r2 = pipe.build()
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert pipe.resolve(r2, "test", "--unpark", r1.file).code == 0
+
+    sent = len(test.ddl)
+    refused = pipe.promote(r2, "test")
+    assert (refused.code, refused.reason) == (22, "OUT_OF_SCOPE"), refused.err
+    assert r1.file in refused.err and "[legacy].[old]" in refused.err and "withdraw" in refused.err
+    assert len(test.ddl) == sent and r1.file not in dict(migrations(test))
+
+
+def test_a_held_migration_of_an_object_that_left_scope_is_refused_when_the_hold_ends_and_verify_warns(
+    pipe, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    sandbox = pipe.dbs["sandbox"]
+    product(pipe, "dev")
+    pipe.write_objects(BALANCE)
+    r1 = pipe.release("the table of balance", "balance")
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r1, env).code == 0
+
+    scope = '\n[scope]\nschemas = ["sales"]\nexclude_objects = ["sales.Balance"]\n'
+    pipe.write("azsqlcd.toml", pipe.read("azsqlcd.toml") + scope)
+    pipe.delete("schema/tables/sales.Balance.sql")
+    _, verify = pipe.checks()
+    assert verify.code == 0 and "HOLD_OUT_OF_SCOPE" in verify.out and r1.file in verify.out, verify.out
+    pipe.push("balance leaves the scope")
+    r2 = pipe.build()
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r2, env).code == 0
+
+    pipe.write(
+        "azsqlcd.toml", pipe.read("azsqlcd.toml").replace('promote_to = "dev"', 'promote_to = "sandbox"')
+    )
+    r3 = pipe.merge("balance reaches sandbox")
+    assert pipe.promote(r3, "dev").code == 0
+    refused = pipe.promote(r3, "sandbox")
+    assert (refused.code, refused.reason) == (22, "OUT_OF_SCOPE"), refused.err
+    assert r1.file in refused.err and "[sales].[balance]" in refused.err
+    assert "TABLE:[sales].[Balance]" not in sandbox.model

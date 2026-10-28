@@ -40,10 +40,24 @@ def _touched(migration: Migration) -> list[tuple[str, str]]:
     return sorted(found)
 
 
-def skips(pending: Sequence[tuple[ChainEntry, Migration]], scope: Scope | None) -> dict[str, SetAside]:
+def only_not_managed(migration: Migration, scope: Scope | None) -> bool:
+    """The migration touches objects, and the patterns of [env.<name>] not_managed match each one:
+    skips() skips it in that environment."""
+    if scope is None or not scope.not_managed:
+        return False
+    touched = _touched(migration)
+    return bool(touched) and all(scope.not_managed_of(*item) is not None for item in touched)
+
+
+def skips(
+    pending: Sequence[tuple[ChainEntry, Migration]], scope: Scope | None, held: Collection[str] = ()
+) -> dict[str, SetAside]:
     """The pending migrations that the environment of the scope skips, by migration id, in the
     order given. Refused (MIXED_NOT_MANAGED): a migration that touches objects that the environment
-    manages and objects that it does not. With no not_managed in the scope: nothing."""
+    manages and objects that it does not. held: the ids of the migrations that a product holds here.
+    Such a migration does not run here, so it is not refused while it is held; when it touches only
+    objects that the environment does not manage, it is skipped for good all the same. With no
+    not_managed in the scope: nothing."""
     if scope is None or not scope.not_managed:
         return {}
     found: dict[str, SetAside] = {}
@@ -54,6 +68,8 @@ def skips(pending: Sequence[tuple[ChainEntry, Migration]], scope: Scope | None) 
             continue
         inside = [item for item in touched if item not in outside]
         where = f"[env.{scope.env}] not_managed"
+        if inside and entry.file in held:
+            continue
         if inside:
             raise refused(
                 "MIXED_NOT_MANAGED",

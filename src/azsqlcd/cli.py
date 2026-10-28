@@ -46,6 +46,7 @@ from azsqlcd import (
     chain,
     gen,
     lint,
+    not_managed,
     onboard,
     plan,
     products,
@@ -616,6 +617,8 @@ def _cmd_products(call: _Call) -> None:
     counts = products.object_files(config, files)
     hold = products.hold(config, env, files) if env is not None else None
     in_release = plan.module_files(files) if env is not None else {}
+    # [env.<name>] not_managed takes objects out before a hold, as the plan of that environment does
+    scope = for_env(config, env).scope if env is not None else None
     for product in config.products:
         owners = " ".join(product.owners) or "none"
         reach = (
@@ -631,9 +634,18 @@ def _cmd_products(call: _Call) -> None:
             continue
         held = [file for file, name in hold.migration_product.items() if name == product.name]
         mods = [key for key in sorted(in_release) if getattr(hold.holds(key), "name", None) == product.name]
+        gone = [file for file in held if not_managed.only_not_managed(hold.held_migrations[file], scope)]
+        gone_mods = [key for key in mods if plan.module_out_of_scope(scope, key, in_release[key])]
+        held = [file for file in held if file not in gone]
+        mods = [key for key in mods if key not in gone_mods]
         call.say(
             f"  held in {env}: migrations {', '.join(held) or 'none'}; modules {', '.join(mods) or 'none'}"
         )
+        if gone or gone_mods:
+            call.say(
+                f"  not managed in {env}: migrations {', '.join(gone) or 'none'}; modules "
+                f"{', '.join(gone_mods) or 'none'}"
+            )
     if env is not None:
         call.say(
             "offline: no database is read. Which of these a target has applied, and which migrations are "

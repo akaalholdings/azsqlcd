@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from azsqlcd import chain, modules, names, set_aside
 from azsqlcd.chain import Migration
-from azsqlcd.config import PROMOTION_ORDER, Config, Product
+from azsqlcd.config import PROMOTION_ORDER, Config, Product, out_of_scope
 from azsqlcd.errors import ToolError, refused
 from azsqlcd.modules import ModuleFile
 from azsqlcd.set_aside import Aside, SetAside
@@ -145,6 +145,28 @@ def hold_dropped(base: Config, head: Config, migration: Migration) -> str | None
                 "it is still held, the deploy would refuse each later release with CHAIN_DIVERGED. First "
                 f"remove promote_to of [products.{name}] and promote that release to every environment; "
                 "then remove the product or change its objects"
+            )
+    return None
+
+
+def hold_out_of_scope(config: Config, migration: Migration) -> str | None:
+    """Why a chain migration of a product with promote_to touches an object that [scope] does not
+    manage. Where it is still held, it runs late when the hold ends, and the plan refuses it there
+    (OUT_OF_SCOPE): the release does not model that object. None when it does not."""
+    touched, _ = touched_products(config, migration)
+    by_name = {p.name: p for p in config.products}
+    held = [name for name in touched if by_name[name].promote_to not in (None, PROMOTION_ORDER[-1])]
+    if not held:
+        return None
+    for schema, name in sorted(set_aside.footprint(migration).touched):
+        why = out_of_scope(config.scope, names.object_key("TABLE", schema, name))
+        if why is not None:
+            return (
+                f"{migration.file} touches objects of the product {held[0]}, which has promote_to = "
+                f'"{by_name[held[0]].promote_to}", and {names.quote(schema)}.{names.quote(name)}, which '
+                f"[scope] does not manage ({why}). Where it is still held, the deploy that ends the hold "
+                "refuses it with OUT_OF_SCOPE. Remove promote_to and promote that release to every "
+                "environment before the object leaves [scope], or withdraw the migration"
             )
     return None
 

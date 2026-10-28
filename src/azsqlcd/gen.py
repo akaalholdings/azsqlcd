@@ -453,7 +453,9 @@ def _product_findings(
     HOLD_DEPENDENCY: a new migration that will stop where a product is held. When the pull request
     changes [products]: HOLD_DROPPED, a merged migration of a product with promote_to that is no
     migration of a product any more; MIXED_HOLD_MERGED, a merged migration that the new holds hold
-    as a whole. A chain or a file that does not read is reported by lint."""
+    as a whole. When the pull request changes [scope]: HOLD_OUT_OF_SCOPE, a migration of a product
+    with promote_to that touches an object outside [scope]. A chain or a file that does not read is
+    reported by lint."""
     try:
         base_cfg: config.Config | None = _config(base_files)
     except ToolError:
@@ -479,6 +481,11 @@ def _product_findings(
         why = products.hold_dependency(cfg, migration, [m for m in merged if m.file != entry])
         if why is not None:
             out.append(Finding("HOLD_DEPENDENCY", WARNING, path, 1, why))
+    if base_cfg is not None and base_cfg.scope != cfg.scope:
+        for migration in merged:
+            why = products.hold_out_of_scope(cfg, migration)
+            if why is not None:
+                out.append(Finding("HOLD_OUT_OF_SCOPE", WARNING, f"migrations/{migration.file}", 1, why))
     if base_cfg is None or base_products == cfg.products:
         return out
     for migration in merged:

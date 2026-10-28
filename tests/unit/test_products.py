@@ -104,6 +104,22 @@ def test_a_migration_that_mixes_a_held_product_with_shared_objects_is_named_and_
     assert products.mixed_hold(CONFIG, both) is None
 
 
+def test_a_product_migration_of_an_object_outside_scope_is_named_while_the_product_has_promote_to():
+    scoped = load_config(
+        HEAD + PRODUCTS + '\n[scope]\nschemas = ["sales", "dbo"]\nexclude_objects = ["sales.Balance"]\n'
+    )
+    why = products.hold_out_of_scope(scoped, BALANCE)
+    assert why is not None and BALANCE.file in why and "[sales].[balance]" in why and "OUT_OF_SCOPE" in why
+    assert products.hold_out_of_scope(CONFIG, BALANCE) is None  # in scope
+    assert products.hold_out_of_scope(scoped, SHARED) is None  # no product
+    # no promote_to: the migration is held nowhere
+    free = load_config(
+        HEAD + PRODUCTS.replace('promote_to = "dev"\n', "") + '\n[scope]\nschemas = ["sales", "dbo"]\n'
+        'exclude_objects = ["sales.Balance"]\n'
+    )
+    assert products.hold_out_of_scope(free, BALANCE) is None
+
+
 def test_without_products_there_is_no_hold():
     assert products.hold(load_config(HEAD), "sandbox", files_of(BALANCE)) is None
 
@@ -249,6 +265,28 @@ def test_products_with_env_says_what_is_held_there_from_the_files_only(tmp_path,
     assert lines[-1].startswith("offline: no database is read")
     code, out = run(capsys, "products", "--root", root, "--env", "dev")
     assert "  not held in dev" in out.splitlines()
+
+
+def test_products_with_env_lists_apart_what_not_managed_takes_out_there_as_the_plan_does(tmp_path, capsys):
+    sandbox = HEAD[HEAD.index("[env.dev]") :].replace("dev", "sandbox")
+    sandbox = sandbox.replace("[env.sandbox]\n", '[env.sandbox]\nnot_managed = ["sales.vw_Balance"]\n')
+    root = repository(tmp_path, HEAD + sandbox + PRODUCTS)
+    code, out = run(capsys, "products", "--root", root, "--env", "sandbox")
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[1] == f"  held in sandbox: migrations {BALANCE.file}; modules none"
+    assert lines[2] == "  not managed in sandbox: migrations none; modules VIEW:[sales].[vw_Balance]"
+    assert lines[3].startswith("legacy:")
+    # a held migration of objects that sandbox does not manage only is skipped there, not held
+    (tmp_path / "two").mkdir()
+    root = repository(
+        tmp_path / "two", HEAD + sandbox.replace('"sales.vw_Balance"', '"sales.*Balance"') + PRODUCTS
+    )
+    code, out = run(capsys, "products", "--root", root, "--env", "sandbox")
+    assert out.splitlines()[1:3] == [
+        "  held in sandbox: migrations none; modules none",
+        f"  not managed in sandbox: migrations {BALANCE.file}; modules VIEW:[sales].[vw_Balance]",
+    ]
 
 
 def test_products_codeowners_prints_the_lines_of_the_products_with_owners(tmp_path, capsys):

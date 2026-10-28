@@ -305,7 +305,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
 | `align.py` | `align`: the alignment script and its report (A38); read-only | catalog, catalog_tables, config, diff, emit, gen, model, modules, names, onboard, plan, replay, session, tables |
-| `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | align, catalog, chain, config, errors, gen, lint, onboard, plan, release, runner, session, sqlerrors, state, tables |
+| `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | align, catalog, chain, config, errors, gen, lint, not_managed, onboard, plan, release, runner, session, sqlerrors, state, tables |
 
 Rules as built. SQL text is built in `state.py`, `catalog.py`, `catalog_tables.py`, `runner.py` and
 `emit.py`; `plan.py` holds three constant batches of the syntax check (`SET PARSEONLY ON;`,
@@ -1044,6 +1044,20 @@ one environment does not manage", is the procedure.
   not a parked or skipped migration of a product. No state-table change. Scenario tests:
   `test_a_held_a_skipped_and_a_parked_migration_in_one_environment`,
   `test_a_product_migration_that_test_does_not_manage_is_skipped_there_not_held`.
+- A42. Review of A41 (2026-10-28). (a) `compute_plan` computes the hold before the skips of
+  `not_managed`; `not_managed.skips` takes the held migrations and does not refuse one that mixes
+  the two sides (`MIXED_NOT_MANAGED`): it does not run here. The refusal comes when the hold ends.
+  A held migration of matching objects only is still skipped for good. (b) `pending_work` takes
+  the scope of the environment. In a catch-up past set-aside migrations, a migration of an earlier
+  release, or one that was set aside before, that touches an object outside the scope is refused
+  with 22 `OUT_OF_SCOPE` (no new reason code): the release does not model that object, and its
+  read-back would fail (21) at each deploy. Without a set-aside migration the check does not run.
+  (c) New `verify` warning `HOLD_OUT_OF_SCOPE`: a pull request changes `[scope]`, and a chain
+  migration of a product with `promote_to` touches an object outside it. (d) `azsqlcd products
+  --env <env>` reads the scope of `for_env`: held items that `not_managed` takes out are listed
+  apart (`not managed in <env>: ...`; `not_managed.only_not_managed`, `plan.module_out_of_scope`).
+  (e) The way out of `SET_ASIDE_DEPENDENCY` says that the set-aside migration runs at its place in
+  the chain after the unpark or the raise, not first. No state-table change.
 
 ---
 
