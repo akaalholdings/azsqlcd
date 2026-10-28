@@ -2411,3 +2411,45 @@ def test_without_products_the_plan_and_the_state_writes_are_those_of_the_code_wi
     without = story()
     assert with_feature == without
     assert "products:" not in with_feature[2] and "held" not in with_feature[1]
+
+
+def test_a_baseline_where_a_product_is_held_does_not_ask_for_its_objects(pipe, tmp_path, monkeypatch):
+    """sandbox was made by hand without the objects of the product balance, which stays in dev: the
+    baseline of sandbox records the shared objects and does not report those of balance missing."""
+    monkeypatch.chdir(tmp_path)  # baseline writes onboarding/<env>/ under the working directory
+    pipe.write("azsqlcd.toml", toml(table_model=False))
+    pipe.push("a repository with no object file")
+    pipe.write_objects(SALES, CUSTOMER, ORDER, BALANCE)
+    pipe.write(*VIEW)
+    pipe.write(*BALANCE_VIEW)
+    pipe.write(chain.SUM_PATH, "azsqlcd-sum 1\nbaseline\n")
+    product(pipe, "dev")
+    onboard = pipe.merge("onboard the sales database and the product balance")
+
+    def statements(*objects: Schema | Table) -> list[str]:
+        texts = [emit.emit_object_file(obj) for obj in objects]
+        parts = [part for text in texts for part in text.replace("\nGO\n", "\n").split(";\n")]
+        return [part.strip() + ";" for part in parts if part.strip() not in ("", "GO")]
+
+    shared = [*statements(SALES, CUSTOMER, ORDER), VIEW[1].replace("CREATE OR ALTER", "CREATE")]
+    dev, sandbox = pipe.database("dev"), pipe.database("sandbox")
+    dev.out_of_band(*shared, *statements(BALANCE), BALANCE_VIEW[1].replace("CREATE OR ALTER", "CREATE"))
+    sandbox.out_of_band(*shared)
+
+    report = pipe.baseline(onboard, "sandbox", report_only=True)
+    assert report.code == 0, report.err
+    assert "vw_Balance" not in report.out and "[sales].[Balance]" not in report.out
+    recorded = pipe.baseline(onboard, "sandbox")
+    assert recorded.code == 0, recorded.err
+    assert [key for key, _ in rows(sandbox, *names.KINDS)] == sorted(
+        ["SCHEMA:[sales]", "TABLE:[sales].[Customer]", "TABLE:[sales].[Order]", VIEW_KEY]
+    )
+    done = pipe.promote(onboard, "sandbox")
+    assert done.code == 0, done.err
+    assert sandbox.ddl == [] and pipe.drift(onboard, "sandbox").code == 0
+
+    # dev holds the product: its objects are compared and recorded there
+    assert pipe.baseline(onboard, "dev").code == 0
+    assert BALANCE_VIEW_KEY in dict(rows(dev, "VIEW")) and "TABLE:[sales].[Balance]" in dict(
+        rows(dev, "TABLE")
+    )

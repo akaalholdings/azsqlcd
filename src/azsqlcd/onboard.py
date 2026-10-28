@@ -31,7 +31,19 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from azsqlcd import catalog, catalog_tables, lint, modules, names, plan, runner, set_aside, state, tables
+from azsqlcd import (
+    catalog,
+    catalog_tables,
+    lint,
+    modules,
+    names,
+    plan,
+    products,
+    runner,
+    set_aside,
+    state,
+    tables,
+)
 from azsqlcd.config import Config, Scope, in_scope, out_of_scope, resolve_target
 from azsqlcd.errors import ToolError, refused
 from azsqlcd.model import fold
@@ -1045,6 +1057,7 @@ def baseline(
         recorded = _bound_state(session, config, env)
         baselined = schema is None and any(step.kind == "baseline" for step in recorded.steps)
         held = _held(recorded) if schema is not None else frozenset()
+        held |= _absent_held(session, bundle, config, env, scope, table_hooks)
         compared = _compare(session, bundle.files, env, scope, held)
         return result(compared, baselined, None, _compare_tables(session, bundle, table_hooks, scope, held))
 
@@ -1060,6 +1073,7 @@ def baseline(
         tables_only = schema is None and baselined and table_hooks is not None and not table_rows
         # baseline --schema: only what has no managed row of its own is compared and recorded
         held = _held(recorded) if schema is not None else frozenset()
+        held |= _absent_held(session, bundle, config, env, scope, table_hooks)
         if schema is not None:
             missing = _model_keys(table_hooks, scope, held) if table_hooks else []
             files = plan.module_files(bundle.files)
@@ -1166,6 +1180,37 @@ def _held(recorded: State) -> frozenset[str]:
     """Case-folded keys of the managed rows. A row that the deploy marked when its object left
     [scope] has the status dropped: such an object is compared again when it comes back."""
     return frozenset(fold(key) for key, row in recorded.objects.items() if row.status == "managed")
+
+
+def _absent_held(
+    session: Session,
+    bundle: Bundle,
+    config: Config,
+    env: str,
+    scope: Scope | None,
+    hooks: tables.Hooks | None,
+) -> frozenset[str]:
+    """Case-folded keys of the objects of the products that are held in env ([products]) and that
+    this database does not hold. They are not expected here: baseline neither compares nor records
+    them. A held object that the database holds is compared and recorded as any other. No batch is
+    sent without [products]."""
+    hold = products.hold(config, env, bundle.files) if config.products else None
+    if hold is None:
+        return frozenset()
+    keys = [*plan.module_files(bundle.files), *(hooks.model if hooks is not None else ())]
+    held = [key for key in keys if hold.holds(key) is not None]
+    if not held:
+        return frozenset()
+    live = {
+        (found.schema.casefold(), found.name.casefold())
+        for found in catalog.list_user_objects(session, scope)
+    }
+    absent: set[str] = set()
+    for key in held:
+        _, schema, name = names.parse_object_key(key)
+        if (str(schema).casefold(), name.casefold()) not in live:
+            absent.add(fold(key))
+    return frozenset(absent)
 
 
 def _schema_scope(config: Config, schema: str) -> Scope:
