@@ -455,15 +455,6 @@ def scoped_state(recorded: State, scope: Scope | None) -> State:
     )
 
 
-def _row_in_scope(scope: Scope | None, key: str, row: ObjectRow) -> bool:
-    """The object of the row is in the scope. With [env.<name>] not_managed a DML trigger follows
-    its table (the recorded parent), as a capture does (catalog.capture_in_scope). Without it: the
-    key only, as before."""
-    if scope is not None and scope.not_managed:
-        return catalog.capture_in_scope(scope, key, row.capture)
-    return in_scope(scope, key)
-
-
 def left_scope(recorded: State, scope: Scope | None) -> list[str]:
     """Keys of the managed rows of objects that [scope] does not manage, in key order.
 
