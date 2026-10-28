@@ -174,3 +174,75 @@ def test_a_park_is_in_force_until_its_migration_is_applied_or_withdrawn():
     assert set_aside.in_force(found, (applied,), files) == ()
     withdrawn = {chain.SUM_PATH: chain_line.replace(" tx", " tx withdrawn").encode()}
     assert set_aside.in_force(found, (), withdrawn) == ()
+
+
+# ------------------------------------------------------------------ review: renames and one-part names
+RENAMED = migration(
+    "0003__order_reference.sql", "EXEC sys.sp_rename N'[sales].[Order].[Reference]', N'Ref', N'COLUMN';"
+)
+PARKED_RENAME = set_aside.SetAside(RENAMED.file, set_aside.PARKED, "run 4, BATCH_FAILED")
+
+
+def test_a_parked_column_rename_touches_its_table_also_without_the_model():
+    """The names of sp_rename are in string literals: the token scan of the text does not see them.
+    The rename statement says its table, so a change of that table and a module that names it wait."""
+    note = migration("0004__order_note.sql", "ALTER TABLE [sales].[Order] ADD [Note] nvarchar(200) NULL;")
+    finder = read_module(
+        "schema/procedures/sales.usp_FindOrder.sql",
+        b"CREATE OR ALTER PROCEDURE [sales].[usp_FindOrder] AS\nSELECT [OrderId] FROM [sales].[Order];\n",
+    )
+
+    for pending, sent in (((note,), ()), ((), (finder,))):
+        with pytest.raises(ToolError) as e:
+            set_aside.check(pending, ((PARKED_RENAME, RENAMED),), sent)
+        assert (e.value.reason_code, e.value.detail["object"]) == ("SET_ASIDE_DEPENDENCY", "[sales].[order]")
+
+
+def test_a_parked_table_rename_touches_the_old_and_the_new_name():
+    renamed = migration(
+        "0003__order_rename.sql", "EXEC sys.sp_rename N'[sales].[Order]', N'Orders', N'OBJECT';"
+    )
+    found = set_aside.footprint(renamed)
+    assert {("sales", "order"), ("sales", "orders")} <= found.touched
+
+
+def test_with_the_model_a_parked_rename_also_touches_the_tables_with_a_key_to_it():
+    from azsqlcd.model import Model
+    from azsqlcd.parse import parse_object_file
+
+    tables = (
+        (
+            "Order",
+            "CREATE TABLE [sales].[Order] ([OrderId] int NOT NULL, [Reference] nvarchar(50) NULL, "
+            "CONSTRAINT [PK_Order] PRIMARY KEY CLUSTERED ([OrderId]));\n",
+        ),
+        (
+            "Line",
+            "CREATE TABLE [sales].[Line] ([LineId] int NOT NULL, [OrderId] int NOT NULL, "
+            "CONSTRAINT [PK_Line] PRIMARY KEY CLUSTERED ([LineId]), CONSTRAINT [FK_Line_Order] "
+            "FOREIGN KEY ([OrderId]) REFERENCES [sales].[Order] ([OrderId]));\n",
+        ),
+    )
+    model = Model(
+        [obj for name, text in tables for obj in parse_object_file(text, f"schema/tables/sales.{name}.sql")]
+    )
+    renamed = migration(
+        "0003__order_id.sql", "EXEC sys.sp_rename N'[sales].[Order].[OrderId]', N'Id', N'COLUMN';"
+    )
+
+    assert set_aside.footprint(renamed, model).touched == {("sales", "order"), ("sales", "line")}
+    assert set_aside.footprint(renamed, model).unproven == ()
+
+
+def test_a_module_that_names_a_set_aside_table_without_its_schema_is_refused():
+    """A one-part name is dbo, as for the dependency scan of modules (A17)."""
+    orders = migration("0003__orders_rank.sql", "ALTER TABLE [dbo].[Orders] ADD [Rank] tinyint NOT NULL;")
+    aside = set_aside.SetAside(orders.file, set_aside.PARKED, "run 4, BATCH_FAILED")
+    view = read_module(
+        "schema/views/dbo.vw_Orders.sql",
+        b"CREATE OR ALTER VIEW [dbo].[vw_Orders] AS\nSELECT [OrderId] FROM Orders;\n",
+    )
+
+    with pytest.raises(ToolError) as e:
+        set_aside.check((), ((aside, orders),), (view,))
+    assert (e.value.reason_code, e.value.detail["object"]) == ("SET_ASIDE_DEPENDENCY", "[dbo].[orders]")

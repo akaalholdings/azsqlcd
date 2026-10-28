@@ -26,6 +26,7 @@ from azsqlcd import chain, diff, modules, names, state
 from azsqlcd.chain import Migration
 from azsqlcd.config import Config
 from azsqlcd.errors import ToolError, refused
+from azsqlcd.model import Model, Rename
 from azsqlcd.modules import ModuleFile
 from azsqlcd.parse import ParseError, parse_statement
 from azsqlcd.session import Session
@@ -140,30 +141,52 @@ class Footprint:
     unproven: tuple[str, ...]  # the kinds of the batches whose touched objects are their names
 
 
-def footprint(migration: Migration) -> Footprint:
+def _model_touched(text: str, model: Model | None) -> tuple[list[tuple[str, str]], bool] | None:
+    """(the (schema, name) of what a model batch changes, proven); None when the batch does not parse.
+    A rename that diff.touched_objects cannot follow (no model, or a constraint that the model does not
+    hold) changes what its statement names: the names are in string literals, which no token scan
+    reads. It is not proven: a table with a key to the renamed one is not in the list."""
+    try:
+        op = parse_statement(text)
+    except ParseError:
+        return None
+    try:
+        keys = diff.touched_objects([op], model)
+    except ValueError:
+        if not isinstance(op, Rename):
+            return None
+        schema, old = op.old[0], op.old[1]
+        return [(schema, old)] + ([] if op.kind in ("column", "index") else [(schema, op.new_name)]), False
+    found: list[tuple[str, str]] = []
+    for key in keys:
+        _, schema, name = names.parse_object_key(key)
+        if schema is not None:  # a schema key names no object of a schema
+            found.append((schema, name))
+    return found, True
+
+
+def footprint(migration: Migration, model: Model | None = None) -> Footprint:
     """What a migration touches and names. A model batch touches what its operation changes
-    (diff.touched_objects); a data or raw batch, and a model batch whose operation cannot be
-    followed without the model (a rename), touch every object that their text names."""
+    (diff.touched_objects; a rename with model, the head model of the release, also touches the
+    tables with a key to what it renames); a data or raw batch touches every object that its text
+    names."""
     touched: set[tuple[str, str]] = set()
     named: set[tuple[str, str]] = set()
     unproven: list[str] = []
     for batch in migration.batches:
         found = modules.named_objects(batch.text)
         named |= found
-        keys: list[str] | None = None
-        if batch.kind == "model":
-            try:
-                keys = diff.touched_objects([parse_statement(batch.text)])
-            except (ParseError, ValueError):
-                keys = None
-        if keys is None:
+        changed = _model_touched(batch.text, model) if batch.kind == "model" else None
+        if changed is None:
             touched |= found
             unproven.append(batch.kind)
             continue
-        for key in keys:
-            _, schema, name = names.parse_object_key(key)
-            if schema is not None:  # a schema key names no object of a schema
-                touched.add((schema.casefold(), name.casefold()))
+        keys, proven = changed
+        folded = {(schema.casefold(), name.casefold()) for schema, name in keys}
+        touched |= folded
+        named |= folded
+        if not proven:
+            unproven.append(batch.kind)
     return Footprint(frozenset(touched), frozenset(named), tuple(unproven))
 
 
@@ -186,23 +209,25 @@ def check(
     pending: Sequence[Migration],
     aside: Sequence[tuple[SetAside, Migration]],
     sent_modules: Collection[ModuleFile],
+    model: Model | None = None,
 ) -> list[str]:
     """Refuse (SET_ASIDE_DEPENDENCY) a pending migration W or a module to send that is not
     independent of a set-aside migration A. W is independent when it touches nothing that A
     touches or names, and names nothing that A touches. A module is independent when its text
-    (the dependency scan of modules) names nothing that A touches. Returns the plan notes of the
-    batches whose touched objects are only their names."""
-    feet = {migration.file: footprint(migration) for migration in pending}
+    names nothing that A touches, as the dependency scan of modules reads it (a one-part name is
+    dbo, A17). model: the head model of the release, when tables are modelled. Returns the plan
+    notes of the batches whose touched objects are not proven."""
+    feet = {migration.file: footprint(migration, model) for migration in pending}
     notes: dict[str, None] = {}
     for item, migration in aside:
-        mine = footprint(migration)
+        mine = footprint(migration, model)
         for other in pending:
             theirs = feet[other.file]
             shared = (theirs.touched & (mine.touched | mine.named)) | (theirs.named & mine.touched)
             if shared:
                 raise _dependency(other.file, item, min(shared))
         for module in sorted(sent_modules, key=lambda m: m.key):
-            shared = modules.named_objects(module.text) & mine.touched
+            shared = modules.referenced_objects(module.text) & mine.touched
             if shared:
                 raise _dependency(module.key, item, min(shared))
         for kind in mine.unproven:

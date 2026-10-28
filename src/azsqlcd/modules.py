@@ -391,6 +391,12 @@ def named_objects(text: str) -> set[tuple[str, str]]:
     return {_fold(name) for name, qualified in _names(text) if qualified}
 
 
+def referenced_objects(text: str) -> set[tuple[str, str]]:
+    """Every (schema, name) that the dependency scan of modules reads in a piece of SQL, case-folded:
+    the names of named_objects, and a one-part name as an object of dbo (A17)."""
+    return {_fold(name) for name, _ in _names(text)}
+
+
 def scan_references(module: ModuleFile, known_keys: Collection[str]) -> set[str]:
     """Keys of known_keys that the module text names. A token scan, not a parse.
 
