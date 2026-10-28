@@ -637,13 +637,14 @@ plan stops with `BASELINE_REQUIRED` and names `azsqlcd baseline --schema <schema
 that object and nothing else.
 
 To stop managing a schema, move it from `schemas` to `exclude` and delete its files in one pull
-request: no migration and no tombstone are needed, and the tool drops nothing (`PRF000`, no
-`TMB001`). The first deploy of that release marks the managed rows of its objects with the status
-`dropped` (a unit of work with one `unscope:<key>` step for each, state writes only): the rows say
-"no longer managed", the objects stay as they are. When the schema comes back into the scope, its
-objects have no managed row: `verify` gives `PRF000`, the plan stops with `BASELINE_REQUIRED`, and
-`azsqlcd baseline --schema <schema>` compares each object with its file again and records it,
-which replaces the old row; an object that differs from its file refuses the baseline.
+request: no migration and no tombstone are needed, and the tool drops nothing (`verify` gives no
+`PRF000` and no `TMB001`). The first deploy of that release marks the managed rows of its objects
+with the status `dropped` (a unit of work with one `unscope:<key>` step for each, state writes
+only): the rows say "no longer managed", the objects stay as they are. When the schema comes back
+into the scope, its objects have no managed row: `verify` gives `PRF000`, the plan stops with
+`BASELINE_REQUIRED`, and `azsqlcd baseline --schema <schema>` compares each object with its file
+again and records it, which replaces the old row; an object that differs from its file refuses the
+baseline.
 
 A managed table with a foreign key to a table that leaves the scope fails `verify` (`MDL001`: the
 referenced table has no file) until the pull request drops the foreign key or keeps the table in

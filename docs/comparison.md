@@ -79,9 +79,10 @@ the database of what ran.
 - **The proof is on models in memory.** It does not show that the engine accepts a statement.
 - **Users, roles and permissions** are out of scope (decision D7).
 - **Not built**: undo migrations, the creation of a full schema in an empty database from the
-  object files (`init`), the alignment of an environment that differs (`align`), Azure DevOps
-  pipelines, a desktop or editor tool, style and naming rules in lint, sign-in to the database
+  object files (`init`), Azure DevOps pipelines, a desktop or editor tool, style and naming rules in lint, sign-in to the database
   by another way than the token of the Azure CLI login.
+- **`align` only writes a script.** `azsqlcd align` writes `onboarding/<env>/align.sql` and
+  `align.md`. It never runs the script: a DBA runs it by hand, with no run row.
 - **No emergency path.** No stage can be skipped: a broken lower environment blocks a fix for
   prod (`docs/known-gaps.md`, sections 4 and 6). A failed non-transactional migration needs
   `resolve` by a person (`docs/runbook.md`).

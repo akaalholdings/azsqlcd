@@ -15,10 +15,15 @@ number and date. Version numbers follow semantic versioning.
   of the repository, and prints what to add to `[scope] schemas`. `baseline --schema NAME` compares
   and records the objects of one schema that have no managed row; the other rows stay as they are.
   The workflow `onboard.yml` takes the input `schema` for both.
-- Reason codes 22 `OUT_OF_SCOPE` (`export --schema`, `baseline --schema` and
+- Reason codes 22 `OUT_OF_SCOPE` (`export --schema`, `baseline --schema`, `align --schema` and
   `resolve --adopt-module` outside the scope) and 22 `SCHEMA_NOT_FOUND` (`export --schema` of a
   schema that the database does not have). Lint and verify finding `OUT_OF_SCOPE`: an object file,
-  or a trigger file on a table, outside `[scope]`.
+  a trigger file on a table, or a `[[drop]]` of `schema/_tombstones.toml`, outside `[scope]`.
+- Reason code 22 `STALE_MANAGED_ROW`: `plan` and `deploy` refuse, before any statement, a target
+  that did not deploy the release in which a schema left `[scope]`, when a later release brings an
+  object of that schema back with a changed file.
+- Plan note `TOMBSTONE_UNMANAGED`: the release has a tombstone for an object of `[scope]` that the
+  database has and that has no managed row. The deploy does not drop it.
 - Finding `SCHEMA_UNSCOPED`: a plan note and a drift line (class `unscoped`) for a schema in
   neither list of `[scope]`. It never changes an exit code.
 - `azsqlcd align --root DIR --env E --target T [--schema S] [--out DIR]` (A38). It is read-only
