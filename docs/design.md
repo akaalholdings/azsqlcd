@@ -760,6 +760,9 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   that no pending migration changes, that has no drift and that no withdrawn migration that ran
   here changed; one that differs refuses the plan before any statement (`STALE_MANAGED_ROW`,
   review V2).
+- The proof of a replacement (`replaces=`) compares the two models for the objects of the head
+  scope only, and refuses a statement of the replacement on an object outside it (`WDR002`, review
+  V3).
 - Under a scope, `NAME_COLLISION` of modules that the database has with the kind of their file,
   and the table `BASELINE_REQUIRED`, are `BASELINE_REQUIRED` that names `azsqlcd baseline --schema`.
 - Export and baseline of one schema: `onboard.export(..., schema)` and `onboard.baseline(...,

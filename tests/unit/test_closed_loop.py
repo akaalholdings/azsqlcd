@@ -1336,6 +1336,52 @@ def test_a_target_that_skipped_the_release_in_which_a_schema_left_is_refused_bef
     assert (again.code, again.reason) == (22, "BASELINE_REQUIRED")
 
 
+def test_a_replacement_after_a_schema_left_the_scope_proves_and_sends_nothing_for_that_schema(project):
+    """Review V3: the proof of a replacement compared dbo.Rates, which left the scope, so verify
+    asked for the dbo statement, and the deploy of that statement failed on every target that had
+    not run the withdrawn migration (READBACK_MISMATCH)."""
+    project.write_objects(SALES, CUSTOMER, ORDER, RATES)
+    first = project.release("create", "create_all")
+    dev, prod = deployed(project, first), deployed(project, first)
+    project.write_objects(ORDER_2, RATES_WIDE)
+    second = project.release("order note", "order_note")
+    assert "ALTER TABLE [dbo].[Rates] ADD [Name] nvarchar(50) NULL;" in "".join(second.batches)
+    assert project.deploy(second, dev).code == 0  # prod never runs it
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    (project.repo / names.path_for("TABLE", "dbo", "Rates")).unlink()
+    assert project.deploy(project.release("dbo leaves the scope"), dev).code == 0
+
+    # the pull request withdraws 0002 and replaces it with its statements on sales only
+    old = (project.repo / "migrations/0002__order_note.sql").read_text().split("\n", 2)[2]
+    dbo = "ALTER TABLE [dbo].[Rates] ADD [Name] nvarchar(50) NULL;\nGO\n"
+    edge = "-- azsqlcd:allow REPLACEMENT_EDGE 0002__order_note.sql reason: same statements\n"
+    head = "-- azsqlcd:migration 0003__order_note_v2\n-- azsqlcd:mode tx\n" + edge
+    lines = (project.repo / chain.SUM_PATH).read_text().splitlines()
+    lines = [line + " withdrawn" if "order_note" in line else line for line in lines]
+    lines.append(f"0003__order_note_v2.sql sha256:{'0' * 64} tx replaces=0002__order_note.sql")
+    project.write(chain.SUM_PATH, "\n".join(lines) + "\n")
+    root = ["--root", str(project.repo)]
+
+    # with the statement on dbo: refused, as a new migration on an object outside the scope is
+    project.write("migrations/0003__order_note_v2.sql", head + old)
+    assert project.tool("gen", "--base", project.main, "--resum", *root).code == 0
+    verified = project.tool("verify", *root, "--base", project.main)
+    assert verified.code == 22 and "WDR002" in verified.out and "TABLE:[dbo].[Rates]" in verified.out
+    assert "[scope]" in verified.out
+
+    project.write("migrations/0003__order_note_v2.sql", head + old.replace(dbo, ""))
+    assert project.tool("gen", "--base", project.main, "--resum", *root).code == 0
+    replaced = project.release("replace order_note on sales only")  # verify: 0, was WDR002
+    sent = len(prod.ddl)
+
+    done = project.deploy(replaced, prod)
+
+    assert done.code == 0, done.err
+    assert prod.ddl[sent:] and "[dbo]" not in "".join(prod.ddl[sent:])
+    assert [column.name for column in prod.table(("dbo", "Rates")).columns] == ["Code"]
+    assert project.deploy(replaced, dev).code == 0
+
+
 REPORTING = ("schema/schemas/reporting.sql", "CREATE SCHEMA [reporting];\n")
 REPORT_REFS = (
     "schema/views/reporting.vw_Refs.sql",

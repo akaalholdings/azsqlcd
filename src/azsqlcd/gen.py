@@ -1601,8 +1601,12 @@ def _replacement_findings(
     entry: chain.ChainEntry,
     migration: chain.Migration,
     changed: Sequence[str],
+    scope: config.Scope | None,
 ) -> list[Finding]:
-    """Design (b) proof step 6 for one replacement: WDR001, WDR002, WDR003."""
+    """Design (b) proof step 6 for one replacement: WDR001, WDR002, WDR003.
+
+    The two models are compared as the head scope sees them (review V3): an object that left
+    [scope] after the withdrawn migration is not managed, so the replacement must not touch it."""
     assert entry.replaces is not None
     path = f"migrations/{entry.file}"
     out: list[Finding] = []
@@ -1632,10 +1636,25 @@ def _replacement_findings(
     except (ToolError, _NoProof) as e:
         message = f"the model before {entry.replaces} cannot be read, so nothing is proven: {e}"
         return [*out, Finding("WDR002", ERROR, path, 1, message)]
+    try:
+        outside = sorted(
+            key
+            for key in diff.touched_objects([step.op for step in steps], before)
+            if not config.in_scope(scope, key)
+        )
+    except ValueError:  # a rename that cannot be followed: PRF006 reports it
+        outside = []
+    for key in outside:
+        message = (
+            f"{key}: this replacement changes it, and [scope] of {release.CONFIG_PATH} does not manage it. "
+            "Take the statement out: a database that did not run the withdrawn migration must not get it"
+        )
+        out.append(Finding("WDR002", ERROR, path, 1, message))
     old, found = _replay(before, old_steps, f"migrations/{entry.replaces}", "WDR002")
     new, more = _replay(before, steps, path, "WDR002", check_allows=entry.mode)
     out += [*found, *more]
     if old is not None and new is not None:
+        old, new = (Model([obj for obj in m.values() if config.in_scope(scope, obj.key)]) for m in (old, new))
         for key, prop in old.diff_paths(new):
             what = {
                 ABSENT_IN_SELF: f"only this migration leaves it; {entry.replaces} does not",
@@ -1758,7 +1777,7 @@ def _prove(
             p for p in paths if _kind(p) in names.TABLE_CLASS_KINDS and base_files.get(p) != head_files.get(p)
         ]
         for entry, migration in replacements:
-            out += _replacement_findings(root, main_ref, entry, migration, changed)
+            out += _replacement_findings(root, main_ref, entry, migration, changed, cfg.scope)
     return out
 
 
