@@ -1,4 +1,5 @@
 CREATE TABLE [sales].[A] (
     [Id] int NOT NULL,
+    [X] int NOT NULL,
     CONSTRAINT [PK_A] PRIMARY KEY CLUSTERED ([Id]) WITH (DATA_COMPRESSION = PAGE)
 );
