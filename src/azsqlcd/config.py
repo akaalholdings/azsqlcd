@@ -116,9 +116,14 @@ class Scope:
         return self.every_schema or fold(schema) in {fold(name) for name in (*self.schemas, *self.exclude)}
 
     def pattern_of(self, schema: str, name: str) -> str | None:
-        """The first pattern of exclude_objects that 'schema.name' matches; None when none does."""
-        text = fold(f"{schema}.{name}")
-        return next((p for p in self.exclude_objects if _pattern(p).fullmatch(text)), None)
+        """The first pattern of exclude_objects that 'schema.name' matches; None when none does. A
+        pattern is split at its first dot, and each part matches its own name."""
+
+        def matches(pattern: str) -> bool:
+            owner, _, rest = pattern.partition(".")
+            return bool(_pattern(owner).fullmatch(fold(schema)) and _pattern(rest).fullmatch(fold(name)))
+
+        return next((p for p in self.exclude_objects if matches(p)), None)
 
     def only(self, schema: str) -> Scope:
         """This scope cut to one schema: the read of `export --schema` and `baseline --schema`."""

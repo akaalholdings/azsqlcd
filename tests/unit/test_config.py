@@ -670,6 +670,16 @@ def test_a_question_mark_is_one_character_and_a_pattern_can_hold_wildcards_in_th
     assert not in_scope(scope, "TABLE:[etl].[stage[1]]]") and in_scope(scope, "TABLE:[etl].[stage1]")
 
 
+def test_a_pattern_is_split_at_its_first_dot_and_each_part_matches_its_own_name():
+    """Review minor 8: 'a.b.*' matched [a.b].[c] too, as the text 'a.b.c' does; setup.md says that
+    the pattern is the schema 'a' and the name 'b.*'."""
+    scope = Scope(("a", "a.b"), (), ("a.b.*",))
+    assert not in_scope(scope, "TABLE:[a].[b.c]")
+    assert in_scope(scope, "TABLE:[a.b].[c]")
+    wild = Scope(("*",), (), ("*.tmp?",))
+    assert in_scope(wild, "TABLE:[sales].[x.tmp1]")  # a wildcard of the schema part takes no dot of a name
+
+
 def test_a_scope_cut_to_one_schema_keeps_the_patterns_and_drops_the_lists():
     scope = load_config(VALID + SCOPE).scope
     assert scope is not None
