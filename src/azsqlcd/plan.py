@@ -1709,8 +1709,8 @@ def compute_plan(
     pre_broken: tuple[str, ...] = ()
     dependants: tuple[str, ...] = ()
     dependant_findings: dict[str, tuple[str, ...]] = {}
-    # A35: a release that changes modules only refreshes and checks the dependants of those modules
-    if table_hooks is not None and (work.pending or (work.module_changes and units)):
+    # A35: a release that changes or drops modules only refreshes and checks the dependants of them
+    if table_hooks is not None and (work.pending or ((work.module_changes or work.drops) and units)):
         # A partition scheme is a prerequisite that a DBA owns: no model statement creates one.
         # Without it the unit would fail at the statement that names it, after the batches before it
         missing = [

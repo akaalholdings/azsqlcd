@@ -399,6 +399,12 @@ def _bound_chain(session: Session, module: str) -> str:
     return f" (schema-bound chain: {'; '.join(chains)})" if chains else ""
 
 
+def _changed_modules(work: Work) -> list[str]:
+    """The module roots of the dependant search (A35): the modules that the release changes or drops.
+    The plan reads before the drop, so the name of a dropped module still resolves."""
+    return [*(change.key for change in work.module_changes), *work.drops]
+
+
 # ------------------------------------------------------------------ hooks
 class Hooks:
     """plan.TableHooks and runner.TableHooks for one release with table_model = true.
@@ -685,7 +691,7 @@ class Hooks:
         tables = [key for key in self.touched_table_objects(work) if key.startswith("TABLE:")]
         broken: list[str] = []
         refresh: list[str] = []
-        closure = catalog.dependant_closure(session, tables, [change.key for change in work.module_changes])
+        closure = catalog.dependant_closure(session, tables, _changed_modules(work))
         for dependant in closure.dependants:
             row = managed.get(fold(dependant.key))
             if row is None or fold(dependant.key) in changed:
@@ -720,7 +726,7 @@ class Hooks:
         tables = {fold(key): key for key in self.touched_table_objects(work) if key.startswith("TABLE:")}
         for target in self._targets(work):  # the name before a rename, whatever the model holds
             tables.setdefault(fold(target.table_key), target.table_key)
-        changed = [change.key for change in work.module_changes]
+        changed = _changed_modules(work)
         if not tables and not changed:
             return [], ()
         managed = {fold(key): key for key in self._managed(recorded)}

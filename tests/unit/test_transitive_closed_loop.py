@@ -11,8 +11,11 @@ import pytest
 
 from azsqlcd import names
 from unit.test_closed_loop import (
+    FUNCTION,
     ORDER_NO_REFERENCE,
     ORDER_WIDE,
+    PROCEDURE,
+    PROCEDURE_KEY,
     TOML,
     VIEW,
     VIEW_KEY,
@@ -158,3 +161,49 @@ def test_a_schema_bound_blocker_shows_the_whole_schema_bound_chain(project):
         f"{view('vw_Bound')} is schema-bound to [sales].[Order].[Reference] and is not managed "
         f"(schema-bound chain: {view('vw_BoundTop')} -> {view('vw_Bound')})"
     ) in plan.err
+
+
+TOMBSTONE = '[[drop]]\nobject = "{}"\nreason = "gone"\n'
+
+
+def dropping_the_view(project):
+    """Release 1 with vw_OpenRefs deployed, the procedure on vw_OpenOrders tombstoned, then a release
+    that tombstones vw_OpenOrders too. vw_OpenRefs still selects from it."""
+    _, db = with_open_refs(project)
+    (project.repo / PROCEDURE[0]).unlink()
+    project.write("schema/_tombstones.toml", TOMBSTONE.format(PROCEDURE_KEY))
+    assert project.deploy(project.release("the procedure is gone"), db).code == 0
+    (project.repo / VIEW[0]).unlink()
+    project.write("schema/_tombstones.toml", TOMBSTONE.format(PROCEDURE_KEY) + TOMBSTONE.format(VIEW_KEY))
+    return db
+
+
+def test_a_release_that_drops_a_view_with_a_managed_view_on_it_fails_the_deploy(project):
+    """Before the fix the drop of a module was no root of the search: the plan listed no dependant,
+    and the deploy ended ok with vw_OpenRefs left broken."""
+    db = dropping_the_view(project)
+    before = (dict(db.modules), db.rows("object"))
+    dropping = project.release("drop the view in the middle")
+
+    plan = project.tool("plan", *dropping.where, "--out", str(project.out("plan")), db=db)
+
+    assert plan.code == 0, plan.err
+    assert f"dependant to check: {OPEN_REFS_KEY} (findings before the change: none)" in plan.out
+    assert f"refresh refresh:{OPEN_REFS_KEY}" in plan.out
+    failed = project.deploy(dropping, db)
+    assert (failed.code, failed.reason) == (21, "DEPENDANT_BROKEN"), failed.err
+    assert "ERROR_208" in failed.err
+    assert project.report()["failed_step"] == f"refresh:{OPEN_REFS_KEY}"
+    assert (db.modules, db.rows("object")) == before
+
+
+def test_a_release_that_drops_a_view_and_changes_another_module_checks_the_views_on_the_dropped_one(project):
+    db = dropping_the_view(project)
+    project.write(FUNCTION[0], FUNCTION[1].replace("[Status] = 0", "[Status] = 1"))
+    before = (dict(db.modules), db.rows("object"))
+
+    failed = project.deploy(project.release("drop the view and change the function"), db)
+
+    assert (failed.code, failed.reason) == (21, "DEPENDANT_BROKEN"), failed.err
+    assert project.report()["failed_step"] == f"refresh:{OPEN_REFS_KEY}"
+    assert (db.modules, db.rows("object")) == before
