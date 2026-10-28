@@ -570,7 +570,8 @@ that is not a partitioning column; a nonclustered key or index that changes its 
 and a create; a compression change of a partitioned heap, as
 `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)`; a change of only the
 compression of the clustered key or index, as the same statement (one rebuild of the table, on any
-table; without `PARTITION = ALL` on a table that is not partitioned). The allow lines are those
+table; without `PARTITION = ALL` on a table that is not partitioned; `COLUMNSTORE` or
+`COLUMNSTORE_ARCHIVE` for a clustered columnstore index). The allow lines are those
 of the same statement on any table: `LONG_LOCK` for an index build, a key build, a rebuild and the
 drop of the clustered index or key (the table becomes a heap) on a table that exists.
 

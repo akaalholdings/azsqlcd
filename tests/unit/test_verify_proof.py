@@ -644,6 +644,43 @@ def test_a_nonclustered_columnstore_index_that_is_not_aligned_with_its_table_is_
     assert "index [NCCI_OrderLine]" in the(found, "PRF001").message
 
 
+NOTE = "schema/tables/sales.Note.sql"
+NOTE_TABLE = (
+    "CREATE TABLE [sales].[Note] (\n    [NoteId] int NOT NULL,\n"
+    "    CONSTRAINT [PK_Note] PRIMARY KEY CLUSTERED ([NoteId]){}\n);\n"
+)
+
+
+@pytest.mark.parametrize("stated", [" WITH (DATA_COMPRESSION = NONE)", ""])
+def test_a_hand_written_rebuild_to_no_compression_proves_a_file_that_states_none_or_nothing(
+    tmp_path: Path, stated: str
+):
+    """The two spellings are one state of the key. The hint of COMPRESSION_INHERITED tells the author
+    to write DATA_COMPRESSION = NONE, so that file must be proven by the rebuild too."""
+    repo = R.new_repo(tmp_path / "r", {**R.SALES, NOTE: NOTE_TABLE.format(" WITH (DATA_COMPRESSION = PAGE)")})
+    R.put(repo, {NOTE: NOTE_TABLE.format(stated)})
+    rebuild = "ALTER TABLE [sales].[Note] REBUILD WITH (DATA_COMPRESSION = NONE);\n"
+    R.put(repo, one("0001__x.sql", ALLOW_LOCK.format("[sales].[Note]") + rebuild))
+    assert errors(check(repo)) == []
+
+
+ARCHIVE = "schema/tables/sales.Archive.sql"
+ARCHIVE_TABLE = (
+    "CREATE TABLE [sales].[Archive] (\n    [ArchiveId] bigint NOT NULL\n);\nGO\n"
+    "CREATE CLUSTERED COLUMNSTORE INDEX [CCI_Archive] ON [sales].[Archive]{};\n"
+)
+
+
+@pytest.mark.parametrize("stated", ["\n    WITH (DATA_COMPRESSION = COLUMNSTORE)", ""])
+def test_a_hand_written_rebuild_of_a_clustered_columnstore_index_is_proven(tmp_path: Path, stated: str):
+    archive = "\n    WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE)"
+    repo = R.new_repo(tmp_path / "r", {**R.SALES, ARCHIVE: ARCHIVE_TABLE.format(archive)})
+    R.put(repo, {ARCHIVE: ARCHIVE_TABLE.format(stated)})
+    rebuild = "ALTER TABLE [sales].[Archive] REBUILD WITH (DATA_COMPRESSION = COLUMNSTORE);\n"
+    R.put(repo, one("0001__x.sql", ALLOW_LOCK.format("[sales].[Archive]") + rebuild))
+    assert errors(check(repo)) == []
+
+
 def test_a_table_file_of_a_partitioned_table_that_leaves_out_the_place_of_an_index_fails_nf000(
     tmp_path: Path,
 ):

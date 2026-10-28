@@ -1846,11 +1846,38 @@ def test_a_change_of_only_the_compression_of_the_clustered_key_is_one_rebuild_of
         assert written(page, base) == [
             f"ALTER TABLE [s].[Line] REBUILD{form} WITH (DATA_COMPRESSION = NONE);"
         ]
+        # DATA_COMPRESSION = NONE and no DATA_COMPRESSION are one state of the key
+        stated = model_of(SCHEMA, compressed(text, ", DATA_COMPRESSION = NONE"))
+        assert written(page, stated) == written(page, base)
+        assert written(base, stated) == written(stated, base) == []
         row = model_of(SCHEMA, compressed(text, ", DATA_COMPRESSION = ROW"))
         (rebuild,) = diff(page, row)
         assert emit_operation(rebuild).endswith(" WITH (DATA_COMPRESSION = ROW);")
         assert classify(rebuild, page) == ["LONG_LOCK"]
         assert touched_objects([rebuild]) == ["TABLE:[s].[Line]"]
+
+
+def test_a_compression_change_of_a_clustered_columnstore_index_is_one_rebuild_of_the_table():
+    """As for a rowstore key: a drop and a create write every row twice and leave a heap between them.
+    A file that states no compression means COLUMNSTORE."""
+    for on, form in ((ON_YEAR, " PARTITION = ALL"), ("", "")):
+
+        def cci(option: str, on: str = on, columns: str = LINE_COLUMNS) -> Model:
+            body = f", INDEX [CCI_Line] CLUSTERED COLUMNSTORE{option}{on}"
+            return model_of(SCHEMA, line(body, on, columns=columns))
+
+        plain, archive = cci(""), cci(" WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE)")
+        stated = cci(" WITH (DATA_COMPRESSION = COLUMNSTORE)")
+        rebuild = f"ALTER TABLE [s].[Line] REBUILD{form} WITH (DATA_COMPRESSION = {{}});"
+        assert written(plain, archive) == [rebuild.format("COLUMNSTORE_ARCHIVE")]
+        assert written(archive, plain) == written(archive, stated) == [rebuild.format("COLUMNSTORE")]
+        assert written(plain, stated) == []
+        (op,) = diff(plain, archive)
+        assert classify(op, plain) == ["LONG_LOCK"]
+        # the index holds every column: one that ALTER COLUMN changes keeps the drop and the create
+        wider = LINE_COLUMNS.replace("[Quantity] int", "[Quantity] bigint")
+        option = " WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE)"
+        assert written(plain, cci(option, columns=wider))[0] == "DROP INDEX [CCI_Line] ON [s].[Line];"
 
 
 def test_a_compression_change_of_a_clustered_key_whose_column_is_altered_stays_a_drop_and_a_create():
@@ -1865,19 +1892,25 @@ def test_a_compression_change_of_a_clustered_key_whose_column_is_altered_stays_a
     ]
 
 
-def test_any_other_change_of_the_clustered_key_and_a_head_that_states_none_are_still_a_drop_and_a_create():
+def test_any_other_change_of_the_options_of_the_clustered_key_is_still_a_drop_and_a_create():
     base = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = PAGE"))
-    drop = "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line];"
     # another option changes with the compression
     other = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = ROW").replace("= 90", "= 80"))
-    assert written(base, other)[0] == drop
-    # the replay of REBUILD ... NONE states no compression: a file that states NONE is the create
-    stated = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = NONE"))
-    assert written(base, stated) == [
-        drop,
-        "ALTER TABLE [s].[Line] ADD CONSTRAINT [PK_Line] PRIMARY KEY CLUSTERED ([OrderDate], [Id])"
-        " WITH (DATA_COMPRESSION = NONE, FILLFACTOR = 90);",
-    ]
+    assert written(base, other)[0] == "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line];"
+
+
+def test_a_foreign_key_on_a_clustered_key_that_gets_no_compression_stays():
+    """The rebuild keeps the key, so the foreign key on it is not dropped and added again, whether the
+    head file states DATA_COMPRESSION = NONE or no compression."""
+    fk = (
+        "CREATE TABLE [s].[Ref] ([Id] bigint NOT NULL, [OrderDate] date NOT NULL, CONSTRAINT [FK_Ref_Line] "
+        "FOREIGN KEY ([OrderDate], [Id]) REFERENCES [s].[Line] ([OrderDate], [Id]))"
+    )
+    base = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = PAGE"), fk)
+    for option in (", DATA_COMPRESSION = NONE", ""):
+        assert written(base, model_of(SCHEMA, compressed(PLAIN, option), fk)) == [
+            "ALTER TABLE [s].[Line] REBUILD WITH (DATA_COMPRESSION = NONE);"
+        ]
 
 
 def test_a_new_partitioned_table_is_created_on_its_scheme_and_its_clustered_index_is_built_in_place():

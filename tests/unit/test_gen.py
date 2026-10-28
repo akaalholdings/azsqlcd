@@ -797,6 +797,9 @@ def test_a_compression_change_of_the_clustered_index_or_key_is_one_rebuild_under
     ).text
     assert text is not None
     assert text.splitlines()[2:] == [
+        "-- azsqlcd:allow LONG_LOCK [sales].[FactShipment] reason: TODO",
+        "ALTER TABLE [sales].[FactShipment] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = COLUMNSTORE);",
+        "GO",
         "-- azsqlcd:allow LONG_LOCK [sales].[OrderLine] reason: TODO",
         "ALTER TABLE [sales].[OrderLine] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);",
         "GO",
@@ -811,6 +814,8 @@ def test_a_compression_change_of_the_clustered_index_or_key_is_one_rebuild_under
     assert "-- azsqlcd:allow LONG_LOCK [sales].[Customer] reason: TODO\n" in text
     assert "ALTER TABLE [sales].[Customer] REBUILD WITH (DATA_COMPRESSION = NONE);\n" in text
     assert "FK_Order_Customer" not in text  # the key stays, so its foreign key stays too
+    assert "ALTER TABLE [sales].[Note] REBUILD WITH (DATA_COMPRESSION = NONE);\n" in text
+    assert "ALTER TABLE [sales].[Archive] REBUILD WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE);\n" in text
 
 
 def test_the_drop_of_the_clustered_index_of_a_partitioned_table_is_written_under_long_lock(tmp_path: Path):

@@ -856,7 +856,16 @@ def test_rebuild_states_the_compression_and_keeps_how_it_runs_apart():
         rejected("ALTER TABLE [dbo].[T] REBUILD WITH (DATA_COMPRESSION = ROW, RESUMABLE = ON);").code
         == "SYNTAX"
     )
-    assert rejected("ALTER TABLE [dbo].[T] REBUILD WITH (DATA_COMPRESSION = COLUMNSTORE);").code == "SYNTAX"
+    # the compression of a table with a clustered columnstore index (the replay checks which table has one)
+    for value in ("COLUMNSTORE", "COLUMNSTORE_ARCHIVE"):
+        assert parse_statement(f"ALTER TABLE [dbo].[T] REBUILD WITH (DATA_COMPRESSION = {value});") == (
+            RebuildTable("dbo", "T", value)
+        )
+    assert rejected("ALTER TABLE [dbo].[T] REBUILD WITH (DATA_COMPRESSION = LZ4);").code == "SYNTAX"
+    # CREATE TABLE ... WITH states the compression of a heap only
+    assert rejected("CREATE TABLE [dbo].[T] ([a] int NULL) WITH (DATA_COMPRESSION = COLUMNSTORE);").code == (
+        "SYNTAX"
+    )
 
 
 def test_a_columnstore_index_keeps_its_list_order_filter_and_options_apart():

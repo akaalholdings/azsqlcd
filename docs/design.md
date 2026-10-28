@@ -695,10 +695,12 @@ code is now, where it differs from the text above:
   `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)`.
 - `gen` (`diff.py`) writes each key and index with the `ON` clause of the head revision, and
   `REBUILD PARTITION = ALL` for a compression change of a partitioned heap. A change of only
-  `DATA_COMPRESSION` of a clustered rowstore key or index is one `ALTER TABLE ... REBUILD`
-  (`PARTITION = ALL` on a partitioned table), not a drop and a create. A head file that states no
-  compression means `NONE`: the replay of `REBUILD ... (DATA_COMPRESSION = NONE)` states no option.
-  A head file that states `DATA_COMPRESSION = NONE` stays a drop and a create. It refuses with
+  `DATA_COMPRESSION` of a clustered key or index is one `ALTER TABLE ... REBUILD`
+  (`PARTITION = ALL` on a partitioned table), not a drop and a create. On a clustered columnstore
+  index the value is `COLUMNSTORE` or `COLUMNSTORE_ARCHIVE`. No `DATA_COMPRESSION` and the value
+  that no option gives (`NONE` on a rowstore key or index, `COLUMNSTORE` on a columnstore index)
+  are one state: equality, hash and the canonical JSON leave that option out
+  (`model._without_implied`), and the item keeps what the file states. It refuses with
   `PARTITION_CHANGE` (in `diff.REFUSALS`, so in `GEN_REFUSED`): a table that goes on a scheme or
   off one, another scheme, another partitioning column, and `ALTER COLUMN` of a partitioning
   column. `docs/runbook.md`, "Partitioned tables", has the hand route.

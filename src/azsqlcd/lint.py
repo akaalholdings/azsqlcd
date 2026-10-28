@@ -243,10 +243,13 @@ _VERSIONING_HINT = (
     "WEEKS | MONTHS | YEARS)); any other table option goes in a '-- azsqlcd:raw' batch"
 )
 _REBUILD_HINT = (
-    "the closed list holds REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE "
-    "[, ONLINE = ON | OFF] [, MAXDOP = <n>] [, SORT_IN_TEMPDB = ON | OFF]), each option once; any other "
-    "rebuild (one partition, a compression for some partitions) goes in a '-- azsqlcd:raw' batch"
+    "the closed list holds REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE | "
+    "COLUMNSTORE | COLUMNSTORE_ARCHIVE [, ONLINE = ON | OFF] [, MAXDOP = <n>] "
+    "[, SORT_IN_TEMPDB = ON | OFF]), each option once; any other rebuild (one partition, a compression "
+    "for some partitions) goes in a '-- azsqlcd:raw' batch"
 )
+# model.REBUILD_COMPRESSIONS: COLUMNSTORE and COLUMNSTORE_ARCHIVE are for a clustered columnstore index
+_REBUILD_COMPRESSIONS = ("NONE", "ROW", "PAGE", "COLUMNSTORE", "COLUMNSTORE_ARCHIVE")
 # ALTER COLUMN [c] ADD | DROP <property>: the properties that are read whole, as their words.
 _COLUMN_PROPERTIES = (("ROWGUIDCOL",), ("SPARSE",), ("PERSISTED",), ("NOT", "FOR", "REPLICATION"))
 # The first word of an element of ALTER TABLE ... ADD that is no column.
@@ -1061,7 +1064,7 @@ class _Classifier:
         self.ends_at(j + 3 + len(words))
 
     def rebuild(self, table: tuple[str, ...], j: int, mode: str, created: Collection[str]) -> None:
-        """ALTER TABLE t REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE, ...)
+        """ALTER TABLE t REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = <_REBUILD_COMPRESSIONS>, ...)
         with REBUILD at j, as the whole statement. The engine writes every row again: LONG_LOCK in a
         tx migration. PARTITION = ALL is the form for a partitioned table; one partition
         (PARTITION = <n>) is an operation on the data and is outside the list."""
@@ -1085,7 +1088,7 @@ class _Classifier:
             if option in seen or not self.op(j + 1, "="):
                 return False
             seen.add(option)
-            if option == "DATA_COMPRESSION" and value in ("NONE", "ROW", "PAGE"):
+            if option == "DATA_COMPRESSION" and value in _REBUILD_COMPRESSIONS:
                 j += 3
             elif option in ("ONLINE", "SORT_IN_TEMPDB") and value in ("ON", "OFF"):
                 j += 3

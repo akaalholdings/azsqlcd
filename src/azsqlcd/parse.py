@@ -44,6 +44,7 @@ from azsqlcd.model import (
     FK_ACTIONS,
     INDEX_OPTION_VALUES,
     ON_PRIMARY,
+    REBUILD_COMPRESSIONS,
     RESERVED_WORDS,
     AddColumn,
     AddConstraint,
@@ -167,6 +168,8 @@ _REFUSED_CREATE = {
 }
 # DATA_COMPRESSION of a heap: CREATE TABLE ... WITH ( ... ) and ALTER TABLE ... REBUILD WITH ( ... )
 _TABLE_OPTION_VALUES: Mapping[str, tuple[str, ...] | None] = {"DATA_COMPRESSION": ("NONE", "ROW", "PAGE")}
+# ALTER TABLE ... REBUILD WITH ( ... ): also the compression of a clustered columnstore index
+_REBUILD_OPTION_VALUES: Mapping[str, tuple[str, ...] | None] = {"DATA_COMPRESSION": REBUILD_COMPRESSIONS}
 _REBUILD_EXECUTION = frozenset({"ONLINE", "MAXDOP", "SORT_IN_TEMPDB"})
 _COLUMNSTORE_EXECUTION = frozenset({"ONLINE", "MAXDOP"})
 _NOT_FOR_REPLICATION = (
@@ -1508,12 +1511,17 @@ class _Parser:
             all_partitions = True
         execution = _REBUILD_EXECUTION if self.migration else frozenset()
         options, exec_options = self.with_options(
-            True, execution, values=_TABLE_OPTION_VALUES, refused=_REFUSED_TABLE_OPTIONS, statement="REBUILD"
+            True,
+            execution,
+            values=_REBUILD_OPTION_VALUES,
+            refused=_REFUSED_TABLE_OPTIONS,
+            statement="REBUILD",
         )
         if not options:
             message = (
-                "REBUILD needs WITH (DATA_COMPRESSION = NONE | ROW | PAGE): a rebuild that changes no "
-                "compression is maintenance and not a model statement"
+                "REBUILD needs WITH (DATA_COMPRESSION = NONE | ROW | PAGE | COLUMNSTORE | "
+                "COLUMNSTORE_ARCHIVE): a rebuild that changes no compression is maintenance and not a model "
+                "statement"
             )
             raise self.error("SYNTAX", message, tok)
         return RebuildTable(schema, table, dict(options)["DATA_COMPRESSION"], exec_options, all_partitions)

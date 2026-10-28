@@ -1056,7 +1056,10 @@ def test_a_computed_column_is_compared_on_nullability_only_when_the_file_says_no
 def test_an_option_that_the_file_states_and_the_database_does_not_have_fails_the_read_back():
     error = mismatch(options_table(), options_table(("DATA_COMPRESSION", "PAGE")))
 
-    assert error.detail["objects"][0]["properties"] == ["indexes[ix_t].options[DATA_COMPRESSION]"]
+    # the live index has no compression: NONE and no option are one state of the model
+    assert error.detail["objects"][0]["properties"] == [
+        "indexes[ix_t].options[DATA_COMPRESSION] (absent in other)"
+    ]
 
 
 def test_the_owner_of_a_schema_is_read_back_only_when_the_file_states_it():

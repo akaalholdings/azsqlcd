@@ -626,7 +626,8 @@ def fixture_models() -> list[Any]:
 
 
 def states_a_default(obj: ModelObject) -> bool:
-    """True when the file writes something that is what the engine does anyway."""
+    """True when the file writes something that is what the engine does anyway. DATA_COMPRESSION at
+    its default is not one: the model holds it and no option as one state (model._without_implied)."""
     if isinstance(obj, Schema):
         return obj.owner is not None and fold(obj.owner) == "dbo"
     if not isinstance(obj, Table | TableType):
@@ -638,7 +639,8 @@ def states_a_default(obj: ModelObject) -> bool:
         return (catalog_tables.COLUMNSTORE_OPTION_DEFAULTS if columnstore else OPTION_DEFAULTS)[name]
 
     return any(
-        value == default(item, name) or (name, value) == ("FILLFACTOR", "100")
+        (value == default(item, name) and name != "DATA_COMPRESSION")
+        or (name, value) == ("FILLFACTOR", "100")
         for item in keyed
         for name, value in item.options
     )

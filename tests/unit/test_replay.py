@@ -175,6 +175,9 @@ BLOCKED = [
     (PROPERTY.format("Thin", "varchar(20) NULL"), "TABLE:[s].[Wide]", "DROP SPARSE before this statement"),
     (PROPERTY.format("Guid", "uniqueidentifier NULL"), "TABLE:[s].[Wide]", "DROP ROWGUIDCOL before"),
     (REBUILD.format("Cci", "PAGE"), "TABLE:[s].[Cci]", "the clustered columnstore index [CCI]"),
+    (REBUILD.format("Cci", "NONE"), "TABLE:[s].[Cci]", "the clustered columnstore index [CCI]"),
+    (REBUILD.format("Wide", "COLUMNSTORE"), "TABLE:[s].[Wide]", "has no clustered columnstore index"),
+    (REBUILD.format("P", "COLUMNSTORE_ARCHIVE"), "TABLE:[s].[P]", "has no clustered columnstore index"),
     (REBUILD.format("Nope", "PAGE"), "TABLE:[s].[Nope]", "the table does not exist"),
     ("CREATE CLUSTERED INDEX [CX] ON [s].[Wide] ([Id])", "TABLE:[s].[Wide]", "it would inherit PAGE"),
     (
@@ -1210,6 +1213,20 @@ def test_rebuild_sets_the_compression_of_the_heap_or_of_the_clustered_key():
     key = table(packed, "P").constraint("PK_P")
     assert isinstance(key, PrimaryKey) and key.options == (("DATA_COMPRESSION", "PAGE"),)
     assert run(packed, REBUILD.format("P", "NONE")) == WORLD
+
+
+def test_rebuild_sets_the_compression_of_a_clustered_columnstore_index():
+    archive = run(WORLD, REBUILD.format("Cci", "COLUMNSTORE_ARCHIVE"))
+    index = table(archive, "Cci").index("CCI")
+    assert index is not None and index.options == (("DATA_COMPRESSION", "COLUMNSTORE_ARCHIVE"),)
+    # COLUMNSTORE is what a file that states no compression says
+    back = run(archive, REBUILD.format("Cci", "COLUMNSTORE"))
+    assert back == WORLD and table(back, "Cci").index("CCI") == table(WORLD, "Cci").index("CCI")
+    # the form for a partitioned table
+    rebuild = "ALTER TABLE [s].[Heap] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE)"
+    create = "CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [s].[Heap]"
+    cci = run(PARTITIONED, create)
+    assert run(cci, rebuild) == run(PARTITIONED, create + " WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE)")
 
 
 def test_a_column_property_changes_that_property_and_nothing_else():

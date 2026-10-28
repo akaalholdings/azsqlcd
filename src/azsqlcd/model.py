@@ -4,6 +4,10 @@ Rules that every user of this module relies on:
   * Names are kept as written and compared case-folded (the tool refuses case-sensitive catalog
     collations). `==` and `hash` of every class here use the canonical form, never the spelling.
     Use `fold()` or the lookup methods when you match a name yourself.
+  * DATA_COMPRESSION at the value that no option gives (NONE on a rowstore key or index,
+    COLUMNSTORE on a columnstore index) is not in the canonical form: it and no option are one
+    state, as the catalog reads it back. The item keeps the option as written, so a statement
+    still states it (_without_implied).
   * An Expression is a run of tokens. It is compared token by token and never parsed.
   * Everything is immutable. Model.add / remove / replace return a new Model.
   * The canonical form holds every dataclass field (it walks `dataclasses.fields`), so a new
@@ -21,7 +25,7 @@ Public API:
     CreateSynonym, DropSynonym, CreateTable, DropTable, AddColumn, AlterColumn, DropColumn,
     AddConstraint, DropConstraint, CreateIndex, DropIndex, Rename, RenameKind,
     SetSystemVersioning, MaskColumn, UnmaskColumn, AlterColumnProperty, RebuildTable, Operation,
-    COLUMN_PROPERTIES, TABLE_COMPRESSIONS, COLUMNSTORE_OPTION_VALUES,
+    COLUMN_PROPERTIES, TABLE_COMPRESSIONS, REBUILD_COMPRESSIONS, COLUMNSTORE_OPTION_VALUES,
     Partition, ON_PRIMARY, Place, place_on
 
 Wider table coverage: Identity.not_for_replication, Check.not_for_replication,
@@ -159,6 +163,9 @@ COLUMNSTORE_OPTION_VALUES: Mapping[str, tuple[str, ...] | None] = {
 }
 # DATA_COMPRESSION of a heap (CREATE TABLE ... WITH, ALTER TABLE ... REBUILD WITH).
 TABLE_COMPRESSIONS = ("ROW", "PAGE")
+# DATA_COMPRESSION of ALTER TABLE ... REBUILD WITH: of a heap or a clustered rowstore key or index, and
+# of a clustered columnstore index
+REBUILD_COMPRESSIONS = ("NONE", *TABLE_COMPRESSIONS, "COLUMNSTORE", "COLUMNSTORE_ARCHIVE")
 # ALTER TABLE ... ALTER COLUMN c ADD | DROP <property>. (MASKED has its own operations.)
 COLUMN_PROPERTIES = ("ROWGUIDCOL", "SPARSE", "NOT FOR REPLICATION")
 FK_ACTIONS = ("NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT")
@@ -253,9 +260,10 @@ def _canon(value: object, expressions: bool, exact: bool = False) -> Any:
     if isinstance(value, _Node):
         out: dict[str, Any] = {"class": type(value).__name__}
         for f in fields(cast(Any, value)):
-            if f.name in value._sparse and getattr(value, f.name) == f.default:
+            held = value._canonical(f.name)
+            if f.name in value._sparse and held == f.default:
                 continue
-            item = _canon(getattr(value, f.name), expressions, f.name in value._exact)
+            item = _canon(held, expressions, f.name in value._exact)
             out[f.name] = sorted(item, key=_dumps) if f.name in value._unordered else item
         return out
     if isinstance(value, tuple):
@@ -279,6 +287,10 @@ class _Node:
 
     def __hash__(self) -> int:
         return hash(_dumps(_canon(self, True)))
+
+    def _canonical(self, name: str) -> object:
+        """The value of a field as the canonical form holds it."""
+        return getattr(self, name)
 
 
 # ------------------------------------------------------------------ expressions
@@ -449,6 +461,13 @@ def _check_options(
             raise ValueError(f"index option {name} cannot be {value!r}")
 
 
+def _without_implied(options: Options, compression: str) -> Options:
+    """The options without DATA_COMPRESSION = <the value that no option gives>. The catalog reads both
+    spellings back as one state, so equality and the canonical form hold one. The item keeps what is
+    written: a statement still states it (a clustered key on a compressed heap needs NONE)."""
+    return tuple(option for option in options if option != ("DATA_COMPRESSION", compression))
+
+
 @dataclass(frozen=True, eq=False)
 class KeyColumn(_Node):
     name: str
@@ -520,6 +539,9 @@ class PrimaryKey(_Node):
         _check_options(self.options)
         _check_place(self.on, self.options, "PRIMARY KEY", self.name)
 
+    def _canonical(self, name: str) -> object:
+        return _without_implied(self.options, "NONE") if name == "options" else getattr(self, name)
+
 
 @dataclass(frozen=True, eq=False)
 class Unique(_Node):
@@ -536,6 +558,9 @@ class Unique(_Node):
     def __post_init__(self) -> None:
         _check_options(self.options)
         _check_place(self.on, self.options, "UNIQUE", self.name)
+
+    def _canonical(self, name: str) -> object:
+        return _without_implied(self.options, "NONE") if name == "options" else getattr(self, name)
 
 
 @dataclass(frozen=True, eq=False)
@@ -608,6 +633,11 @@ class Index(_Node):
             raise ValueError(f"{where} is clustered: it has no column list and no filter")
         if not self.clustered and not self.included:
             raise ValueError(f"{where} is nonclustered: it needs a column list")
+
+    def _canonical(self, name: str) -> object:
+        if name != "options":
+            return getattr(self, name)
+        return _without_implied(self.options, "COLUMNSTORE" if self.columnstore else "NONE")
 
 
 # ------------------------------------------------------------------ objects
@@ -1235,7 +1265,8 @@ class AlterColumnProperty(_Node):
 
 @dataclass(frozen=True, eq=False)
 class RebuildTable(_Node):
-    """ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE)."""
+    """ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = NONE | ROW | PAGE), or
+    COLUMNSTORE | COLUMNSTORE_ARCHIVE for a table with a clustered columnstore index."""
 
     _unordered: ClassVar[frozenset[str]] = frozenset({"exec_options"})
     _exact: ClassVar[frozenset[str]] = frozenset({"compression", "exec_options"})
@@ -1243,13 +1274,13 @@ class RebuildTable(_Node):
 
     schema: str
     table: str
-    compression: str  # NONE | ROW | PAGE: always written
+    compression: str  # one of REBUILD_COMPRESSIONS: always written
     exec_options: Options = ()  # ONLINE, MAXDOP, SORT_IN_TEMPDB; not part of the model
     # PARTITION = ALL is written: the form for a partitioned table. The model changes the same way.
     all_partitions: bool = False
 
     def __post_init__(self) -> None:
-        if self.compression not in ("NONE", *TABLE_COMPRESSIONS):
+        if self.compression not in REBUILD_COMPRESSIONS:
             raise ValueError(f"DATA_COMPRESSION of a table cannot be {self.compression!r}")
 
 

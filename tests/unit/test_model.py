@@ -487,6 +487,31 @@ def test_a_model_survives_a_canonical_json_round_trip():
     assert again["SEQUENCE:[sales].[OrderNo]"] == model["SEQUENCE:[sales].[OrderNo]"]
 
 
+def test_the_compression_that_no_option_gives_and_no_option_are_one_state():
+    """NONE on a rowstore key or index and COLUMNSTORE on a columnstore index: the catalog reads both
+    spellings back as one state, and the replay of a rebuild gives one of them. So equality, hash and
+    canonical JSON hold one form. The item keeps the option as written: a statement still writes it
+    (a clustered key on a compressed heap inherits that compression unless it states one)."""
+    none, row = (("DATA_COMPRESSION", "NONE"),), (("DATA_COMPRESSION", "ROW"),)
+    cs, archive = (("DATA_COMPRESSION", "COLUMNSTORE"),), (("DATA_COMPRESSION", "COLUMNSTORE_ARCHIVE"),)
+    key = (KeyColumn("a"),)
+    pairs = [
+        (PrimaryKey("PK", True, key), none, row),
+        (Unique("UQ", False, key), none, row),
+        (Index("IX", False, False, key), none, row),
+        (Index("CCI", False, True, (), columnstore=True), cs, archive),
+        (Index("NCCI", False, False, (), ("a",), columnstore=True), cs, archive),
+    ]
+    for item, implied, other in pairs:
+        stated = dataclasses.replace(item, options=implied)
+        assert stated == item and hash(stated) == hash(item) and stated.options == implied
+        assert dataclasses.replace(item, options=other) != item
+        field = "indexes" if isinstance(item, Index) else "constraints"
+        table = Table("s", "T", (Column("a", TypeRef("int"), False),), **{field: (item,)})
+        again = dataclasses.replace(table, **{field: (stated,)})
+        assert Model([again]).to_canonical_json() == Model([table]).to_canonical_json()
+
+
 def test_canonical_json_is_sorted_compact_and_case_folded():
     model = Model([Synonym("dbo", "LegacyOrder", "sales", "Order"), Schema("Sales")])
     assert model.to_canonical_json() == (
@@ -980,7 +1005,7 @@ def test_a_new_field_is_in_the_canonical_form_only_when_the_object_uses_the_feat
             "cannot have a columnstore index",
         ),
         (lambda: masking.AlterColumnProperty("s", "T", "c", True, "MASKED"), "not a column property"),
-        (lambda: masking.RebuildTable("s", "T", "COLUMNSTORE"), "DATA_COMPRESSION of a table"),
+        (lambda: masking.RebuildTable("s", "T", "LZ4"), "DATA_COMPRESSION of a table"),
     ],
 )
 def test_what_the_engine_refuses_of_the_wider_coverage_is_a_value_error(build, says: str):

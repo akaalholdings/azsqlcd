@@ -755,19 +755,25 @@ def _alter_column_property(model: Model, op: AlterColumnProperty) -> Model:
 def _rebuild_table(model: Model, op: RebuildTable) -> Model:
     table = _table(model, op.schema, op.table)
     item = table.clustered_item()
-    if item is None:
-        return model.replace(replace(table, compression=None if op.compression == "NONE" else op.compression))
-    shown = names.quote(item.name or "")
-    if _is_columnstore(item):
+    columnstore = item is not None and _is_columnstore(item)
+    if columnstore != op.compression.startswith("COLUMNSTORE"):
+        if item is None or not columnstore:
+            _blocked(
+                table.key,
+                f"the table has no clustered columnstore index: DATA_COMPRESSION = {op.compression} is the "
+                "compression of one",
+            )
         _blocked(
             table.key,
-            f"the table has the clustered columnstore index {shown}: its DATA_COMPRESSION is COLUMNSTORE "
-            "or COLUMNSTORE_ARCHIVE and is stated on the index",
+            f"the table has the clustered columnstore index {names.quote(item.name or '')}: its "
+            "DATA_COMPRESSION is COLUMNSTORE or COLUMNSTORE_ARCHIVE",
         )
-    # the engine rebuilds the clustered index with this compression. NONE is stated by no option, as
-    # the catalog reads it back and as a table file that states no compression says it
+    if item is None:
+        return model.replace(replace(table, compression=None if op.compression == "NONE" else op.compression))
+    # the engine rebuilds the clustered index with this compression. The compression that no option
+    # gives (NONE, COLUMNSTORE) is stated by no option, as the catalog reads it back
     found = {**dict(item.options), "DATA_COMPRESSION": op.compression}
-    if op.compression == "NONE":
+    if op.compression in ("NONE", "COLUMNSTORE"):
         del found["DATA_COMPRESSION"]
     options = tuple(sorted(found.items()))
     rebuilt = replace(item, options=options)

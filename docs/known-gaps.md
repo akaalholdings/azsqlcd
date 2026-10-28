@@ -1742,6 +1742,7 @@ uv run --extra db python scripts/live_tables.py --server S --database D --confir
 | What the reader gives for each partitioned table is emitted as the file of the repository, byte for byte | P2 and P4, not run |
 | `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` on a partitioned heap sets every partition | P3, not run |
 | The same statement on a clustered table, and `REBUILD WITH (...)` without `PARTITION` on a partitioned table (both parse; `gen` writes the first for a change of only the compression of the clustered key or index, and never the second) | No test yet |
+| `ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = COLUMNSTORE | COLUMNSTORE_ARCHIVE)` on a table with a clustered columnstore index sets the compression of that index (from the documentation; `gen` writes it for a change of only that compression) | Not run |
 | The engine adds the partitioning column to an index that does not hold it, and the row of `sys.index_columns` has `key_ordinal = 0`, `is_included_column = 0` and `partition_ordinal = 1`. The reader leaves that column out of the index. If the row is another one, every export of such an index differs from its file | P4, not run. The script prints the rows; fix the filter in `catalog_tables.py` `_keys_and_indexes` and the helper `tabular_rows` of `tests/unit/test_catalog_tables.py` together |
 | `sys.stats.is_incremental` is 1 for an index that was created with `STATISTICS_INCREMENTAL = ON` | P4, not run |
 | An index or a key that is created with no `ON` clause on a partitioned table goes on the scheme of the table | P5, not run |
@@ -1782,28 +1783,33 @@ uv run --extra db python scripts/live_tables.py --server S --database D --confir
   statement and `ON [PRIMARY] (SELECT 1)` pass `lint` alone. The parser refuses them: in `verify`
   (`SYNTAX`, `UNSUPPORTED`) and at the plan (`MIGRATION_INVALID`). `REBUILD` is the exception:
   lint reads its option list whole.
-- Done (2026-10-28): a change of only `DATA_COMPRESSION` of a clustered rowstore key or index is
-  one `ALTER TABLE <t> REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = <x>)` on a partitioned
-  table and one `ALTER TABLE <t> REBUILD WITH (DATA_COMPRESSION = <x>)` on a table that is not
+- Done (2026-10-28): a change of only `DATA_COMPRESSION` of a clustered key or index is one
+  `ALTER TABLE <t> REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = <x>)` on a partitioned table
+  and one `ALTER TABLE <t> REBUILD WITH (DATA_COMPRESSION = <x>)` on a table that is not
   partitioned (`diff._rebuilt`), with `allow LONG_LOCK`. Before, `gen` wrote a drop and a create:
-  two writes of every row and a heap between them. A head file that states no `DATA_COMPRESSION`
-  means `NONE`: the replay of `REBUILD ... (DATA_COMPRESSION = NONE)` on a clustered key or index
-  now states no option (before, it stated `NONE`). A foreign key on a clustered key whose
-  compression changes is no longer dropped and added again. Fixture pairs:
+  two writes of every row and a heap between them. On a clustered columnstore index `<x>` is
+  `COLUMNSTORE` or `COLUMNSTORE_ARCHIVE`: these are now values of the model statement `REBUILD` in
+  lint and in the parser, and the replay sets them on the clustered columnstore index (it blocks
+  them on any other table, and blocks `NONE`, `ROW` and `PAGE` on a table with a clustered
+  columnstore index). No `DATA_COMPRESSION` and the value that no option gives (`NONE` on a
+  rowstore key or index, `COLUMNSTORE` on a columnstore index) are one state of the model: equality,
+  hash and the canonical JSON leave that option out (`model._without_implied`). So a head file that
+  states `DATA_COMPRESSION = NONE` and a head file that states no compression both get the rebuild,
+  and a hand-written rebuild proves both. The item keeps the option as the file states it, so
+  `COMPRESSION_INHERITED` and its hint ("state `NONE`") do not change. A foreign key on a
+  clustered key whose compression changes is no longer dropped and added again. Fixture pairs:
   `clustered_compression_change_is_one_rebuild`,
-  `partitioned_clustered_compression_change_is_one_rebuild`. Three pair outputs changed:
-  `index_filter_and_option_change` and `partitioned_index_compression_and_statistics_change`
-  (the clustered item is now a rebuild), and `refuse_compression_inherited` (table `[sales].[A]`,
-  `PAGE` to no compression, is now a rebuild and not a refusal). Still a drop and a create: any
-  other change of options of the clustered item, also with the compression; a clustered key or
-  index on a column that `ALTER COLUMN` changes in the same migration (the key would block it); a
-  head file that
-  states `DATA_COMPRESSION = NONE` (the replay of the rebuild gives no option, so it would not
-  give that file); a clustered columnstore index (`COLUMNSTORE` and `COLUMNSTORE_ARCHIVE` are not
-  values of the model statement `REBUILD`; lint and the parser refuse them there, and the replay
-  blocks a rebuild of a table with a clustered columnstore index). Not proven on a database: the
-  rebuild of a clustered key or index of a partitioned table (P3 proves only a heap and an aligned
-  index); `REBUILD WITH` without `PARTITION = ALL` on a partitioned table.
+  `partitioned_clustered_compression_change_is_one_rebuild`. Two older pair outputs changed:
+  `index_filter_and_option_change` and `partitioned_index_compression_and_statistics_change` (the
+  clustered item is now a rebuild). Effect on the read-back report: an option that the file states
+  and the database does not hold is now named `options[DATA_COMPRESSION] (absent in other)`.
+  Still a drop and a create: any other change of options of the clustered item, also with the
+  compression; a clustered key or index on a column that `ALTER COLUMN` changes in the same
+  migration (the key would block it; for a clustered columnstore index, any column of the table).
+  Not proven on a database: the rebuild of a clustered key or index of a partitioned table (P3
+  proves only a heap and an aligned index); `REBUILD WITH` without `PARTITION = ALL` on a
+  partitioned table; `REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE)` on a
+  table with a clustered columnstore index (documented, not run).
 - Done (2026-10-28): a nonclustered columnstore index that is not aligned with its table. The
   engine refuses it, measured live (`docs/live-testing.md`, section 12, "Columnstore alignment"):
   `ON [PRIMARY]` on a partitioned table, a scheme of another partition function, a scheme of a
