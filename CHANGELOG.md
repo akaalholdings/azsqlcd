@@ -142,6 +142,10 @@ number and date. Version numbers follow semantic versioning.
   `drift.yml` does not have this input: drift uses the plan identity only. The caller workflows
   of the template and of the example have the input as a comment line. How to split the runners
   and the order of the steps: `docs/setup.md`, section 2.
+- `ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = ...)` accepts
+  `COLUMNSTORE` and `COLUMNSTORE_ARCHIVE`, in `lint` and in the parser. The replay sets the value
+  on the clustered columnstore index of the table. It blocks these values on a table that has no
+  clustered columnstore index, and `NONE`, `ROW` and `PAGE` on a table that has one.
 
 ### Changed
 
@@ -196,6 +200,28 @@ number and date. Version numbers follow semantic versioning.
   not_managed` and came back); an object is in a schema that a migration skipped as not managed
   touches; the database has a baseline step and a table row, so a whole baseline is refused there
   (`ALREADY_BASELINED`).
+- `gen` writes one `ALTER TABLE ... REBUILD WITH (DATA_COMPRESSION = ...)` for a change of only the
+  compression of the clustered key or index, with `PARTITION = ALL` on a partitioned table and
+  `allow LONG_LOCK`. Before, it wrote a drop and a create of the key or index: two writes of every
+  row, and a heap between them. A foreign key on such a key is no longer dropped and added again.
+  Any other change of the options of the clustered item stays a drop and a create. The output of
+  two older fixture pairs changed: `index_filter_and_option_change` and
+  `partitioned_index_compression_and_statistics_change`.
+- No `DATA_COMPRESSION` and the value that no option gives (`NONE` on a rowstore key or index,
+  `COLUMNSTORE` on a columnstore index) are one state of the model. A hand-written rebuild proves
+  both. The read-back report names an option that the file states and the database does not hold
+  as `options[DATA_COMPRESSION] (absent in other)`.
+- A nonclustered columnstore index that is not aligned with its table is refused: `SYNTAX` in a
+  table file, `PRF001` in `verify` for a migration. Aligned means the scheme and the partitioning
+  column of the table, or no `ON` clause; on a table that is not partitioned, no `ON` clause. The
+  engine refuses such an index, except on another scheme of the same partition function. The
+  tool does not hold partition functions, so it refuses that case too.
+- `export`: a table with a nonclustered columnstore index on another scheme of the same partition
+  function now stays `[unmanaged]`, with the message of the model. Before, it was exported. To
+  manage it, move the index to the scheme of the table.
+
+`docs/runbook.md`, section "Partitioned tables", and `docs/known-gaps.md`, section 14, have the
+details.
 
 ### Fixed
 
