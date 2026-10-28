@@ -1174,6 +1174,27 @@ def test_a_withdrawal_after_a_schema_left_the_scope_proves_and_generates_nothing
     assert db.table(("dbo", "rates")) is not None  # the excluded table is still there
 
 
+def test_a_table_that_a_managed_key_references_cannot_leave_the_scope(project):
+    """Review minor 9: the pull request that excludes dbo fails verify while sales.Order has a
+    foreign key to dbo.Rates (setup.md, section 7); nothing is dropped or lost."""
+    order = dataclasses.replace(
+        ORDER,
+        columns=(*ORDER.columns, Column("RateCode", TypeRef("char", length=3), True)),
+        constraints=(
+            *ORDER.constraints,
+            ForeignKey("FK_Order_Rates", ("RateCode",), "dbo", "Rates", ("Code",)),
+        ),
+    )
+    project.write_objects(SALES, CUSTOMER, order, RATES)
+    project.release("create", "create_all")
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    (project.repo / names.path_for("TABLE", "dbo", "Rates")).unlink()
+
+    verified = project.tool("verify", "--root", str(project.repo), "--base", project.main)
+
+    assert verified.code == 22 and "MDL001" in verified.out and "[dbo].[Rates]" in verified.out
+
+
 RATES_WIDE = dataclasses.replace(
     RATES, columns=(*RATES.columns, Column("Name", TypeRef("nvarchar", length=50), True))
 )
@@ -1411,6 +1432,25 @@ def test_a_trigger_follows_its_table_out_of_the_scope(tmp_path, capsys):
     assert json.loads((out / "plan.json").read_text())["unmanaged"] == []
     drift = project.tool("drift", *built.where, db=db)
     assert drift.code == 0 and "tr_Load" not in drift.out
+
+
+def test_the_baseline_of_a_schema_with_nothing_to_record_writes_no_step(tmp_path, capsys, monkeypatch):
+    """Review minor 5: each run wrote one more empty baseline step."""
+    project = Project(tmp_path, capsys, table_model=False)
+    db = project.database()
+    project.write(
+        "azsqlcd.toml", TOML.format(table_model="false") + '\n[scope]\nschemas = ["dbo", "billing"]\n'
+    )
+    project.write("migrations/migrations.sum", "azsqlcd-sum 1\nbaseline\n")
+    project.main = project.commit("scope")
+    project.git("update-ref", "refs/remotes/origin/main", project.main)
+    built = project.build()
+    monkeypatch.chdir(tmp_path)
+
+    done = project.tool("baseline", *built.where, "--schema", "billing", "--confirm-database", "sales", db=db)
+
+    assert (done.code, done.reason) == (22, "ALREADY_BASELINED") and "nothing to record" in done.err
+    assert db.rows("step") == [] and db.rows("object") == []
 
 
 def test_without_a_scope_no_read_is_limited_and_no_schema_is_listed(project, tmp_path):
