@@ -842,6 +842,57 @@ space in a path is written as `\ `.
 No column and no status was added to the state tables. A hold is a fact of `azsqlcd.toml` of the
 release and of the environment. A held migration has no step row, as a pending one has none.
 
+### Objects that one environment does not manage
+
+Opt-in. Use it when the objects of one environment are not at the level of the files yet, and the
+tool must not touch them there. Each environment can have its own list. Without the key, every
+object of the scope is managed in every environment, as before.
+
+```toml
+[env.test]
+# ... the other keys of the environment
+not_managed = ["legacy.*"]   # patterns schema.name; * and ? are wildcards
+```
+
+The patterns have the syntax and the checks of `[scope] exclude_objects`. Names are compared
+without letter case. With `[scope]`, the schema part of a pattern must be a schema that the scope
+manages (or hold a wildcard).
+
+What the tool does in that environment:
+
+1. The matching objects are outside the scope, as for `[scope] exclude_objects`: they are not read,
+   compared, baselined or listed as unmanaged, and `drift` reports nothing for them. A schema
+   itself is never matched: `legacy.*` leaves the schema `legacy` managed.
+2. A managed object that a pattern matches leaves: the next deploy marks its row `dropped`.
+   Nothing is sent to the object and nothing is dropped.
+3. A module that a pattern matches is not sent: its file changes nothing in that environment.
+4. A pending migration that touches only matching objects is skipped in that environment for good.
+   The deploy records it as a migration step with the status `not_applied` and the note
+   `not_managed in <env>`. It never runs there, also after the pattern is taken away. The other
+   migrations run past it, in chain order. The other environments run it as usual.
+5. A pending migration that touches matching objects and managed objects is refused with 22
+   `MIXED_NOT_MANAGED`. Split it into two migrations by withdraw and replace (see "Withdraw and
+   replace a merged migration").
+6. `plan` and `deploy` give the note `not managed in <env>: <count> object(s); skipped migrations:
+   ...`.
+
+What a migration touches: the object of each model statement; for a data or raw batch, every name
+of its text that is written with its schema.
+
+To manage the objects again in that environment:
+
+1. Take the pattern away by pull request. The next plan for that environment stops with 22
+   `BASELINE_REQUIRED` and names `azsqlcd baseline --schema <name>`. Without `[scope]`, a module
+   that comes back stops it with 22 `NAME_COLLISION`: do the next steps all the same.
+2. Make the objects equal to their files by hand. The migrations that were skipped never run
+   there: their changes are part of this work.
+3. Run `azsqlcd baseline --schema <name>` on each target of the environment. It compares the
+   objects with the files and records them.
+4. Promote the release again.
+
+No column and no status was added to the state tables. A skip is a row of `azsqlcd.step` with the
+kind `migration`, the status `not_applied` and the note `not_managed in <env>`.
+
 ### Partitioned tables
 
 Not run on a database yet: `docs/known-gaps.md`, section 14.
