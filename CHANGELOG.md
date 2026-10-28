@@ -33,6 +33,24 @@ number and date. Version numbers follow semantic versioning.
   migration and no tombstone: the deploy marks the rows of its objects `dropped` (plan steps
   `unscope:<key>`, no statement on the objects), and when the schema comes back,
   `baseline --schema` compares the objects with their files again.
+- `drift` reports a managed constraint that the database holds under a name that the engine made,
+  for example a primary key that someone dropped and added again with no name (A35). The property
+  is `constraint_name [<name of the file>] (<kind>, live name [<name in the database>])`. `drift`
+  also prints one line, `rename <table key> EXEC sys.sp_rename ...;`, and the step summary has the
+  same statement in a table. A plan that touches such a table stops with `DRIFT_TOUCHED` (or
+  `DRIFT_BLOCK`) and prints the same lines below its message. The message and the triage log hold
+  no statement. The tool finds the recorded constraint by what it is (kind, columns, target,
+  expression, state and, for a key on a scheme, its place), not by a name, so two CHECK
+  constraints do not swap. The rename gives the recorded name, also when the next release renames
+  the constraint in its file. A database with no such constraint gives the same output as before.
+  Not run on a database yet. What to do: `docs/runbook.md`, "A constraint with a name that the
+  engine made".
+- The read-back of a deploy (and of `mark-applied` and `accept-drift`) records an engine-named
+  constraint under the name of its file, not under the fixed name of the reader (A35). The state
+  tables did not change. Upgrade note: a database recorded by 0.1 or 0.2 can show new
+  `constraint_name` drift, and new `DRIFT_TOUCHED` or `DRIFT_BLOCK` refusals, for constraints that
+  were not visible before. There is no state-table change and no upgrade step: a DBA runs the
+  rename lines.
 
 ## 0.2.0 - 2026-10-26
 

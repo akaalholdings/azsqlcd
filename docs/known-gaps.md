@@ -45,6 +45,8 @@ each build task.
 13. Sign-in modes and the fixes of the first pilot: what is closed, what is not proven.
 14. Partitioned tables and indexes (2026-10-13): what is closed, what is out of scope, what is not
     proven.
+15. Schema scope (2026-10-26): what is not proven, and the limits.
+16. Drift of a constraint name (A35, 2026-10-28): upgrade note and limits.
 
 Ids: L1 to L17, L5b and X1 to X10 are spike items of `scripts/live_spike.py`. "Acc" names a
 scenario of `scripts/live_acceptance.py`. G1 to G7 are the GitHub checklist. All are in
@@ -271,6 +273,7 @@ scenario reads a table through these modules. A column that does not exist fails
 | Driver value types of the table queries: bit, tinyint, `decimal(38,0)`, `char(2)` padding, the `sql_variant` seed and increment of `sys.identity_columns` | No test yet |
 | Catalog values: vector length `(max_length - 8) / 4`; `fill_factor` 0 or 100 for FILLFACTOR = 100; `data_compression` per partition; `sys.sequences.cache_size` NULL for NO CACHE and for the default size; the spelling of `sys.synonyms.base_object_name`; the rows of the backing object of a table type | No test yet |
 | A persisted computed column that is declared NOT NULL when the engine already derives it gives the same catalog row | No test yet |
+| A35, drift of a constraint name: a constraint that is added with no name has `is_system_named = 1`, and `sp_rename` of the constraint sets it to 0, so the drift ends. The catalog gives the same capture value (definition text, columns, flags, place of a key on a scheme) for a constraint that was made again as for the first one, so the tool finds its recorded twin. The rule of `tables.py` `table_drift`, the `rename` line of `drift` and the `rename` lines of a plan refusal were not run on a database | No test yet |
 | Partitioned tables: `sys.partition_schemes` joined through `sys.indexes.data_space_id`; `sys.index_columns.partition_ordinal`; `sys.stats.is_incremental`; the count of different compressions of the partitions of one index, read with a derived table inside the index query. Section 14 has each assumption | `live_tables.py`, first pass (P2, P4): passed 2026-10-26 |
 | `sys.sql_expression_dependencies`: `is_schema_bound_reference` and `referenced_minor_id` per column; `sys.database_principals` shows schema owners to the plan identity (a hidden owner quarantines the schema) | L14 for the grants; else no test yet |
 | Which sub-objects the engine refuses on DROP COLUMN, ALTER COLUMN and `sp_rename` (the blocker scan counts hypothetical indexes; a foreign key blocks a table rename by the design rule) | No test yet |
@@ -836,8 +839,21 @@ Tables, catalog and onboarding:
 - An index on a managed view is reported by the `drift` command only (property `has_index`). The
   module capture does not hold it, so the drift check of the plan does not see it; the gate is
   `catalog.has_index` in the runner.
-- The read-back of a deploy still records an engine-named constraint under its fixed name; only
-  `baseline` refuses.
+- The read-back (deploy, `mark-applied`, `accept-drift`) takes a table with an engine-named
+  constraint of the same shape as a constraint of the file, and records it under the name of the
+  file (version 0.1.0 recorded the fixed name of the reader). Only `baseline` refuses. After that,
+  `drift` reports such a constraint (`constraint_name [...]`, A35) with the rename to the name of
+  the file. For a record of version 0.1.0 with a fixed name that no file has, the rename gives the
+  name of the file too; then one `accept-drift` records it (runbook, "A constraint with a name
+  that the engine made"). Limit of that rule: the tool cannot tell such a record from a record
+  with a true fixed name whose constraint the release renames by a migration. In that case the
+  rename line gives the new name too, and the next plan then names `mark-applied` (when the
+  migration is only the rename) or the revert. Open: the read-back pairs a CHECK constraint by its
+  kind, not by its expression. Two or more engine-named CHECK constraints of one table that the
+  record does not tell apart are paired with the CHECK constraints of the file in catalog order.
+- Open (minor): a table whose engine-named constraint gets a fixed name that another object of its
+  schema has is outside the model. `drift` reports `unsupported` for it and does not say why: the
+  reason of `catalog_tables.Unsupported` is not in the report. The runbook has the manual rename.
 - Read-back, baseline, `mark-applied` and `accept-drift` now fail for a live key or index with a
   non-default option that the file does not state. `export` writes the option.
 - Reasoned and not run on a database: `@@OPTIONS & 2` and implicit transactions (RS-9), that
@@ -1343,6 +1359,7 @@ Fixed after the runs and the review (unit tests; not run again on a database):
 | CU-11 | Flags with no help text; sub-command errors with the top-level usage | Every flag has a description; the usage is that of the sub-command |
 | D1, E2E-7 | `TOKEN_TOO_SHORT` for a read on a workstation | `cli.py` asks the session module for the short token life of a read-only command (`plan`, `drift`, `export`, `baseline --report-only`) when `session.connect` has the keyword `read_only`. Not proven live: the life of a cached token cannot be forced |
 | T5 | `None None` in `drift` for an object with no hash | `drift` prints `-` |
+| T4 | A managed key constraint that was made again without a name was not drift | Owner decision of 2026-10-07 (A35 in `docs/design.md`): it is drift. `tables.py` `table_drift` gives the property `constraint_name [...]` for each recorded constraint that the engine named and that is as the tool recorded it (same capture value, whatever the fixed name of the reader). `drift` prints the `sp_rename` statement to the recorded name, and a plan refusal prints it below its message. The read-back records the name of the file. Unit tests and the fake engine only: this rule did not run on a database. Limits: a constraint that was also changed (or moved to another place) is the ordinary difference and gets no statement until that difference is resolved; `resolve --accept-drift` does not end the drift of a name; a table outside `[scope]` is not compared |
 | T3 | `verify` passed a migration that needs an unbind line | `PRF007` (error) |
 | E2E-9 | No word about `ADD ... NOT NULL` with no `DEFAULT` | `NNL001` (warning) |
 | D2, D3, E2E-5, E2E-10 | No local onboarding path; plan after baseline; export round trip; withdraw-and-replace how-to | `docs/setup.md`, section 7 |
@@ -1371,9 +1388,7 @@ Open:
   `CHECK` or a rowstore index is allowed (section 3, "Table model"). `PRIMARY KEY`, `FOREIGN KEY`,
   a computed column, an index filter and a columnstore index still block. The engine accepts a
   longer column under a primary key with no foreign key; the tool refuses it.
-- E2E-6, T4. `drift` does not name an index made by hand. A managed key constraint that was made
-  again with an engine name is not drift: an onboarded database has engine-named constraints
-  until the rename script runs, so the tool cannot tell the two cases apart. Owner decision.
+- E2E-6. `drift` does not name an index made by hand: it is an unmanaged sub-object.
 - T1. `baseline --report-only` compares tables only against `onboarding/prod/snapshot.json`.
   In the tree now (`onboard.py`): without that file the report still names each constraint of
   the model that the engine named, with the rename script. Not run again on a database. Open:
@@ -1881,3 +1896,22 @@ tables.
   until a release tag holds this change, a repository that copies the template from `main` gets a
   workflow error ("schema is not defined") at the dispatch. The version bump of the next release
   closes it.
+
+## 16. Drift of a constraint name (A35, 2026-10-28)
+
+A managed constraint that the database holds under a name that the engine made is drift
+(`docs/design.md`, A35; `docs/runbook.md`, "A constraint with a name that the engine made").
+Sections 2, 7 and 11 (row T4) have the details.
+
+- The read-back of a deploy records an engine-named constraint under the name of its file, and
+  `drift` reports the name that the engine made with its rename line (A35). A database recorded
+  by 0.1 or 0.2 can show new `constraint_name` drift and new `DRIFT_TOUCHED` refusals for
+  constraints that were not visible before.
+- A record of 0.1 or 0.2 can hold an engine-named constraint under the fixed name of the reader.
+  For such a record, the rename gives the name of the file in the release that runs `drift` or
+  `plan`. It gives the recorded fixed name when the database applied a migration that this
+  release does not hold (`drift` with an older bundle). Use the bundle of the recorded release or
+  a newer one.
+- `docs/design.md` has no separate amendment for the rename to the name of the file: it is part
+  of the A35 bullet of "As built".
+- Proven against fakes only (`FakeDatabase`). Nothing of this section ran on a database.
