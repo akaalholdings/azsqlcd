@@ -17,7 +17,6 @@ on:
         description: The release that the failed run used, for example r57
         type: string
         required: true
-      # unpark needs the tool tag after 0.2.0: resolve.yml@v0.2.0 refuses it.
       action:
         type: choice
         options: [mark-applied, mark-not-applied, accept-drift, adopt-module, clear-run, rebind-environment, unpark]
@@ -46,7 +45,7 @@ jobs:
   # `contents: write` is only the upper limit that release.yml declares for a push.
   release:
     if: ${{ github.ref == 'refs/heads/main' }}
-    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.3.0
     permissions:
       contents: write
     with:
@@ -54,7 +53,7 @@ jobs:
 
   resolve:
     needs: release
-    uses: akaalholdings/azsqlcd/.github/workflows/resolve.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/resolve.yml@v0.3.0
     permissions:
       contents: read
       id-token: write

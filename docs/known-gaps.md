@@ -1868,7 +1868,9 @@ for an object with no managed row, was accepted and did nothing (`OUT_OF_SCOPE`,
 
 ### Not proven on a database
 
-Nothing of this section ran against a database. Not measured: the condition
+One live run on a database, 2026-10-28 (`docs/live-testing.md`, section 13): deploys, `plan` and
+`drift` with `[scope]`. A schema in neither list gave `SCHEMA_UNSCOPED`, and nothing of an excluded
+schema, of that schema or of an `exclude_objects` pattern was listed. Not measured: the condition
 `[schema_id] IN | NOT IN (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN (...))`
 in the reads of every object; `t.[is_external] = 0` in the reads of the columns, constraints and
 indexes; the type `ET` of an external table in `sys.objects`; which schemas `sys.schemas` shows to
@@ -1921,11 +1923,10 @@ tables.
   the scope in r3 and comes back in r5 with a file that differs from what the chain made; a later
   pull request withdraws `0002` alone. `verify` can then give `WDR004` for `dbo.Rates` although
   the file is right.
-- The templates call the reusable workflows of the tag in `pyproject.toml` (v0.2.0), whose
-  `onboard.yml` has no input `schema`. The template `onboard.yml` of this branch passes `schema`:
-  until a release tag holds this change, a repository that copies the template from `main` gets a
-  workflow error ("schema is not defined") at the dispatch. The version bump of the next release
-  closes it.
+- Closed by 0.3.0: the templates call the reusable workflows of the tag in `pyproject.toml`
+  (v0.3.0), whose `onboard.yml` has the input `schema`, and the template `onboard.yml` gives it. A
+  database repository that pins v0.2.0 must not give `schema`: `onboard.yml@v0.2.0` does not have
+  the input, and GitHub refuses the dispatch.
 
 ## 16. Drift of a constraint name (A35, 2026-10-28)
 
@@ -1950,7 +1951,10 @@ Sections 2, 7 and 11 (row T4) have the details.
   `test_a_record_of_v0_2_0_of_a_check_under_its_fixed_name_ends_with_the_name_of_the_file`.
 - `docs/design.md` has no separate amendment for the rename to the name of the file: it is part
   of the A35 bullet of "As built".
-- Proven against fakes only (`FakeDatabase`). Nothing of this section ran on a database.
+- One live run on a database, 2026-10-28 (`docs/live-testing.md`, section 13): an engine-named
+  DEFAULT gave the drift property, the rename line, the stop of the plan with `DRIFT_TOUCHED`, and
+  no drift after the DBA ran the rename. The other cases of this section are proven against fakes
+  only (`FakeDatabase`).
 
 ## 17. Transitive dependants (A36, A37, 2026-10-28)
 
@@ -1979,8 +1983,10 @@ A36 and A37; section 3, row A12). Limits:
   refresh set.
 - Dependants of a module that the release creates are not read, because the module has no
   OBJECT_ID before the deploy.
-- Proven against fakes only. The fake gives a view the columns that it uses, not the columns of its
-  select list.
+- Proven against fakes, and in one live run on a database, 2026-10-28 (`docs/live-testing.md`,
+  section 13): a view on a view on a retyped column was listed with its path, refreshed after the
+  view that it uses, and then gave the new width. The fake gives a view the columns that it uses,
+  not the columns of its select list.
 
 ## 18. `azsqlcd align` (A38, A39, 2026-10-28)
 
@@ -2009,7 +2015,11 @@ and A45). A46 is their combination.
 
 ### Parking
 
-- Proven against the fake database only. No live run on Azure SQL Database yet.
+- One live end-to-end run on Azure SQL Database, 2026-10-28 (`docs/live-testing.md`, section 13):
+  the park, its notes in `plan`, `report.json` and `drift`, `SET_ASIDE_DEPENDENCY`, a second park
+  after an early unpark, and the run after the unpark passed. `resolve --mark-applied` failed there
+  with `CHAIN_DIVERGED` where a product was held. It is fixed and proven against the fake database
+  only.
 - Independence uses a token scan. It counts only names that are written with their schema
   (`[sales].[Order]`, `sales.Order`). A raw or data batch that names an object without its schema is
   not compared on that name. Such a batch can run past a parked migration that touches the object.
@@ -2079,11 +2089,16 @@ and A45). A46 is their combination.
   change, `baseline` reports a difference, and `align` writes no statement for it. Not tested.
 - `azsqlcd products --codeowners` finds the files of a product by their file name
   (`<schema>.<name>.sql`), not by the module header.
-- Proven against fakes only. No live run on Azure SQL Database.
+- One live end-to-end run on Azure SQL Database, 2026-10-28 (`docs/live-testing.md`, section 13):
+  the hold in sandbox and test, its notes, `MIXED_HOLD` in `gen`, the raise of `promote_to`,
+  `products --env` and `products --codeowners` passed. The other items of this list are proven
+  against fakes only.
 
 ### Objects that one environment does not manage
 
-- Proven against fakes only. No run on Azure SQL Database or GitHub Actions.
+- One live end-to-end run on Azure SQL Database, 2026-10-28 (`docs/live-testing.md`, section 13):
+  a migration skipped in test, its notes and its step row (`not_applied`, `not managed in test`).
+  Not run on GitHub Actions. The other items of this list are proven against fakes only.
 - `drift` does not list the migrations that an environment skipped. Only `plan` and `deploy` show
   them (notes).
 - Without `[scope]`, a module that comes back after a pattern is taken away stops the plan with
@@ -2097,7 +2112,9 @@ and A45). A46 is their combination.
 
 ### The three together
 
-- Proven against fakes only, by two scenario tests (design A46).
+- Proven against fakes, by two scenario tests (design A46). The live run of 2026-10-28
+  (`docs/live-testing.md`, section 13) had a park and a hold in one environment. It found the
+  `--mark-applied` defect of "Parking"; the fix is proven against fakes only.
 - Each set-aside migration has one reason. A park or a skip as not managed wins over a hold. A
   product migration that an environment does not manage is skipped there for good: it does not run
   there after `promote_to` is raised. To run it there, take the pattern away before the first

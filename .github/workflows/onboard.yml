@@ -99,7 +99,7 @@ jobs:
           set -euo pipefail
           gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
       - id: targets
-        uses: akaalholdings/azsqlcd@v0.2.0
+        uses: akaalholdings/azsqlcd@v0.3.0
         with:
           args: |
             targets
@@ -165,7 +165,7 @@ jobs:
           tenant-id: ${{ fromJSON(needs.targets.outputs.target).tenant_id }}
           allow-no-subscriptions: true
       - if: ${{ inputs.action == 'export' }}
-        uses: akaalholdings/azsqlcd@v0.2.0
+        uses: akaalholdings/azsqlcd@v0.3.0
         with:
           db: true
           args: |
@@ -183,7 +183,7 @@ jobs:
             --ci
             github
       - if: ${{ inputs.action == 'baseline-report' }}
-        uses: akaalholdings/azsqlcd@v0.2.0
+        uses: akaalholdings/azsqlcd@v0.3.0
         with:
           db: true
           args: |
@@ -262,7 +262,7 @@ jobs:
           client-id: ${{ fromJSON(needs.targets.outputs.target).deploy_client_id }}
           tenant-id: ${{ fromJSON(needs.targets.outputs.target).tenant_id }}
           allow-no-subscriptions: true
-      - uses: akaalholdings/azsqlcd@v0.2.0
+      - uses: akaalholdings/azsqlcd@v0.3.0
         with:
           db: true
           args: |

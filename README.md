@@ -45,8 +45,9 @@ L14, and L13 in part. On 2026-10-28 a check of columnstore alignment on partitio
 
 The features of 0.3.0 (`[scope]`, `align`, parking, product holds, `[env.<name>] not_managed`,
 constraint-name drift, transitive dependants) are proven against the fake engine. A live
-end-to-end run of them on 2026-10-28 found defects in `align` and in `resolve --mark-applied`
-where a product is held; they are fixed and tested against the fake, and that run was not repeated.
+end-to-end run of them on 2026-10-28 (`docs/live-testing.md`, section 13) found defects in `align`
+and in `resolve --mark-applied` where a product is held; they are fixed and tested against the
+fake, and that run was not repeated.
 
 On GitHub Actions (a scratch demo repository, 2026-10-07): the workflows ran up to the Azure login
 step. Green: release create, `verify` (pass, and fail as required), dispatch of an existing

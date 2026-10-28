@@ -26,7 +26,7 @@ on:
         type: string
         default: ''
       schema:
-        description: One schema of [scope], to onboard schema by schema (empty for the whole scope). Needs the tool tag after 0.2.0
+        description: One schema of [scope], to onboard schema by schema (empty for the whole scope)
         type: string
         default: ''
 
@@ -37,7 +37,7 @@ jobs:
   # `contents: write` is only the upper limit that release.yml declares for a push.
   release:
     if: ${{ github.ref == 'refs/heads/main' }}
-    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.3.0
     permissions:
       contents: write
     with:
@@ -45,7 +45,7 @@ jobs:
 
   onboard:
     needs: release
-    uses: akaalholdings/azsqlcd/.github/workflows/onboard.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/onboard.yml@v0.3.0
     permissions:
       contents: read
       id-token: write
@@ -56,8 +56,7 @@ jobs:
       release: ${{ needs.release.outputs.release }}
       digest: ${{ needs.release.outputs.digest }}
       confirm_database: ${{ inputs.confirm_database }}
-      # The input schema needs the tool tag after 0.2.0: then remove the `# ` below.
-      # schema: ${{ inputs.schema }}
+      schema: ${{ inputs.schema }}
       # Managed identity: remove the `# ` below. baseline then runs on the runners of the deploy identity.
       runs-on: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod"}' || '{"group":"azsql-nonprod"}' }}
       # runs-on-deploy: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod-deploy"}' || '{"group":"azsql-nonprod-deploy"}' }}

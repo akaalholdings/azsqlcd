@@ -169,7 +169,7 @@ So:
       `runs-on-deploy` line: in `db.yml` one for each stage, and one in `onboard.yml` and in
       `resolve.yml`. Do not change `runs-on`. The drift call has no `runs-on-deploy`: drift
       uses the plan identity only. Merge this change by pull request. The input `runs-on-deploy`
-      is in the tool release after 0.2.0. The `uses:` lines must name that tag or a later one
+      is in tool version 0.3.0 and later. The `uses:` lines must name that tag or a later one
       (section 9). GitHub refuses a run that gives an input that the called workflow does not have.
    3. Then remove the deploy identities from the runners of `azsql-nonprod` and `azsql-prod`.
       If you do this step before step 2, a deploy job that still runs on `runs-on` cannot get
@@ -693,8 +693,8 @@ A managed table with a foreign key to a table that leaves the scope fails `verif
 referenced table has no file) until the pull request drops the foreign key or keeps the table in
 the scope.
 
-The workflow `onboard.yml` takes the input `schema` from the release that holds this change on:
-a database repository whose workflows call the reusable workflows of an older tag runs the export
+The workflow `onboard.yml` takes the input `schema` from tool version 0.3.0 on: a database
+repository whose workflows call the reusable workflows of an older tag runs the export
 and the baselines of one schema from a workstation (section 2, "Three ways to sign in"), with the
 plan identity for `export` and `--report-only` and the deploy identity for the baseline that
 writes.

@@ -24,7 +24,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: akaalholdings/azsqlcd@v0.2.0
+      - uses: akaalholdings/azsqlcd@v0.3.0
         with:
           args: |
             verify

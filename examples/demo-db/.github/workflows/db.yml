@@ -26,14 +26,14 @@ permissions: {}
 jobs:
   verify:
     if: ${{ github.event_name == 'pull_request' }}
-    uses: akaalholdings/azsqlcd/.github/workflows/verify.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/verify.yml@v0.3.0
     permissions:
       contents: read
 
   # Push: builds the commit and creates release r<n>. Dispatch: builds the tag again and compares.
   release:
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
-    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/release.yml@v0.3.0
     permissions:
       contents: write
     with:
@@ -47,7 +47,7 @@ jobs:
   # then runs on its own runner group, and only those runners hold the deploy identity.
   dev:
     needs: release
-    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.3.0
     permissions:
       contents: write
       id-token: write
@@ -64,7 +64,7 @@ jobs:
 
   sandbox:
     needs: [release, dev]
-    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.3.0
     permissions:
       contents: write
       id-token: write
@@ -81,7 +81,7 @@ jobs:
 
   test:
     needs: [release, sandbox]
-    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.3.0
     permissions:
       contents: write
       id-token: write
@@ -98,7 +98,7 @@ jobs:
 
   preprod:
     needs: [release, test]
-    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.3.0
     permissions:
       contents: write
       id-token: write
@@ -115,7 +115,7 @@ jobs:
 
   prod:
     needs: [release, preprod]
-    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.3.0
     permissions:
       contents: write
       id-token: write
@@ -140,7 +140,7 @@ jobs:
           - { environment: test, runs-on: '{"group":"azsql-nonprod"}' }
           - { environment: preprod, runs-on: '{"group":"azsql-nonprod"}' }
           - { environment: prod, runs-on: '{"group":"azsql-prod"}' }
-    uses: akaalholdings/azsqlcd/.github/workflows/drift.yml@v0.2.0
+    uses: akaalholdings/azsqlcd/.github/workflows/drift.yml@v0.3.0
     permissions:
       contents: read
       id-token: write

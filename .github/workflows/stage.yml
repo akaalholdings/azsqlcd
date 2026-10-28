@@ -74,7 +74,7 @@ jobs:
           if ! [[ "$RELEASE" =~ $name ]]; then echo "::error::input release must match ^r[0-9]+\$"; exit 1; fi
           gh release download "$RELEASE" -R "$GITHUB_REPOSITORY" -p bundle.tar -p manifest.json -D release
       - id: targets
-        uses: akaalholdings/azsqlcd@v0.2.0
+        uses: akaalholdings/azsqlcd@v0.3.0
         with:
           args: |
             targets
@@ -139,7 +139,7 @@ jobs:
           tenant-id: ${{ matrix.target.tenant_id }}
           allow-no-subscriptions: true
       - id: plan
-        uses: akaalholdings/azsqlcd@v0.2.0
+        uses: akaalholdings/azsqlcd@v0.3.0
         with:
           db: true
           args: |
@@ -311,7 +311,7 @@ jobs:
           tenant-id: ${{ matrix.target.tenant_id }}
           allow-no-subscriptions: true
       - id: deploy
-        uses: akaalholdings/azsqlcd@v0.2.0
+        uses: akaalholdings/azsqlcd@v0.3.0
         with:
           db: true
           # An expression that gives '' leaves an empty line; the action drops empty lines.

@@ -107,7 +107,7 @@ Ask for every missing value in one question: `STOP 0`.
 |---|---|---|
 | `TARGET_ORG` | The target organisation: the GitHub organisation that holds the ported tool (`docs/porting.md`), in the letter case of GitHub | Phase 2 |
 | `TOOL_URL` | The clone address of the tool repository there | Phase 2 |
-| `TOOL_TAG` | The tag of the tool to install, for example `v0.2.0` | Phase 2 |
+| `TOOL_TAG` | The tag of the tool to install, for example `v0.3.0` | Phase 2 |
 | `CLONE_DIR` | A short folder for the clones, for example `C:\src` | Phase 2 |
 | `DB_REPO` | `<owner>/<name>` of the pilot database repository. It exists and has a branch `main` | Phase 4 |
 | `PROJECT` | The project name for `azsqlcd.toml` | Phase 4 |
@@ -233,7 +233,7 @@ function azsqlcd { uv run --project $TOOL --no-sync azsqlcd @args }
 azsqlcd --version
 ```
 
-- Expected: `azsqlcd` and the version of the tag without the `v`, for example `azsqlcd 0.2.0`.
+- Expected: `azsqlcd` and the version of the tag without the `v`, for example `azsqlcd 0.3.0`.
 - If it differs: `STOP 3`.
 
 3.2 A database repository from the example. The folder must not exist yet.

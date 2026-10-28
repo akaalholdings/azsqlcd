@@ -6,6 +6,8 @@ number and date. Version numbers follow semantic versioning.
 
 ## Unreleased
 
+## 0.3.0 - 2026-10-28
+
 ### Added
 
 - Optional table `[scope]` in `azsqlcd.toml` (`schemas`, `exclude`, `exclude_objects`): the tool
@@ -15,8 +17,8 @@ number and date. Version numbers follow semantic versioning.
   of the repository, and prints what to add to `[scope] schemas`. `baseline --schema NAME` compares
   and records the objects of one schema that have no managed row; the other rows stay as they are.
   The workflow `onboard.yml` takes the input `schema` for both. A database repository gets it when
-  its callers pin this tag: the callers of the template and the example keep `schema:` as a comment
-  line while they pin v0.2.0, which refuses an unknown input.
+  its callers pin this tag (`onboard.yml@v0.2.0` refuses an unknown input). The callers of the
+  template and the example pin this tag and give `schema`.
 - Reason codes 22 `OUT_OF_SCOPE` (`export --schema`, `baseline --schema`, `align --schema` and
   `resolve --adopt-module` outside the scope) and 22 `SCHEMA_NOT_FOUND` (`export --schema` of a
   schema that the database does not have). Lint and verify finding `OUT_OF_SCOPE`: an object file,
@@ -195,8 +197,8 @@ number and date. Version numbers follow semantic versioning.
   expression, state and, for a key on a scheme, its place), not by a name, so two CHECK
   constraints do not swap. The rename gives the recorded name, also when the next release renames
   the constraint in its file. A database with no such constraint gives the same output as before.
-  Not run on a database yet. What to do: `docs/runbook.md`, "A constraint with a name that the
-  engine made".
+  Run once on a database (`docs/live-testing.md`, section 13). What to do: `docs/runbook.md`, "A
+  constraint with a name that the engine made".
 - The read-back of a deploy (and of `mark-applied` and `accept-drift`) records an engine-named
   constraint under the name of its file, not under the fixed name of the reader (A35). The state
   tables did not change. Upgrade note: a database recorded by 0.1 or 0.2 can show new

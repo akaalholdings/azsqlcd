@@ -131,17 +131,18 @@ Do this on the machine that holds the source checkout.
    Check: `git ls-remote target refs/heads/main` prints the commit of `git rev-parse HEAD`.
 
    - Do not push a `v*` tag of the source. The tag of step 8 must point at a commit that holds
-     the port: a workflow at the tag must name `<target-org>`. The source has the tag `v0.1.0`;
-     its commit names `<source-org>`. A checkout that holds this tag refuses the `git tag` line
-     of step 8 (`fatal: tag 'v0.1.0' already exists`). Before step 8, remove the tag from this
-     checkout only: `git tag -d v0.1.0`. It changes nothing in the source repository.
+     the port: a workflow at the tag must name `<target-org>`. The source has a tag for each release
+     (`v0.1.0` and later); their commits name `<source-org>`. A checkout that holds the tag of
+     step 8 refuses its `git tag` line (`fatal: tag 'v0.3.0' already exists`). Before step 8,
+     remove that tag from this checkout only: `git tag -d v0.3.0`. It changes nothing in the
+     source repository.
    - The pushed history holds the old name and the author addresses of the old commits. If the
      target GitHub refuses the push for that reason, or you do not want the history there, push
      one commit with no history instead:
 
      ```
      git checkout --orphan target-main
-     git commit -m "Import azsqlcd 0.1.0"
+     git commit -m "Import azsqlcd 0.3.0"
      git push target target-main:main
      ```
 
@@ -182,11 +183,11 @@ Do this on the machine that holds the source checkout.
 
    ```
    git fetch target
-   git tag v0.1.0 target/main
-   git push target v0.1.0
+   git tag v0.3.0 target/main
+   git push target v0.3.0
    ```
 
-   Check: `git ls-remote --tags target v0.1.0` and `git ls-remote target refs/heads/main` print the
+   Check: `git ls-remote --tags target v0.3.0` and `git ls-remote target refs/heads/main` print the
    same commit. A later release of the tool: `docs/setup.md`, section 1, step 5, and section 9.
 
 A later move of the repository (a second organisation, or a rename) names its own source:
@@ -232,7 +233,7 @@ shell, run the bash line of the quickstart in Git Bash.
 3. Get the tool at the tag and install it with the locked versions.
 
    ```powershell
-   git clone --branch v0.1.0 https://github.com/<target-org>/<tool-repo>.git C:\src\azsqlcd
+   git clone --branch v0.3.0 https://github.com/<target-org>/<tool-repo>.git C:\src\azsqlcd
    cd C:\src\azsqlcd
    uv sync --frozen --extra db
    $TOOL = "C:\src\azsqlcd"
@@ -240,7 +241,7 @@ shell, run the bash line of the quickstart in Git Bash.
    azsqlcd --version
    ```
 
-   Check: `azsqlcd 0.1.0`. The function lasts for this PowerShell session; put the two lines
+   Check: `azsqlcd 0.3.0`. The function lasts for this PowerShell session; put the two lines
    into your profile to keep it. Check the line ends of the checkout:
 
    ```powershell
@@ -250,7 +251,7 @@ shell, run the bash line of the quickstart in Git Bash.
    prints nothing.
 
    Other way, from the design, not run for this project:
-   `uv tool install "git+https://github.com/<target-org>/<tool-repo>@v0.1.0"`. It gives the command
+   `uv tool install "git+https://github.com/<target-org>/<tool-repo>@v0.3.0"`. It gives the command
    `azsqlcd` for `lint`, `gen` and `verify` with no driver, and it does not read `uv.lock`
    (assumption of the design). For a database command use the clone.
 
@@ -324,7 +325,7 @@ fault of the driver or of the wiring.
      environments (target id, server, database). Leave `table_model = false`. The six client ids
      come from step 3. The rules of the file: `docs/setup.md`, section 3, step 3.
    - `.github/CODEOWNERS`: `@<target-org>/<dba-team>` on every line. The team needs write access.
-   - `.github/workflows/`: every `uses:` names `<target-org>/<tool-repo>` at `@v0.1.0` after
+   - `.github/workflows/`: every `uses:` names `<target-org>/<tool-repo>` at `@v0.3.0` after
      section B. Change `runs-on` only if your runner groups have other names than
      `azsql-nonprod` and `azsql-prod`. `gated` of each stage in `db.yml` must equal `gated` in
      `azsqlcd.toml`.
@@ -386,8 +387,8 @@ fault of the driver or of the wiring.
 5. The runner (`docs/setup.md`, section 5). Ask the platform team for: two runner groups,
    `azsql-nonprod` (dev, sandbox, test, preprod) and `azsql-prod` (prod only); one job for each
    machine; access of each group limited to the database repositories and to the workflows
-   `<target-org>/<tool-repo>/.github/workflows/stage.yml@v0.1.0`, `resolve.yml@v0.1.0`,
-   `drift.yml@v0.1.0` and `onboard.yml@v0.1.0`; the image (bash, gh, az, uv, Python 3.12,
+   `<target-org>/<tool-repo>/.github/workflows/stage.yml@v0.3.0`, `resolve.yml@v0.3.0`,
+   `drift.yml@v0.3.0` and `onboard.yml@v0.3.0`; the image (bash, gh, az, uv, Python 3.12,
    `libltdl7`, `libkrb5-3`, `libgssapi-krb5-2`); a private endpoint path to each server; egress to
    GitHub, `login.microsoftonline.com` and PyPI. Treat the workflows as Linux only (N4-12).
    With a managed identity and the split of setup section 2: four groups. Also

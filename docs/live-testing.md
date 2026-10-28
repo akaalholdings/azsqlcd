@@ -748,3 +748,96 @@ most one columnstore index on a table.
 Still not proven after this run: L13 for the full 90 minutes after the expiry; gate G-D5 on Windows with Python 3.14 and on the runner image;
 sign-in with a managed identity (it needs a machine in Azure); L8 across two servers; the loss of
 the network during `COMMIT` (section 7); the GitHub checklist (section 8).
+
+## 13. Live run of 0.3.0 (2026-10-28)
+
+Code: the branch of release 0.3.0 at commit `e8490bc`, before the version commit. Place: Azure SQL
+Database, one logical server with two sets of databases, one database for each environment of a
+scenario. The server and the databases were temporary and were deleted after the run. The two
+scenario scripts are not in the repository. They run the command line against the databases of
+one set, as an operator does. Where this section names an item as run that `docs/known-gaps.md`,
+sections 15 to 19, gives as not run on a database, this section wins.
+
+| Scenario | Database set | Features | Result |
+|---|---|---|---|
+| `s1_stack_a.py` | 1 | `[scope]`, transitive dependants, constraint-name drift, `align` | 34 pass, 4 fail |
+| `s2_flow.py` (third run) | 2 | product holds, parking, `[env.<name>] not_managed`, `products` | 65 pass, 4 fail. The 40 checks of the first version of the scenario all pass |
+
+What passed in `s1_stack_a.py`:
+
+- `[scope]`: the first release deploys to dev, sandbox and test. With a schema in neither list of
+  `[scope]`, `plan` and `drift` in dev end with exit 0. The plan has the note `SCHEMA_UNSCOPED`,
+  and `drift` prints `unscoped SCHEMA:[billing] SCHEMA_UNSCOPED - -`, then `no drift`. Neither
+  lists an object of an excluded schema, of the unlisted schema or of an `exclude_objects`
+  pattern.
+- Transitive dependants: `gen` retypes a column of `[sales].[Customer]`. The plan lists
+  `vCustomerB`, which uses the table only through `vCustomerA`, with the note `dependant through
+  other modules: VIEW:[sales].[vCustomerB] -> VIEW:[sales].[vCustomerA] -> TABLE:[sales].[Customer]`.
+  It refreshes `vCustomerA` before `vCustomerB`. After the deploy, `vCustomerB` gives the new width.
+- Constraint-name drift: in sandbox a DEFAULT has a name that the engine made. `drift` ends with
+  exit 30 and gives the property `constraint_name [DF_Customer_IsActive] (DEFAULT, live name
+  [DF__Customer__...])` and the line `rename TABLE:[sales].[Customer] EXEC sys.sp_rename ...;`. The
+  plan of the next release stops with 22 `DRIFT_TOUCHED` and prints the same line. After the DBA
+  runs the rename, `drift` gives `no drift`.
+- `align` in test ends with exit 0 and writes `align.sql` and `align.md` under `--out`. It gives
+  the narrowing of a column back to its file as a comment after `-- REVIEW: loses data:`, widens a
+  column to its file, and checks a disabled foreign key again. It runs nothing in the database.
+
+What failed in `s1_stack_a.py`: 4 checks, one defect of the tool. `align` compared the text of
+each expression (DEFAULT, CHECK, computed column, index filter, table type) with the file. The
+engine gives an expression back in its normal form: `((1))` for `(1)`, and `([Kind]='S' OR
+[Kind]='B')` for `[Kind] IN ('B', 'S')`. The tool had deployed every object from the same files,
+and the read-back and `drift` found no difference. Still:
+
+1. `align.sql` held a DROP and an ADD of every DEFAULT and CHECK constraint of the database, and a
+   DROP and a CREATE of every filtered index (21 pairs in test).
+2. `align.md` listed `COMPUTED_CHANGE` and `USER_TYPE_CHANGE` under Hand-write for objects that do
+   not differ.
+3. A disabled CHECK constraint got no `WITH CHECK CHECK CONSTRAINT`: section 2 of the script
+   created it again.
+4. In dev, which equals the files, `align` did not write "nothing to align" (`docs/setup.md`).
+
+Read-back, `baseline` and `drift` compare an expression by its presence only. After the run,
+`align` was changed to do the same, with a unit test that gives the expressions in the form of the
+engine. Not run on a database again.
+
+What passed in `s2_flow.py`:
+
+- Product holds: in sandbox the plan gives `held: 0002__balance.sql (product balance, promote_to =
+  "dev")` and the notes `held in sandbox: ...` and `products: ...`. The deploy sends only the
+  shared part, and `drift` gives `no drift`. `products --env sandbox` lists the held items. `gen`
+  refuses a mixed migration with 22 `MIXED_HOLD`. After `promote_to` is raised to sandbox, the
+  held migration and module run there with the note `catch-up past set-aside: ...`, and test still
+  holds them. `products` and `products --codeowners` give the owners and the CODEOWNERS lines.
+- Parking: a migration that fails in sandbox (21 `BATCH_FAILED`) is parked. The plan gives
+  `parked: 0004__customer_name_unique.sql (run 3, BATCH_FAILED)`, and `drift` prints the park and
+  ends with exit 0. The next release deploys past it, with the note in the warnings of
+  `report.json`. A release with a migration that names the same table stops with 22
+  `SET_ASIDE_DEPENDENCY`, and the message names both migrations. After an unpark before the data
+  fix, the deploy fails again (21), the whole unit is rolled back, and the migration is parked again
+  by the new run. After the data fix and an unpark, the deploy runs it (`catch-up past set-aside:
+  ...`). The unpark is a resolve step with the note `unpark <file>`.
+- `[env.test] not_managed`: a migration that touches only `[legacy].[old]` is skipped in test. The
+  report gives the notes, `azsqlcd.step` has a row with the status `not_applied` and the note `not
+  managed in test`, and test does not have the table. `drift` in test gives `no drift`.
+- A migration that fails in test, where a product is held, is parked (21 `BATCH_FAILED`), and
+  `resolve --unpark` passes.
+
+What failed in `s2_flow.py`: 4 checks, one defect of the tool. `resolve --mark-applied` did not
+use the product holds. Where a held migration (`0002__balance.sql`) comes before applied ones,
+every `--mark-applied` stopped with 22 `CHAIN_DIVERGED`:
+
+1. `--mark-applied` of a parked migration in sandbox. Expected: 22 `RESOLVE_NOT_APPLICABLE`
+   (`docs/setup.md`, "Park a migration that fails").
+2. The same in test.
+3. `--mark-applied` in test after `--unpark` of a migration that the DBA applied by hand.
+   Expected: exit 0.
+4. The next deploy in test then stopped with 22 `NAME_COLLISION` on the index that the DBA built.
+   This follows from item 3.
+
+After the run, `plan` and `--mark-applied` were changed to use the same set-aside work, with the
+park check first, and a unit test was added. Not run on a database again.
+
+Still not proven after this run: the two fixes above on a database; the 0.3.0 features on GitHub
+Actions; the other items that `docs/known-gaps.md`, sections 15 to 19, gives as not run on a
+database.
