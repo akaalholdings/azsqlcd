@@ -2014,7 +2014,7 @@ def _leaves_scope(path: str, data: bytes, key: str | None, scope: config.Scope |
         return True
     if names.parse_object_key(key)[0] != "TRIGGER":
         return False
-    table = _trigger_table(modules.read_module(path, data))
+    table = modules.trigger_table(modules.read_module(path, data))
     return table is not None and not config.in_scope(scope, table)
 
 
