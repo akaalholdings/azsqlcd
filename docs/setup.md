@@ -907,6 +907,12 @@ To manage the objects again in that environment:
 No column and no status was added to the state tables. A skip is a row of `azsqlcd.step` with the
 kind `migration`, the status `not_applied` and the note `not_managed in <env>`.
 
+With parking and products in the same environment, each migration keeps one reason. A
+migration that this environment does not manage is skipped, also when it is a migration of a
+product that is held here: it does not run here after `promote_to` is raised. A parked migration
+stays parked. `drift` lists the parked migrations only; `plan` and `deploy` show the skipped and
+the held ones.
+
 ### Partitioned tables
 
 Not run on a database yet: `docs/known-gaps.md`, section 14.

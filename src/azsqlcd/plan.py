@@ -1157,7 +1157,9 @@ def pending_work(
     if hold is not None:
         absent = [key for key in held_modules if key not in managed]
         products.check_held_modules(hold, pending, [in_release[key] for key in need], absent)
-        aside_notes += hold.notes(pending, [entry.file for entry in held], [*need, *drops], held_modules)
+        # held only: a park or a skip as not_managed of a product migration keeps its own reason
+        on_hold = [entry.file for entry in held if aside.active[entry.file].reason == set_aside.HELD]
+        aside_notes += hold.notes(pending, on_hold, [*need, *drops], held_modules)
 
     nontx = next((migration for migration in pending if migration.mode == "nontx"), None)
     first_converge = (

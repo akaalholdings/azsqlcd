@@ -2951,3 +2951,113 @@ def test_a_managed_view_of_a_not_managed_table_is_sent_with_a_note(pipe):
         "not_managed: VIEW:[sales].[vw_OldNote] names [legacy].[old], which [env.test] not_managed "
         "matches: the tool does not know that object here"
     ) in notes
+
+
+# ------------------------------------------------------------------ parking, holds and not_managed together
+def all_three(pipe: Pipeline, promote_to: str) -> None:
+    """azsqlcd.toml with park_failed = true, the product balance up to promote_to, and test that does
+    not manage legacy.*."""
+    text = toml().replace("table_model = true", "table_model = true\npark_failed = true")
+    text = text.replace("[env.test]\n", '[env.test]\nnot_managed = ["legacy.*"]\n')
+    pipe.write("azsqlcd.toml", text + PRODUCT.format(promote_to=promote_to))
+
+
+def test_a_held_a_skipped_and_a_parked_migration_in_one_environment(pipe, tmp_path, monkeypatch):
+    """test holds the product balance (promote_to = "dev"), does not manage legacy.*, and parks a
+    migration that fails there. Each one keeps its own reason; a shared release deploys past all
+    three; when promote_to is raised and the park ends, the held and the parked ones run, and the
+    skipped one never runs."""
+    monkeypatch.chdir(tmp_path)
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    dev, test = pipe.dbs["dev"], pipe.dbs["test"]
+    all_three(pipe, "dev")
+    pipe.push("parking, the product balance, and legacy not managed in test")
+
+    pipe.write_objects(BALANCE)
+    pipe.write(*BALANCE_VIEW)
+    balance = pipe.gen("balance").name
+    pipe.write_objects(OLD_NOTE)
+    old = pipe.gen("old_note").name
+    pipe.write_objects(ORDER_RANK)
+    rank = pipe.gen("order_rank").name
+    r1 = pipe.merge("balance, a note of old, and a rank", pipe.repo / "migrations" / rank)
+    assert pipe.promote(r1, "dev").code == 0
+    assert [m for m, _ in migrations(dev)[-3:]] == [balance, old, rank]
+
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    failed = pipe.promote(r1, "test")
+    assert (failed.code, failed.reason) == (21, "BATCH_FAILED")
+    park_run = test.rows("run")[-1]["run_id"]
+
+    planned, notes = plan_notes(pipe, r1, "test")
+    assert planned.code == 0, planned.err
+    assert f"parked: {rank} (run {park_run}, BATCH_FAILED)" in notes
+    assert f'held: {balance} (product balance, promote_to = "dev")' in notes
+    assert f'held in test: balance (promote_to = "dev"): {balance}, {BALANCE_VIEW_KEY}' in notes
+    assert any(
+        note.startswith(f"not managed in test: 1 object(s); skipped migrations: {old}") for note in notes
+    )
+    done = pipe.promote(r1, "test")
+    assert done.code == 0, done.err
+    applied = dict(migrations(test))
+    assert applied[old] == "not_applied" and balance not in applied and rank not in applied
+    assert BALANCE_VIEW_KEY not in texts(test) and "TABLE:[sales].[Balance]" not in test.model
+
+    # a shared release deploys past the three; the skipped one is no park and no hold
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert migrations(test)[-1] == (r2.file, "ok")
+    found = pipe.drift(r2, "test")
+    assert found.code == 0, found.err
+    assert f"parked: {rank} (run {park_run}, BATCH_FAILED)" in found.out.splitlines()
+    assert not any(line.startswith(("not_managed:", "held:")) for line in found.out.splitlines())
+    refused = pipe.resolve(r2, "test", "--unpark", old)
+    assert (refused.code, refused.reason) == (22, "RESOLVE_NOT_APPLICABLE")
+
+    # promote_to goes to test and the park ends: balance and the rank run, in chain order
+    assert pipe.resolve(r2, "test", "--unpark", rank).code == 0
+    all_three(pipe, "test")
+    r3 = pipe.merge("balance reaches test")
+    assert pipe.promote(r3, "dev").code == 0
+    done = pipe.promote(r3, "test")
+    assert done.code == 0, done.err
+    applied = dict(migrations(test))
+    assert applied[balance] == applied[rank] == "ok" and applied[old] == "not_applied"
+    assert texts(test)[BALANCE_VIEW_KEY] == texts(dev)[BALANCE_VIEW_KEY]
+    assert "TABLE:[sales].[Balance]" in test.model and "Rank" in str(test.model["TABLE:[sales].[Order]"])
+    assert pipe.drift(r3, "test").code == 0
+
+
+def test_a_product_migration_that_test_does_not_manage_is_skipped_there_not_held(pipe, tmp_path, monkeypatch):
+    """not_managed wins over a hold: the migration never runs in test, also after promote_to is
+    raised, and the notes do not call it held."""
+    monkeypatch.chdir(tmp_path)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    text = toml().replace("[env.test]\n", '[env.test]\nnot_managed = ["sales.Balance*"]\n')
+    pipe.write("azsqlcd.toml", text + PRODUCT.format(promote_to="dev"))
+    pipe.push("balance stays in dev, and test does not manage its table")
+    pipe.write_objects(BALANCE)
+    r1 = pipe.release("the table of balance", "balance")
+    assert pipe.promote(r1, "dev").code == 0
+
+    planned, notes = plan_notes(pipe, r1, "test")
+    assert planned.code == 0, planned.err
+    assert any(
+        note.startswith(f"not managed in test: 0 object(s); skipped migrations: {r1.file}") for note in notes
+    )
+    assert not any(note.startswith(("held:", "held in test:")) for note in notes), notes
+    assert pipe.promote(r1, "test").code == 0
+    assert dict(migrations(test))[r1.file] == "not_applied"
+
+    pipe.write("azsqlcd.toml", text + PRODUCT.format(promote_to="test"))
+    r2 = pipe.merge("balance reaches test")
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert dict(migrations(test))[r1.file] == "not_applied" and "TABLE:[sales].[Balance]" not in test.model

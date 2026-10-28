@@ -1336,7 +1336,14 @@ def drift(
         for key, differences in differing.items()
         for rename in catalog_tables.name_drift_renames(key, [d.property for d in differences])
     ]
-    aside = set_aside.in_force(set_aside.read(session, config, recorded), recorded.steps, bundle.files)
+    # parks only: a skip as not_managed is no park, and plan and deploy show it (note not managed in)
+    aside = tuple(
+        item
+        for item in set_aside.in_force(
+            set_aside.read(session, config, recorded), recorded.steps, bundle.files
+        )
+        if item.reason == set_aside.PARKED
+    )
     return DriftResult(
         tuple(sorted(items, key=lambda item: (item.object_key, item.property))), tuple(renames), aside
     )

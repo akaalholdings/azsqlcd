@@ -1031,6 +1031,20 @@ one environment does not manage", is the procedure.
   <kind> batch: ...`), and a migration or a module to send that names a matched object
   (`not_managed: <what> names ...`). The object of a raw batch directive counts as touched.
 
+### Parking, holds and not_managed together (2026-10-28)
+
+- A41. The three reasons of A35, A37 and A39 in one environment. Each set-aside migration keeps
+  one reason: `compute_plan` adds the skips of `not_managed` to the `Aside` first, and
+  `Hold.merge` keeps an entry that is there (`setdefault`), so a park or a skip wins over a hold.
+  A product migration that an environment does not manage is skipped there for good, also after
+  `promote_to` is raised. (a) `Work.set_aside` lists only the set-aside migrations that can run
+  later (parked, held): a skip never creates its objects, so they stay `BASELINE_REQUIRED` when
+  the pattern goes. (b) `drift` lists the parks only (`parked: ...`); a skip is shown by `plan` and
+  `deploy`. (c) The notes `held in <env>: ...` and `products: ...` count the held migrations only,
+  not a parked or skipped migration of a product. No state-table change. Scenario tests:
+  `test_a_held_a_skipped_and_a_parked_migration_in_one_environment`,
+  `test_a_product_migration_that_test_does_not_manage_is_skipped_there_not_held`.
+
 ---
 
 # Part 2: blueprint (unchanged but for three lines; see "Reading order")
