@@ -1340,6 +1340,55 @@ def _parse_only(open_second_session: Callable[[], Session], bundle: Bundle, unit
         )
 
 
+def _refuse_stale_rows(
+    hooks: TableHooks,
+    session: Session,
+    bundle: Bundle,
+    work: Work,
+    keys: Sequence[str],
+    skipped: Collection[str],
+) -> None:
+    """Under [scope]: refuse a managed table-class row whose object the release models otherwise
+    while no pending migration changes it and it has no drift (review V2). The proof of verify
+    allows that only for an object that enters the scope (PRF000), and for an object of a withdrawn
+    migration that this database ran (left out here). So the row is of an object that left the scope
+    in a release that this target did not deploy: the deploy of that release did not mark the row
+    dropped, and the plan would take the row as the truth. Read-only; STALE_MANAGED_ROW.
+    """
+    ran = {applied.id for applied in work.applied if applied.status == "ok"}
+    files = bundle.files
+    entries = (
+        chain.parse_sum(_utf8(files, chain.SUM_PATH, "CHAIN_INVALID")).entries
+        if chain.SUM_PATH in files
+        else ()
+    )
+    withdrawn = tuple(
+        _read_migration(files, entry)
+        for entry in entries
+        if entry.withdrawn and entry.file in ran and f"migrations/{entry.file}" in files
+    )
+    left = {fold(key) for key in hooks.touched_table_objects(replace(work, pending=withdrawn))}
+    held = [key for key in keys if fold(key) not in skipped and fold(key) not in left]
+    if not held:
+        return
+    try:
+        hooks.read_back(session, bundle, held, None)
+    except ToolError as e:
+        if e.reason_code != "READBACK_MISMATCH":
+            raise
+        stale = [str(problem["object"]) for problem in e.detail.get("objects", ())]
+        raise refused(
+            "STALE_MANAGED_ROW",
+            f"{stale[0]} has a managed row in this database, the release models it otherwise, and no "
+            f"pending migration changes it ({len(stale)} object(s) in all). The row is older than the "
+            "release in which its schema or pattern left [scope], and this target did not deploy that "
+            "release. Deploy that release first (it marks the rows dropped), then run "
+            f"{_baseline_schemas(_schemas_of(stale))}. Or make the object equal to its file by hand, "
+            "then run azsqlcd resolve --accept-drift <object key>. Nothing was sent",
+            objects=e.detail.get("objects", []),
+        ) from None
+
+
 def _with_table_steps(unit: Unit, refresh: Sequence[str], table_keys: Collection[str]) -> Unit:
     """Design (d) 4 and 5: refresh steps after the drops; the touched tables join the read-back."""
     old = next((step for step in unit.steps if step.kind == "readback"), None)
@@ -1559,6 +1608,15 @@ def compute_plan(
     if differing and environment.drift == "block":
         why = f'[env.{env}] has drift = "block"'
         raise _drift("DRIFT_BLOCK", why, sorted(differing), differing, absent)
+    if table_hooks is not None and scope is not None:
+        _refuse_stale_rows(
+            table_hooks,
+            session,
+            bundle,
+            work,
+            sorted(set(managed) - set(managed_modules)),
+            {*touched_folded, *(fold(key) for key in differing)},
+        )
 
     # step 7: CREATE OR ALTER would store the module with the flags of the session
     legacy = sorted(

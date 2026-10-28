@@ -755,6 +755,11 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   writes `state.mark_dropped` for the key in the transaction of the unit. No new column and no new
   status: `dropped` already means "no longer managed". An object that comes back has no managed
   row: `BASELINE_REQUIRED` names `baseline --schema`, which reads it back and records it again.
+- A target that skipped the release in which an object left keeps its managed row. Under
+  `[scope]` the plan reads back, against the model of the release, each managed table-class object
+  that no pending migration changes, that has no drift and that no withdrawn migration that ran
+  here changed; one that differs refuses the plan before any statement (`STALE_MANAGED_ROW`,
+  review V2).
 - Under a scope, `NAME_COLLISION` of modules that the database has with the kind of their file,
   and the table `BASELINE_REQUIRED`, are `BASELINE_REQUIRED` that names `azsqlcd baseline --schema`.
 - Export and baseline of one schema: `onboard.export(..., schema)` and `onboard.baseline(...,

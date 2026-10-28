@@ -1849,9 +1849,12 @@ tables.
   scope leaves them out. A target that never deploys such a release keeps them managed. Exact case
   (reproduced on the fakes): r3 takes `dbo` out of the scope and holds no migration; promotion skips
   r3 on a target, which goes from r2 to r5, and r5 takes `dbo` back with a table file that changed.
-  On that target the old rows of `dbo` count as managed, so r5 is planned with no
-  `BASELINE_REQUIRED` and the changed file is not compared until a release changes the table
-  (`READBACK_MISMATCH`). `baseline` and `resolve` runs do not mark rows either.
+  On that target the old rows of `dbo` count as managed. Review V2 closed the case of a changed
+  table-class file: under `[scope]` the plan reads every managed table-class object that no
+  pending migration changes and that has no drift, and refuses one that differs from the model
+  (`STALE_MANAGED_ROW`, exit 22, before any statement). Still open: an object with drift is not in
+  that check (the drift is reported); the check costs one more read of the managed tables of the
+  scope in each plan (not measured on a database); `baseline` and `resolve` runs do not mark rows.
 - The model of a withdrawal comes from the history (`gen._model_without`). It is filtered by the
   scope of the head revision, but it does not know that an object left the scope and came back
   between the withdrawn migration and the base: such an object is replayed from the history, not

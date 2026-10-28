@@ -1307,6 +1307,35 @@ def test_a_schema_that_leaves_the_scope_and_comes_back_is_compared_with_its_file
     assert project.tool("drift", *back.where, db=db).out.strip() == "no drift"
 
 
+def test_a_target_that_skipped_the_release_in_which_a_schema_left_is_refused_before_any_statement(project):
+    """Review V2: the target kept the managed rows of dbo, so the release in which dbo came back with
+    a changed table file was planned and deployed with no statement, and drift said "no drift"."""
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(SALES, CUSTOMER, ORDER, RATES)
+    db = deployed(project, project.release("create", "create_all"))
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    (project.repo / names.path_for("TABLE", "dbo", "Rates")).unlink()
+    left = project.release("dbo leaves the scope")  # no migration: a target can skip it
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(RATES_WIDE)
+    back = project.release("dbo comes back with a changed table file")
+    rows, sent = db.rows("object"), len(db.ddl)
+
+    for command in (
+        ["plan", *back.where, "--out", str(project.out("plan"))],
+        ["deploy", *back.where, "--inline-plan", "--out", str(project.out("r"))],
+    ):
+        refused = project.tool(*command, db=db)
+        assert (refused.code, refused.reason) == (22, "STALE_MANAGED_ROW"), refused.err
+        assert RATES_KEY in refused.err and "azsqlcd baseline --schema dbo" in refused.err
+    assert db.ddl[sent:] == [] and db.rows("object") == rows
+
+    # the way out that the refusal names: the release in which dbo left, then the baseline of dbo
+    assert project.deploy(left, db).code == 0 and status_of(db, RATES_KEY) == "dropped"
+    again = project.tool("plan", *back.where, "--out", str(project.out("plan")), db=db)
+    assert (again.code, again.reason) == (22, "BASELINE_REQUIRED")
+
+
 REPORTING = ("schema/schemas/reporting.sql", "CREATE SCHEMA [reporting];\n")
 REPORT_REFS = (
     "schema/views/reporting.vw_Refs.sql",
