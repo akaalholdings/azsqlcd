@@ -47,10 +47,10 @@ NOT_MANAGED = "not_managed"
 REASONS = (PARKED, HELD, NOT_MANAGED)
 # what an operator does so that the migration runs, or never runs, here
 WAY_OUT = {
-    PARKED: "end the park with azsqlcd resolve --unpark {file}, so that it runs first, or withdraw and "
-    "replace it",
+    PARKED: "end the park with azsqlcd resolve --unpark {file}, so that it runs again at its place in the "
+    "chain, or withdraw and replace it",
     HELD: "raise or remove promote_to of the product of {file} in azsqlcd.toml by pull request, so that it "
-    "runs here first",
+    "runs here at its place in the chain",
     NOT_MANAGED: "withdraw and replace {file}: a migration skipped as not managed never runs here",
 }
 # the ends of a deploy that say the engine refused the batch itself. A lost session, a lock timeout

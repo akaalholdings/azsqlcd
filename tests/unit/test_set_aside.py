@@ -105,6 +105,8 @@ def test_a_migration_that_shares_an_object_with_a_set_aside_one_is_refused(state
     assert (
         f"azsqlcd resolve --unpark {M2.file}" in e.value.message and "run 4, BATCH_FAILED" in e.value.message
     )
+    # after the unpark it runs at its place among the pending ones, which can be after the blocked one
+    assert "at its place in the chain" in e.value.message and "runs first" not in e.value.message
 
 
 def test_a_set_aside_migration_that_names_what_a_pending_one_touches_is_a_dependency_too():
