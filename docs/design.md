@@ -297,7 +297,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts; `schema_condition`, `list_schemas` | config, errors, names, session, sqlerrors, state |
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
-| `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A35) | chain, config, diff, errors, model, modules, names, parse, session, state |
+| `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -338,7 +338,7 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 |---|---|---|
 | `plan --out DIR` | `DIR/plan.json`. Outputs: `pending` (`true` or `false`), `plan_sha256` | 0 / 22 / 24 / 25 |
 | `deploy (--expect-plan-file FILE \| --inline-plan) --out DIR [--approved-by S] [--approved-utc TIME] [--triggering-actor S] [--ci-run-url S]` | `DIR/report.json` for every end; `DIR/plan.json` with `--inline-plan`. `--approved-utc` is an ISO time with a time zone. Output: `plan_sha256` | 0 / 21 / 22 / 23 / 24 / 25 |
-| `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. One more line, `rename <table key> <EXEC sys.sp_rename statement>`, for each recorded constraint that has a name of the engine (A35). A plan refusal for drift prints the same lines on stderr. With `park_failed = true` also one line `parked: <file> (run <id>, <reason code>)` for each park (A35), never drift. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
+| `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. One more line, `rename <table key> <EXEC sys.sp_rename statement>`, for each recorded constraint that has a name of the engine (A35). A plan refusal for drift prints the same lines on stderr. With `park_failed = true` also one line `parked: <file> (run <id>, <reason code>)` for each park (A40), never drift. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
 | `export --root DIR --env E --target T --out DIR [--schema NAME]` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
 | `baseline [--report-only] --confirm-database NAME [--out DIR] [--schema NAME]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
 | `align --root DIR [--schema NAME] [--out DIR]` | `onboarding/<env>/align.sql` and `align.md` under `--out` (default `--root`); read-only (A38). Takes `--root` in place of `--bundle` and `--digest` | 0 / 22 / 24 |
@@ -875,7 +875,7 @@ Owner problem: one migration that fails in an environment blocks every later rel
 (`CATCHUP_REQUIRED`) until it is withdrawn. `docs/setup.md`, section 7, "Park a migration that
 fails", is the procedure.
 
-- A35. Set aside. In an environment, a pending migration can be set aside for a reason. It is not
+- A40. Set aside. In an environment, a pending migration can be set aside for a reason. It is not
   applied there, is never marked applied, and is no pending migration for A7. Where migrations are
   set aside (or were, and are still pending), a release deploys in chain order its own migrations
   and the pending migrations of earlier releases that are not set aside (note `catch-up past
@@ -919,7 +919,7 @@ fails", is the procedure.
   reports and state rows are equal.
 - Not done: a name that a raw or data batch writes without its schema is not compared, and a
   three-part name (`[db].[s].[n]`) is read as `[db].[s]`. Proven against fakes only.
-- A36. Review of A35. (1) A set-aside migration that creates a table, a schema, a type, a sequence
+- A41. Review of A40. (1) A set-aside migration that creates a table, a schema, a type, a sequence
   or a synonym, or renames a table, does not give `BASELINE_REQUIRED`: `Work.set_aside` holds the
   parsed set-aside migrations, and `tables.Hooks.unrecorded_objects` takes what they create as
   created. (2) The independence check follows a rename with the head model
