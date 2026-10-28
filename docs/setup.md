@@ -861,8 +861,12 @@ manages (or hold a wildcard).
 What the tool does in that environment:
 
 1. The matching objects are outside the scope, as for `[scope] exclude_objects`: they are not read,
-   compared, baselined or listed as unmanaged, and `drift` reports nothing for them. A schema
-   itself is never matched: `legacy.*` leaves the schema `legacy` managed.
+   compared, baselined or listed as unmanaged, and `drift` reports nothing for them. A DML
+   trigger follows its table: the trigger of a matching table is not managed either. A schema
+   itself is never matched: `legacy.*` leaves the schema `legacy` managed, while the release holds
+   one of its objects that no pattern matches. When the patterns match every object of a schema in
+   the release, the schema is not managed either: the plan and `baseline` do not ask for it, and a
+   migration that creates the schema and its objects is skipped.
 2. A managed object that a pattern matches leaves: the next deploy marks its row `dropped`.
    Nothing is sent to the object and nothing is dropped.
 3. A module that a pattern matches is not sent: its file changes nothing in that environment.
@@ -875,6 +879,14 @@ What the tool does in that environment:
    replace a merged migration").
 6. `plan` and `deploy` give the note `not managed in <env>: <count> object(s); skipped migrations:
    ...`.
+7. A skipped migration does not change the catch-up rule: a release that adds migrations is still
+   promoted after the releases before it (`CATCHUP_REQUIRED`).
+8. The tool cannot prove all that it sends. The plan has a note for each data or raw batch that
+   runs (`not_managed not proven for a <kind> batch: <file> ...`): a name in dynamic SQL is not
+   seen. It has a note for each migration or module to send that names a matching object
+   (`not_managed: <what> names ...`), for example a view of the table, or a foreign key to it. Such
+   a statement can fail at deploy, because the object is not at the level of its file. Read these
+   notes before you approve.
 
 What a migration touches: the object of each model statement; for a data or raw batch, every name
 of its text that is written with its schema.
@@ -885,7 +897,9 @@ To manage the objects again in that environment:
    `BASELINE_REQUIRED` and names `azsqlcd baseline --schema <name>`. Without `[scope]`, a module
    that comes back stops it with 22 `NAME_COLLISION`: do the next steps all the same.
 2. Make the objects equal to their files by hand. The migrations that were skipped never run
-   there: their changes are part of this work.
+   there: their changes are part of this work. Create the objects that are not in the database by
+   hand too (for example a schema and a table that a skipped migration creates): `baseline
+   --schema` stops with 22 `READBACK_MISMATCH` for an object that is not there.
 3. Run `azsqlcd baseline --schema <name>` on each target of the environment. It compares the
    objects with the files and records them.
 4. Promote the release again.

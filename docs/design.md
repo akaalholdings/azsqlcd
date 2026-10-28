@@ -299,9 +299,9 @@ and `tables.py` are not in the map of "Build contracts".
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, not_managed, products, release, session, set_aside, sqlerrors, state |
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
 | `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines, the pull-request rules of holds (A42, A43) | chain, config, errors, modules, names, set_aside, state |
-| `not_managed.py` | `[env.<name>] not_managed`: which pending migrations an environment skips, `MIXED_NOT_MANAGED` (A39) | chain, config, errors, names, set_aside |
+| `not_managed.py` | `[env.<name>] not_managed`: which pending migrations an environment skips, `MIXED_NOT_MANAGED` (A39, A40) | chain, config, errors, model, modules, names, set_aside |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
-| `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
+| `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, not_managed, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
 | `align.py` | `align`: the alignment script and its report (A38); read-only | catalog, catalog_tables, config, diff, emit, gen, model, modules, names, onboard, plan, replay, session, tables |
@@ -1015,6 +1015,21 @@ one environment does not manage", is the procedure.
   plan, the batches and the state writes are those of before.
 - New reason code `MIXED_NOT_MANAGED` (22). New plan finding `not_managed`. Proven against fakes
   only.
+- A40. Review of A39. (a) A DML trigger follows its table: `plan._managed_files` takes out a
+  trigger file whose table (the name after `ON`, `modules.trigger_table`) a pattern matches, and
+  `plan.scoped_state` and `plan.left_scope` take a trigger row out by its recorded `parent`
+  (`catalog.capture_in_scope`), only when the environment has `not_managed`. (b) A skip does not
+  replace A7 by the catch-up past set-aside migrations: only a park does. A release that adds a
+  skipped migration can always be deployed, because the migration is skipped there. (c) A schema
+  whose every object of the release a pattern matches is not managed either
+  (`not_managed.hidden_schemas`): `tables.Hooks.manages` leaves it out of the unrecorded objects
+  and of the baseline compare, so a migration that creates the schema and its objects is skipped
+  and the schema is not asked for. (d) `BASELINE_REQUIRED` names `azsqlcd baseline --schema` also
+  when an unrecorded object is of a schema that a skipped migration touches, and when the database
+  has a baseline step and a table row (a whole baseline is refused there, `ALREADY_BASELINED`). (e)
+  Plan notes, with `not_managed` only: a data or raw batch that runs (`not_managed not proven for a
+  <kind> batch: ...`), and a migration or a module to send that names a matched object
+  (`not_managed: <what> names ...`). The object of a raw batch directive counts as touched.
 
 ---
 
