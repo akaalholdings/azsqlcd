@@ -144,16 +144,44 @@ What you must do:
   not checked by anyone.
 - The approval of a GitHub environment still gates the deploy job of the tool. It does not bind
   the identity: another job on the same runner needs no approval to use it.
-- The reusable workflows have one `runs-on` input for the plan jobs and the deploy jobs of a
-  stage. With the template as it is, both identities of an environment sit on the same runners.
+- The reusable workflows have the input `runs-on` for the jobs of the plan identity and the
+  optional input `runs-on-deploy` for the jobs of the deploy identity. When `runs-on-deploy` is
+  empty, the deploy jobs use `runs-on`. The template does not set `runs-on-deploy`: with the
+  template as it is, both identities of an environment sit on the same runners.
 
 So:
 
 1. Separate runner groups for the plan identities and for the deploy identities, and for
-   non-production and production. A runner holds only the identities of its group. The plan jobs
-   and the deploy jobs of one stage share one `runs-on` value, so this split needs a change of
-   the workflows; it is not built (`docs/known-gaps.md`, section 13). Until then a runner of a
-   stage holds the plan identity and the deploy identity of that stage.
+   non-production and production. A runner holds only the identities of its group. For example:
+
+   | Runner group | Identities on its runners | Input |
+   |---|---|---|
+   | `azsql-nonprod` | plan identities of dev, sandbox, test and preprod | `runs-on` |
+   | `azsql-nonprod-deploy` | deploy identities of dev, sandbox, test and preprod | `runs-on-deploy` |
+   | `azsql-prod` | plan identity of prod | `runs-on` |
+   | `azsql-prod-deploy` | deploy identity of prod | `runs-on-deploy` |
+
+   To split the runners:
+
+   1. Make the two deploy runner groups (section 5, the same requirements). Assign the deploy
+      identities to their runners.
+   2. In the caller workflows of the database repository, remove the `# ` of each
+      `runs-on-deploy` line: in `db.yml` one for each stage, and one in `onboard.yml` and in
+      `resolve.yml`. Do not change `runs-on`. The drift call has no `runs-on-deploy`: drift
+      uses the plan identity only. Merge this change by pull request.
+   3. Then remove the deploy identities from the runners of `azsql-nonprod` and `azsql-prod`.
+      If you do this step before step 2, a deploy job that still runs on `runs-on` cannot get
+      the deploy identity and stops with 24 `TOKEN_UNAVAILABLE`.
+
+   Which jobs use which input:
+
+   | Input | Jobs (identity) |
+   |---|---|
+   | `runs-on` | `stage.yml` plan, `drift.yml` drift, `onboard.yml` read: export and baseline-report (plan identity) |
+   | `runs-on-deploy`, else `runs-on` | `stage.yml` deploy, `onboard.yml` baseline, `resolve.yml` resolve (deploy identity) |
+
+   Without the split, a runner of a stage holds the plan identity and the deploy identity of
+   that stage, and a plan job can get the deploy identity.
 2. Give a runner group only to the database repositories that need it. Where the GitHub plan
    allows it, limit the group also to the reusable workflows of the tool at a tag (section 5,
    step 3, "Workflow access"). With a managed identity this limit is the only thing that keeps
@@ -298,18 +326,23 @@ Jobs without a database identity (`runs-on-light`: targets, gate, record, incide
 release) run on a GitHub-hosted runner. They need bash, gh, jq and git.
 
 Jobs with a database identity (`runs-on`: plan, deploy, drift, resolve, onboard) run on
-self-hosted runners with a network path to the databases. Requirements:
+self-hosted runners with a network path to the databases. With a managed identity, the jobs of
+the deploy identity (deploy, resolve, onboard baseline) run on `runs-on-deploy` when it is set
+(section 2, managed identity). Requirements:
 
 1. **Ephemeral.** One job, then the machine is destroyed. A runner that lives on keeps the az
    login cache and the tool environment of the last job for the next one.
 2. **Two runner groups.** `azsql-nonprod` for dev, sandbox, test and preprod; `azsql-prod` for
    prod. The prod group reaches only the prod private endpoint. The non-production group does not
-   reach it.
+   reach it. With a managed identity, also `azsql-nonprod-deploy` and `azsql-prod-deploy` for the
+   jobs of the deploy identity (section 2, managed identity), with the same network rule.
 3. **Group access.** Each group is limited to the database repositories. Limit both groups also
    to the workflows `akaalholdings/azsqlcd/.github/workflows/stage.yml@<tag>`, `resolve.yml@<tag>`,
    `drift.yml@<tag>` and `onboard.yml@<tag>` (runner group setting "Workflow access"). Without this
    limit a pull request that adds a job with `runs-on: {group: azsql-prod}` runs code in the prod
-   network before any review. No script checks this setting.
+   network before any review. Limit a deploy group (`-deploy`) to `stage.yml@<tag>`,
+   `resolve.yml@<tag>` and `onboard.yml@<tag>` only: drift never needs the deploy identity. No
+   script checks this setting.
 4. **Image.** bash, gh, az, uv, Python 3.12, and the libraries of the driver: `libltdl7`,
    `libkrb5-3`, `libgssapi-krb5-2`.
 5. **Offline mode (recommended for prod).** Fill the uv cache in the image for the tool tag

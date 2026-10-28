@@ -623,7 +623,10 @@ code is now, where it differs from the text above:
   empty), and run `azure/login` only when the row is not `managed-identity`. A row with no
   `auth` key behaves as `oidc`. `id-token: write` stays. The setting is for the workflows only:
   a command on a workstation follows `AZSQLCD_AUTH`. With a managed identity the identity is
-  bound to the runner machine, not to the workflow run (`docs/setup.md`, section 2).
+  bound to the runner machine, not to the workflow run (`docs/setup.md`, section 2). So the jobs
+  of the deploy identity (`stage.yml` deploy, `onboard.yml` baseline, `resolve.yml` resolve) run
+  on the optional input `runs-on-deploy` when it is set, else on `runs-on`; the jobs of the plan
+  identity always run on `runs-on`. `drift.yml` has no deploy job and no `runs-on-deploy`.
 - `plan.json` has the key `syntax_check`: `ran`, `skipped` or null (the plan has no unit; in a
   file also: a tool that did not write the key). It is not in `plan_sha256`: the plan job
   parses the texts, the deploy job computes the plan again under the lock with no second
