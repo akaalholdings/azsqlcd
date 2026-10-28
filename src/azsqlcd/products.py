@@ -70,9 +70,10 @@ def touched_products(config: Config, migration: Migration) -> tuple[list[str], l
     return sorted(found), shared
 
 
-def mixed_hold(config: Config, migration: Migration) -> str | None:
+def mixed_hold(config: Config, migration: Migration, advice: bool = True) -> str | None:
     """Why a new migration mixes the objects of a product with promote_to and other objects, so that
-    it would be held, or run, as a whole where only a part should be; None when it does not."""
+    it would be held, or run, as a whole where only a part should be; None when it does not.
+    advice False: the facts only, with no way out."""
     touched, shared = touched_products(config, migration)
     by_name = {p.name: p for p in config.products}
     for name in touched:
@@ -81,11 +82,69 @@ def mixed_hold(config: Config, migration: Migration) -> str | None:
         others = [f"product {other}" for other in touched if other != name]
         others += [f"{names.quote(s)}.{names.quote(n)}" for s, n in shared]
         if others:
+            facts = (
+                f"{migration.file} touches objects of the product {name}, which has promote_to = "
+                f'"{by_name[name].promote_to}", and also {", ".join(others)}'
+            )
+            if not advice:
+                return facts
+            return (
+                f"{facts}. A held migration is held as a whole: put the changes of the product in a "
+                "migration of their own (gen in two steps, or two pull requests)"
+            )
+    return None
+
+
+def hold_dependency(config: Config, migration: Migration, others: Sequence[Migration]) -> str | None:
+    """Why a new migration will stop where a product with promote_to is held: it is not
+    independent (set_aside.check) of a chain migration of that product, which is held there as long
+    as it is pending. None when it is independent of each, or held with them. others: the other
+    migrations of the chain. A product migration that every environment applied holds nothing, and
+    the files do not show that: so this is a warning."""
+    mine, _ = touched_products(config, migration)
+    feet = set_aside.footprint(migration)
+    for product in config.products:
+        if product.promote_to is None or product.name in mine:
+            continue
+        envs = [
+            env
+            for env in PROMOTION_ORDER
+            if is_held(product, env) and not any(is_held(p, env) for p in config.products if p.name in mine)
+        ]
+        for other in others:
+            if not envs or product.name not in touched_products(config, other)[0]:
+                continue
+            theirs = set_aside.footprint(other)
+            shared = (feet.touched & (theirs.touched | theirs.named)) | (feet.named & theirs.touched)
+            if shared:
+                schema, name = min(shared)
+                return (
+                    f"{migration.file} is not independent of {other.file}, a migration of the product "
+                    f'{product.name} (promote_to = "{product.promote_to}"): both name '
+                    f"{names.quote(schema)}.{names.quote(name)}. Where {other.file} is still held "
+                    f"({', '.join(envs)}), the deploy refuses this release and every later one with "
+                    f"SET_ASIDE_DEPENDENCY until promote_to is raised. Raise promote_to in this pull "
+                    "request, or keep the change out of what the product names"
+                )
+    return None
+
+
+def hold_dropped(base: Config, head: Config, migration: Migration) -> str | None:
+    """Why a merged migration of a product with promote_to at the base revision is no migration of
+    any product of the head revision. Where it is still held, it is pending behind later migrations,
+    and only a migration of a product may be: the deploy would refuse with CHAIN_DIVERGED."""
+    if touched_products(head, migration)[0]:
+        return None
+    by_name = {p.name: p for p in base.products}
+    for name in touched_products(base, migration)[0]:
+        product = by_name[name]
+        if product.promote_to is not None and product.promote_to != PROMOTION_ORDER[-1]:
             return (
                 f"{migration.file} touches objects of the product {name}, which has promote_to = "
-                f'"{by_name[name].promote_to}", and also {", ".join(others)}. A held migration is held '
-                "as a whole: put the changes of the product in a migration of their own (gen in two steps, "
-                "or two pull requests)"
+                f'"{product.promote_to}" at the base revision, and no product of this azsqlcd.toml. Where '
+                "it is still held, the deploy would refuse each later release with CHAIN_DIVERGED. First "
+                f"remove promote_to of [products.{name}] and promote that release to every environment; "
+                "then remove the product or change its objects"
             )
     return None
 
@@ -170,7 +229,7 @@ def _count(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _chain_migrations(files: Mapping[str, bytes]) -> list[Migration]:
+def chain_migrations(files: Mapping[str, bytes]) -> list[Migration]:
     """The migrations of the chain of the release that are not withdrawn and that read. A file that
     does not read is refused by the planner when it is pending, with its own reason code."""
     if chain.SUM_PATH not in files:
@@ -194,7 +253,7 @@ def hold(config: Config, env: str, files: Mapping[str, bytes]) -> Hold | None:
     held = frozenset(p.name for p in config.products if is_held(p, env))
     product_by: dict[str, str] = {}
     held_migrations: dict[str, Migration] = {}
-    for migration in _chain_migrations(files):
+    for migration in chain_migrations(files):
         touched, _ = touched_products(config, migration)
         if not touched:
             continue

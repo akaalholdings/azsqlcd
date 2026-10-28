@@ -445,25 +445,57 @@ def _new_entries(base: chain.Chain, head: chain.Chain) -> list[chain.ChainEntry]
     return [entry for entry in chain.effective_order(head) if entry.file not in merged]
 
 
-def _mixed_holds(
+def _product_findings(
     base_files: Mapping[str, bytes], head_files: Mapping[str, bytes], cfg: config.Config
 ) -> list[Finding]:
-    """MIXED_HOLD: a new migration that touches objects of a product with promote_to and other
-    objects. A held migration is held as a whole. A chain or a file that does not read is
-    reported by lint."""
+    """The rules of [products] for a pull request. MIXED_HOLD: a new migration that touches objects
+    of a product with promote_to and other objects; a held migration is held as a whole.
+    HOLD_DEPENDENCY: a new migration that will stop where a product is held. When the pull request
+    changes [products]: HOLD_DROPPED, a merged migration of a product with promote_to that is no
+    migration of a product any more; MIXED_HOLD_MERGED, a merged migration that the new holds hold
+    as a whole. A chain or a file that does not read is reported by lint."""
     try:
-        new = _new_entries(_chain(base_files), _chain(head_files))
+        base_cfg: config.Config | None = _config(base_files)
+    except ToolError:
+        base_cfg = None
+    base_products = () if base_cfg is None else base_cfg.products
+    if not cfg.products and not base_products:
+        return []
+    try:
+        new = {entry.file for entry in _new_entries(_chain(base_files), _chain(head_files))}
     except ToolError:
         return []
+    merged = products.chain_migrations(head_files)
     out: list[Finding] = []
-    for entry in new:
+    for entry in sorted(new):
         try:
-            migration = _read_migration(head_files, entry.file)
+            migration = _read_migration(head_files, entry)
         except ToolError:
             continue
+        path = f"migrations/{entry}"
         why = products.mixed_hold(cfg, migration)
         if why is not None:
-            out.append(Finding("MIXED_HOLD", ERROR, f"migrations/{entry.file}", 1, why))
+            out.append(Finding("MIXED_HOLD", ERROR, path, 1, why))
+        why = products.hold_dependency(cfg, migration, [m for m in merged if m.file != entry])
+        if why is not None:
+            out.append(Finding("HOLD_DEPENDENCY", WARNING, path, 1, why))
+    if base_cfg is None or base_products == cfg.products:
+        return out
+    for migration in merged:
+        if migration.file in new:
+            continue
+        path = f"migrations/{migration.file}"
+        why = products.hold_dropped(base_cfg, cfg, migration)
+        if why is not None:
+            out.append(Finding("HOLD_DROPPED", ERROR, path, 1, why))
+        why = products.mixed_hold(cfg, migration, advice=False)
+        if why is not None:
+            message = (
+                f"{why}; it was merged before this change of [products]. Where it is still pending after "
+                "promote_to, it is held as a whole, its other changes too. Promote it to every environment "
+                "before this pull request, or withdraw it and replace it with two migrations"
+            )
+            out.append(Finding("MIXED_HOLD_MERGED", WARNING, path, 1, message))
     return out
 
 
@@ -1927,8 +1959,8 @@ def verify(root: release.StrPath, base_sha: str) -> list[Finding]:
     except ToolError as e:
         out.append(_error_finding(e))
         return done()
-    if cfg is not None and cfg.products:
-        out += _mixed_holds(base_files, head_files, cfg)
+    if cfg is not None:
+        out += _product_findings(base_files, head_files, cfg)
     if cfg is not None and not table_model:
         out.append(_no_proof())
     elif cfg is not None:

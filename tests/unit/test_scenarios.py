@@ -2522,3 +2522,87 @@ def test_a_shared_unbind_of_a_held_module_whose_text_changed_is_refused_and_neve
     assert (refused.code, refused.reason) == (22, "SET_ASIDE_DEPENDENCY"), refused.err
     assert REFS_KEY in refused.err and "promote_to" in refused.err and r4.file in refused.err
     assert frozen(sandbox) == before and "[Status] = 9" not in texts(sandbox)[REFS_KEY]
+
+
+BALANCE_FK = Table(
+    "sales",
+    "Balance",
+    (Column("BalanceId", INT, False), Column("CustomerId", INT, False)),
+    (
+        PrimaryKey("PK_Balance", True, (KeyColumn("BalanceId"),)),
+        ForeignKey("FK_Balance_Customer", ("CustomerId",), "sales", "Customer", ("CustomerId",)),
+    ),
+)
+
+
+def test_verify_warns_when_a_shared_migration_is_not_independent_of_a_migration_of_a_held_product(pipe):
+    """A held migration with a foreign key to a shared table: a later shared change of that table
+    stops after promote_to until the product is promoted. verify says so before the merge."""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    product(pipe, "dev")
+    pipe.write_objects(BALANCE_FK)
+    r1 = pipe.release("balance with a key to its customer", "balance")
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r1, env).code == 0
+    pipe.write_objects(with_columns(CUSTOMER, Column("Email", TypeRef("nvarchar", length=200), True)))
+    pipe.gen("customer_email")
+    _, verify = pipe.checks()
+    assert verify.code == 0, verify.out + verify.err
+    assert "HOLD_DEPENDENCY" in verify.out and r1.file in verify.out
+    assert "sandbox, test, preprod, prod" in verify.out and "1 warning(s)" in verify.out
+
+    # a change that is independent of the held migration gets no such warning
+    pipe.write_objects(CUSTOMER, ORDER_NOTE)
+    pipe.delete(*[f"migrations/{p.name}" for p in (pipe.repo / "migrations").glob("*__customer_email.sql")])
+    pipe.write(chain.SUM_PATH, pipe.read(chain.SUM_PATH).rsplit("\n", 2)[0] + "\n")
+    pipe.gen("order_note")
+    _, verify = pipe.checks()
+    assert verify.code == 0 and "HOLD_DEPENDENCY" not in verify.out, verify.out
+
+
+def test_verify_refuses_to_drop_a_held_product_or_to_narrow_it_until_promote_to_is_gone(pipe):
+    """Where the product is held, its migration is pending behind later ones. A release that no
+    longer counts it as a migration of a product would strand that environment (CHAIN_DIVERGED)."""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    r1, balance, _ = balance_release(pipe)
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r1, env).code == 0
+    for config in (
+        toml(),
+        toml() + '\n[products.balance]\nobjects = ["sales.vw_Balance*"]\npromote_to = "dev"\n',
+    ):
+        pipe.write("azsqlcd.toml", config)
+        _, verify = pipe.checks()
+        assert verify.code == 22 and "HOLD_DROPPED" in verify.out and balance in verify.out, verify.out
+
+    # the way that works: remove promote_to, promote that release, then remove the product
+    pipe.write(
+        "azsqlcd.toml", toml() + '\n[products.balance]\nobjects = ["sales.Balance*", "sales.vw_Balance*"]\n'
+    )
+    r2 = pipe.merge("balance reaches every environment")
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r2, env).code == 0
+    assert (balance, "ok") in migrations(pipe.dbs["sandbox"])
+    pipe.write("azsqlcd.toml", toml())
+    r3 = pipe.merge("no product any more")
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r3, env).code == 0, env
+
+
+def test_verify_warns_when_a_new_hold_holds_a_merged_migration_that_mixes_the_product_and_shared_objects(
+    pipe,
+):
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    pipe.write_objects(BALANCE, ORDER_NOTE)
+    r1 = pipe.release("balance and a note, before any product", "balance_and_note")
+    product(pipe, "dev")
+    _, verify = pipe.checks()
+    assert verify.code == 0, verify.out + verify.err
+    assert "MIXED_HOLD_MERGED" in verify.out and r1.file in verify.out
+    # the same files with no change of [products]: no warning
+    pipe.push("balance stays in dev")
+    _, verify = pipe.checks()
+    assert verify.code == 0 and "MIXED_HOLD_MERGED" not in verify.out, verify.out
