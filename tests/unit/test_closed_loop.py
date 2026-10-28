@@ -716,6 +716,161 @@ def test_a_plan_refusal_shows_the_rename_of_every_object_and_its_triage_log_hold
     assert "DRIFT_TOUCHED" in triage_log(plan) and "sp_rename" not in triage_log(plan)
 
 
+ORDER_LINE_KEY_WITHOUT_A_NAME = (
+    "ALTER TABLE [sales].[OrderLine] ADD PRIMARY KEY CLUSTERED ([OrderDate], [OrderLineId])"
+)
+
+
+@pytest.mark.parametrize("place", [" ON [PS_OrderYear]([OrderDate])", ""])
+def test_the_key_of_a_partitioned_table_that_was_made_again_without_a_name_is_a_name_drift(project, place):
+    # the place is a part of the capture of the key: on the scheme of the table (stated, or given by
+    # the engine to a key with no ON clause) the key is as recorded, and only its name differs
+    db = project.database()
+    db.partition_schemes.add("PS_OrderYear")
+    first = order_lines(project)
+    assert project.deploy(first, db).code == 0
+    db.out_of_band("ALTER TABLE [sales].[OrderLine] DROP CONSTRAINT [PK_OrderLine];")
+    db.out_of_band(ORDER_LINE_KEY_WITHOUT_A_NAME + place + ";")
+    table = db.model[ORDER_LINE.key]
+    assert isinstance(table, Table)
+    (engine_name,) = (str(c.name) for c in table.constraints)
+    assert engine_name.startswith("PK__OrderLine__")
+
+    drift = project.tool("drift", *first.where, db=db)
+
+    assert (drift.code, drift.reason) == (30, "DRIFT_FOUND")
+    item, statement = drift.out.splitlines()
+    assert item.startswith(
+        f"managed {ORDER_LINE.key} constraint_name [PK_OrderLine] (PRIMARY KEY, live name [{engine_name}]) "
+    )
+    assert rename_statements(drift, ORDER_LINE.key) == [
+        f"EXEC sys.sp_rename N'[sales].[{engine_name}]', N'PK_OrderLine', N'OBJECT';"
+    ]
+    db.out_of_band(statement.removeprefix(f"rename {ORDER_LINE.key} "))
+    assert db.model == first.model
+    assert project.tool("drift", *first.where, db=db).out.strip() == "no drift"
+
+
+def test_the_key_of_a_partitioned_table_made_again_on_another_place_is_no_name_drift(project):
+    # same columns and kind, but on [PRIMARY]: not as the tool recorded it, so the ordinary
+    # difference of the key and of the table, and no statement that would hide the move
+    db = project.database()
+    db.partition_schemes.add("PS_OrderYear")
+    first = order_lines(project)
+    assert project.deploy(first, db).code == 0
+    db.out_of_band("ALTER TABLE [sales].[OrderLine] DROP CONSTRAINT [PK_OrderLine];")
+    db.out_of_band(ORDER_LINE_KEY_WITHOUT_A_NAME + " ON [PRIMARY];")
+
+    drift = project.tool("drift", *first.where, db=db)
+
+    assert (drift.code, drift.reason) == (30, "DRIFT_FOUND")
+    assert "constraint_name" not in drift.out and "sp_rename" not in drift.out + drift.err
+    assert any(
+        f" {ORDER_LINE.key} constraint [PK_OrderLine] " in f" {line} " for line in drift.out.splitlines()
+    )
+
+
+def test_a_table_outside_the_scope_gives_no_name_drift(project):
+    # [scope] limits every read: a table of a schema that left the scope is not compared, so its
+    # key under a name of the engine is no drift and has no rename line
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(SALES, CUSTOMER, ORDER, RATES)
+    for path, text in MODULES.values():
+        project.write(path, text)
+    built = project.release("create", "create_all")
+    db = deployed(project, built)
+    db.out_of_band(
+        "ALTER TABLE [dbo].[Rates] DROP CONSTRAINT [PK_Rates];",
+        "ALTER TABLE [dbo].[Rates] ADD PRIMARY KEY CLUSTERED ([Code]);",
+    )
+    inside = project.tool("drift", *built.where, db=db)
+    assert (inside.code, inside.reason) == (30, "DRIFT_FOUND")  # in the scope it is drift
+    assert rename_statements(inside, RATES_KEY) != []
+
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    (project.repo / names.path_for("TABLE", "dbo", "Rates")).unlink()
+    left = project.release("dbo leaves the scope")
+
+    drift = project.tool("drift", *left.where, db=db)
+
+    assert (drift.code, drift.out) == (0, "no drift\n")
+    plan = project.tool("plan", *left.where, "--out", str(project.out("plan")), db=db)
+    assert plan.code == 0, plan.err
+    assert "constraint_name" not in plan.out + plan.err and "sp_rename" not in plan.out + plan.err
+
+
+def test_a_database_with_no_name_drift_gives_the_drift_and_plan_output_of_the_tool_before_it(
+    project, monkeypatch
+):
+    # a database that this version recorded, with an ordinary drift of a module and of a table and
+    # no constraint under a name of the engine. With the rule of the name switched off (the code
+    # before it), drift and plan print the same bytes and write the same plan.json
+    first, second = release_1(project), release_2(project)
+    db = deployed(project, first, second)
+    third = release_3(project)
+
+    def outputs() -> list[str]:
+        found: list[str] = []
+        for command in (["drift"], ["plan", "--out"]):
+            folder = project.out("plan")
+            argv = [*command[:1], *third.where, *(["--out", str(folder)] if len(command) > 1 else [])]
+            done = project.tool(*argv, db=db)
+            err = "\n".join(line for line in done.err.splitlines() if not line.startswith("log: "))
+            found += [str(done.code), done.out.replace(str(folder), "<out>"), err]
+            if (folder / "plan.json").exists():
+                found.append((folder / "plan.json").read_text(encoding="utf-8"))
+        return found
+
+    def before_the_rule() -> list[str]:
+        with monkeypatch.context() as patch:
+            patch.setattr(tables, "_name_drift", lambda recorded, live, named, files: (dict(live), []))
+            patch.setattr(catalog_tables, "name_drift_renames", lambda key, properties: [])
+            return outputs()
+
+    assert outputs() == before_the_rule()  # no drift: the plan of release 3
+    db.out_of_band(HOTFIX, "ALTER TABLE [sales].[Order] ALTER COLUMN [Note] nvarchar(400) NULL;")
+
+    now = outputs()
+
+    assert now == before_the_rule()
+    # and the bytes that version 0.2.0 printed before the rule (taken from a run of its code)
+    module = (
+        "b179c130b2cbd493b57f39de30ec17a3fd242fc3350225da7668b8ab9d28cc7e",
+        "f04224b731eb77713833aaa182c6e55550a20a6a29e5dc67f03d5c9411213225",
+    )
+    column = (
+        "79790dde57eb33955b46aa00e86138816c160fee459ae557c6341844b1e22874",
+        "19ff0c41f61623317b1e86d6879dc324bc8b7a1e9ef7462940636074f4a2fcb6",
+    )
+    assert now[:3] == [
+        "30",
+        f"managed {PROCEDURE_KEY} definition {module[0]} {module[1]}\n"
+        f"managed {ORDER.key} column [Note] {column[0]} {column[1]}\n",
+        f"DRIFT_FOUND: {PROCEDURE_KEY} differs from what the tool recorded, or is gone (2 object(s) in all). "
+        f"Nothing was changed\n  {PROCEDURE_KEY}\n  {ORDER.key}\nazsqlcd drift: exit 30",
+    ]
+    detail = [
+        json.dumps(
+            {
+                "differences": [{"live_sha256": live, "property": name, "stored_sha256": stored}],
+                "object": key,
+            },
+            sort_keys=True,
+        )
+        for key, name, (stored, live) in (
+            (PROCEDURE_KEY, "definition", module),
+            (ORDER.key, "column [Note]", column),
+        )
+    ]
+    assert now[3:] == [
+        "22",
+        "",
+        f"DRIFT_TOUCHED: {PROCEDURE_KEY} differs from what the tool recorded (definition), and this release "
+        "changes it (2 object(s) in all). Revert the change in the database, or put it in the files and run "
+        f"azsqlcd resolve --accept-drift\n  {detail[0]}\n  {detail[1]}\nazsqlcd plan: exit 22",
+    ]
+
+
 # ------------------------------------------------------------------ 4. a batch that fails
 def test_a_batch_that_fails_rolls_the_release_back_and_the_next_deploy_applies_it(project):
     first = release_1(project)
