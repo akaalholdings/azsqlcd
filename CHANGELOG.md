@@ -51,6 +51,29 @@ number and date. Version numbers follow semantic versioning.
   `constraint_name` drift, and new `DRIFT_TOUCHED` or `DRIFT_BLOCK` refusals, for constraints that
   were not visible before. There is no state-table change and no upgrade step: a DBA runs the
   rename lines.
+- Transitive dependants (A36). With `table_model = true`, the plan reads the dependants of a
+  release at any depth. These are the modules that use a changed table, the modules that use a
+  module that the release changes or drops, and the modules that use those modules (a view on a
+  view on a table). The deploy refreshes the managed, unchanged views and table-valued functions of
+  that set in dependency order: a view before the views that use it. Then it checks every managed
+  module of the set (21 `DEPENDANT_BROKEN`, differential as before). A release with no migration
+  that changes a module does the same for the modules that use it.
+- An unmanaged module or a module outside `[scope]` at any depth is a `TABLE_BLOCKER` unless
+  `[ack] unmanaged_dependants` lists it. The detail line names the path. A schema-bound blocker
+  names the schema-bound modules on it (`schema-bound chain: ...`).
+- The plan gives a note with the path of each dependant that it found through other modules. It
+  also gives a note when the search stops at 32 levels.
+- `DEPENDANT_BROKEN` for a release with no migration now says "the change of a module it uses" and
+  tells the operator to change the dependant in the same pull request. It no longer says to
+  withdraw a migration (A37).
+- A plan reads each dependant once (A37).
+- A release whose dependants are all direct gives the same plan and the same SQL as before. No new
+  reason code. No change to the state tables.
+
+### Fixed
+
+- A release that only drops a view now fails with 21 `DEPENDANT_BROKEN` when a managed view still
+  uses that view (A37). Before, the deploy ended ok and left that view broken.
 
 ## 0.2.0 - 2026-10-26
 

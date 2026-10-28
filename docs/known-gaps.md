@@ -47,6 +47,7 @@ each build task.
     proven.
 15. Schema scope (2026-10-26): what is not proven, and the limits.
 16. Drift of a constraint name (A35, 2026-10-28): upgrade note and limits.
+17. Transitive dependants (A36, A37, 2026-10-28): limits.
 
 Ids: L1 to L17, L5b and X1 to X10 are spike items of `scripts/live_spike.py`. "Acc" names a
 scenario of `scripts/live_acceptance.py`. G1 to G7 are the GitHub checklist. All are in
@@ -277,6 +278,7 @@ scenario reads a table through these modules. A column that does not exist fails
 | Partitioned tables: `sys.partition_schemes` joined through `sys.indexes.data_space_id`; `sys.index_columns.partition_ordinal`; `sys.stats.is_incremental`; the count of different compressions of the partitions of one index, read with a derived table inside the index query. Section 14 has each assumption | `live_tables.py`, first pass (P2, P4): passed 2026-10-26 |
 | `sys.sql_expression_dependencies`: `is_schema_bound_reference` and `referenced_minor_id` per column; `sys.database_principals` shows schema owners to the plan identity (a hidden owner quarantines the schema) | L14 for the grants; else no test yet |
 | Which sub-objects the engine refuses on DROP COLUMN, ALTER COLUMN and `sp_rename` (the blocker scan counts hypothetical indexes; a foreign key blocks a table rename by the design rule) | No test yet |
+| A36, A37, transitive dependants: the chain query `azsqlcd:dependant_chain`, the refresh order of a view on a view, and the refresh of a view on a dropped view (expected `ERROR_208`) are proven against fakes only | No test yet |
 | How the engine writes DEFAULT, CHECK, computed and filter text, which the table captures hold | L8 |
 
 Lint (`lint.py`).
@@ -383,7 +385,7 @@ an operator or a developer sees. Until the owner says otherwise, the row is how 
 | A7, catch-up | Exemption: a withdrawn migration W that has no step here, on a database whose recorded release is before the release that added W, switches the rule off for the pending migrations that W's release and later releases added. They run with the artefact release, in one transaction; the plan prints a note. Earlier releases are still caught up first. The task text was wider (any withdrawn W with no step); that reading would switch the rule off for good | `plan.py` `_refuse_catch_up` |
 | A6, "ahead and consistent" | `ALREADY_PAST` when the recorded release is newer, or when it is equal and the database holds migrations that the release does not. An equal release with nothing extra is planned normally (no-op, or module work after a baseline, an adoption or an accepted drift) | `plan.py` `_pending_entries` |
 | A9, first converge | Chunks only when no migration and no drop is pending and every module to deploy has a managed row with no source. One module with no row makes the release one transaction | `plan.py` `pending_work` |
-| A12, dependants | The sweep, the refresh, the blocker scan and table drift exist only with `table_model = true`; with `false` the plan prints a note and makes none of these checks. The dependants come from `sys.sql_expression_dependencies` only. The refresh set holds direct dependants only: a view on a view is not refreshed | `plan.py` `compute_plan`; `runner.py` `_sweep_dependants`; `tables.py` `refresh_set` |
+| A12, dependants | The sweep, the refresh, the blocker scan and table drift exist only with `table_model = true`; with `false` the plan prints a note and makes none of these checks. The dependants come from `sys.sql_expression_dependencies` only. The refresh set and the check hold the dependants at any depth (A36, A37), up to 32 levels (`catalog.DEPENDANT_DEPTH`; the plan gives a note when it stops). The plan reads the dependants of the changed modules also in a release with no migration. A module that the release drops is a root of the search. In a cycle the first member by key goes first | `plan.py` `compute_plan`; `runner.py` `_sweep_dependants`; `tables.py` `refresh_set` |
 | A14, NF000 | The table of accepted differences is: spelling, terminator, option order, element order, batch order. Tokens are compared case-folded, then the exact letters of each bracketed name are checked; a bare word inside an expression is not checked for case. See "Canonical form" below | `emit.py` `token_roundtrip_differences`, `NORMAL_FORM_EQUIVALENTS` |
 | A25, redaction | Best effort: a value that holds a quote followed by a space can leak a fragment, and THROW text without quotes passes unchanged. Engine messages that hold only names can keep their names, and only when the whole text is that one message: four name objects that exist in the database and always keep them (1913, 2714, 3726, 5074); five print a name as the statement wrote it (207, 208, 2705, 3701, 4902) and keep it only when the batch that was sent holds the name as an identifier. Section 13 says what is proven of their templates and what stays open. `--show-error-text` is refused by `--env prod` and with `--rebind-environment`, before a session opens; `meta.environment` is not read for it. `PARSEONLY_FAILED` stores only the redacted text, so the flag cannot show the full syntax error. `PRF002` prints generated SQL, with DEFAULT expression text from the repository files, in the verify summary | `sqlerrors.py` `redact`; `cli.py` `main`; `plan.py` `_parse_only`; `gen.py` `_prove` |
 | A25, `SECRET_LITERAL` in export | A module with such a literal is quarantined (also when the literal is inside a string or a comment, which lint accepts in a file). A table-class file with such a literal stops the whole export, exit 22: a table cannot be left out without the objects that need it | `onboard.py` `_secret_literal`, `export` |
@@ -639,7 +641,7 @@ Built as the amendment says, with nothing open beyond the live proof of section 
 | 7 | No back-out path for a merged migration | Cut (A30) | `undoes=` is not built. Fix forward, or withdraw and replace |
 | 8 | The model before a withdrawn migration | Tool (A31), built | The supported merge methods are not set by `setup_repo.py`. A migration merged before `table_model = true` cannot be replaced (section 4) |
 | 9 | Residue lint | Tool (A19), built as warnings | `REN001`, `DRP002`, `DRP003` scan module files only; a synonym or a CHECK expression that names the old object is not scanned. The gate is A12, which exists only with `table_model = true` |
-| 10 | Refresh used as the dependant check | Tool (A12), built | Only with `table_model = true`; direct dependants only; X3 not run |
+| 10 | Refresh used as the dependant check | Tool (A12), built | Only with `table_model = true`; dependants at any depth since A36 (up to 32 levels); X3 not run |
 | 11 | No path for an out-of-band change | Tool (A16, A20), built | `READBACK_NOT_COMPUTABLE` when a later migration changes the object again (section 4) |
 | 12 | The capture misses state | Tool (A13), built | A disabled trigger is exported as a normal file; the first and last order of a trigger is captured and the trigger is quarantined at export, but `ALTER TRIGGER` effects are not proven |
 | 14 | The read-back target of a segment | Tool (A8), built | One unit of work per release removes the case. It remains for `mark-applied` (finding 11) |
@@ -1915,3 +1917,33 @@ Sections 2, 7 and 11 (row T4) have the details.
 - `docs/design.md` has no separate amendment for the rename to the name of the file: it is part
   of the A35 bullet of "As built".
 - Proven against fakes only (`FakeDatabase`). Nothing of this section ran on a database.
+
+## 17. Transitive dependants (A36, A37, 2026-10-28)
+
+With `table_model = true` the plan reads the dependants of a release at any depth (`docs/design.md`,
+A36 and A37; section 3, row A12). Limits:
+
+- Unbind of a module that another schema-bound module references. The plan shows the schema-bound
+  chain only when the first module is a blocker. When the first module is managed and the
+  migration unbinds it, the plan does not refuse a schema-bound module on top of it, and the engine
+  refuses that ALTER in the deploy. What unbind requires was not changed. No test shows the engine
+  error, because the fake does not refuse ALTER of a module that a schema-bound module references.
+- Cost. The closure costs one query per level (per 500 keys). The plan builds it several times:
+  dependants to check, the refresh set (twice, as before), the notes, and once per changed table or
+  column for the blockers. `catalog.broken_references` is still one query per dependant, as before
+  A36. So 1,000 transitive dependants give about 3,000 reads of `sys.dm_sql_referenced_entities` in
+  one plan. Not measured on a database.
+- A module-only plan reads the state 3 more times (15 batches) than before A36: each hook reads the
+  state again.
+- The reads of one plan are kept on the `Work` of that plan. `compute_plan` makes a new `Work` for
+  each plan and calls `dependants_to_check` and `blockers_and_dependants` before
+  `dependant_findings`. A caller that calls `dependant_findings` first, on a session that an earlier
+  plan used, gets the answers of that plan. Today only `compute_plan` calls these hooks.
+- Paths are the shortest path found by level. A module that references more than one changed object
+  shows one path only.
+- A dependant whose path goes through a module that the release drops is not left out of the
+  refresh set.
+- Dependants of a module that the release creates are not read, because the module has no
+  OBJECT_ID before the deploy.
+- Proven against fakes only. The fake gives a view the columns that it uses, not the columns of its
+  select list.
