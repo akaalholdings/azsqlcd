@@ -131,6 +131,10 @@ number and date. Version numbers follow semantic versioning.
   park or a skip as not managed wins over a hold, so a product migration that an environment does
   not manage never runs there, also after `promote_to` is raised. `drift` lists the parks only. The
   notes `held in <env>: ...` and `products: ...` count the held migrations only.
+- New verify warning `HOLD_OUT_OF_SCOPE`: a pull request changes `[scope]`, and a migration of a
+  product with `promote_to` touches an object outside it.
+- `azsqlcd products --env <env>` lists apart the held items that `not_managed` takes out of that
+  environment (`not managed in <env>: ...`).
 
 ### Changed
 
@@ -202,6 +206,15 @@ number and date. Version numbers follow semantic versioning.
   matched object.
 - `[env.<name>] not_managed` with parking: a migration skipped as not managed creates nothing. When
   the pattern is taken away, its objects are asked for with `BASELINE_REQUIRED` as before.
+- A held product migration that touches objects that `[env.<name>] not_managed` matches and managed
+  objects is held, not refused with `MIXED_NOT_MANAGED`. Later releases deploy past it. The refusal
+  comes when `promote_to` is raised.
+- A migration that runs late past set-aside migrations (a held one after `promote_to` is raised, a
+  parked one after `resolve --unpark`) and touches an object outside `[scope]` is refused by the
+  plan with 22 `OUT_OF_SCOPE`. Before, the deploy failed its read-back with 21
+  `READBACK_MISMATCH`.
+- The advice of `SET_ASIDE_DEPENDENCY` says that the set-aside migration runs at its place in the
+  chain after the unpark or the raise of `promote_to`, not first.
 
 ## 0.2.0 - 2026-10-26
 

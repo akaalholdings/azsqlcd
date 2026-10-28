@@ -2067,3 +2067,12 @@ and A45). A46 is their combination.
   product migration that an environment does not manage is skipped there for good: it does not run
   there after `promote_to` is raised. To run it there, take the pattern away before the first
   deploy of its release there, or withdraw and replace the migration.
+- A parked migration and `[scope]`: `verify` is offline and does not know the parks of a database.
+  A pull request that takes the object of a parked migration out of `[scope]` gets no warning (for
+  a held product migration, `verify` gives `HOLD_OUT_OF_SCOPE`). After `resolve --unpark`, the plan
+  for that environment stops with 22 `OUT_OF_SCOPE`, and each later release stops there too, until
+  the migration is withdrawn or the object comes back into `[scope]` with its file. The migration
+  is not set aside for this reason: the environment stays refused until someone acts.
+- A held migration that mixes objects that an environment does not manage and managed objects is
+  held without a refusal. When `promote_to` is raised, the plan for that environment stops with 22
+  `MIXED_NOT_MANAGED`. Split it by withdraw and replace before the raise.
