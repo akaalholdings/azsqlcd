@@ -777,7 +777,9 @@ promote_to = "dev"                                                        # opti
   `PRODUCT_OVERLAP`. An object that no product matches is shared.
 - `owners` are GitHub owners for CODEOWNERS.
 - `promote_to` is the last environment that the changes of the product reach. The order is dev,
-  sandbox, test, preprod, prod. Without it, the changes reach every environment.
+  sandbox, test, preprod, prod. Without it, the changes reach every environment. `disposable`, the
+  environment of the live tests, is not in the order: `promote_to` cannot name it, and nothing is
+  held there.
 
 What the tool does in an environment that comes after `promote_to` (the product is held there):
 
@@ -801,6 +803,28 @@ One rule for pull requests: a new migration must not touch the objects of a prod
 `promote_to` and other objects too. `verify` and `gen` give `MIXED_HOLD`. Change the files of the
 product and run `azsqlcd gen`, then the other files and `gen` again, or use two pull requests.
 
+What a hold does to the rest of the pipeline:
+
+- While a migration is held in an environment, a skipped release is not refused there with
+  `CATCHUP_REQUIRED`. Its migrations run with the next release, in chain order (note `catch-up
+  past set-aside: ...`). For a hold that stays, this is so in every environment after `promote_to`.
+- A held migration freezes the shared objects that it names, for example the table that a foreign
+  key of the product names. After `promote_to`, a later shared migration that changes such a
+  table is refused with 22 `SET_ASIDE_DEPENDENCY`, and so is each later release that holds it,
+  until `promote_to` is raised. `verify` gives the warning `HOLD_DEPENDENCY` for such a migration.
+- A held module that an environment holds already keeps its old text there. A shared migration
+  that unbinds it, while its file text changed, is refused with 22 `SET_ASIDE_DEPENDENCY`. A shared
+  migration after which the old text does not bind stops with 21 `DEPENDANT_BROKEN` and is rolled
+  back.
+- To remove a product that has `promote_to`, or to take objects out of it, use two pull requests.
+  First remove `promote_to` and promote that release to every environment, so that the held
+  migrations run. Then remove the product or change its `objects`. `verify` refuses the change in
+  one step with `HOLD_DROPPED`: a database where a migration of the product is still held would
+  stop with `CHAIN_DIVERGED`.
+- When a pull request adds `promote_to`, a merged migration that touches the product and other
+  objects is held as a whole where it is still pending. `verify` gives the warning
+  `MIXED_HOLD_MERGED`.
+
 The command `azsqlcd products` lists each product with its owners, its `promote_to` and the count
 of its object files. It reads only the working tree:
 
@@ -812,7 +836,8 @@ azsqlcd products --codeowners >> .github/CODEOWNERS
 
 `--env` reads no database: `azsqlcd plan` shows what a target holds and what is parked there.
 `--codeowners` prints one line for each object file of a product that has owners, or one glob
-when every file in a folder that a pattern of the product matches is a file of the product.
+when every file in a folder that a pattern of the product matches is a file of the product. A
+space in a path is written as `\ `.
 
 No column and no status was added to the state tables. A hold is a fact of `azsqlcd.toml` of the
 release and of the environment. A held migration has no step row, as a pending one has none.

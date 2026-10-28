@@ -298,7 +298,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
-| `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines (A37) | chain, config, errors, modules, names, set_aside |
+| `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines, the pull-request rules of holds (A37, A38) | chain, config, errors, modules, names, set_aside, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -972,6 +972,18 @@ stay in dev, never promoted, without a pull request that stays open. `docs/setup
   (verify), `held` and `products` (plan notes).
 - Not done: `drift` lists no pending or held migrations. `azsqlcd products --env` reads no
   database. Proven against fakes only.
+- A38. Review of A37 (2026-10-28). (a) `Hold.merge` releases (`Aside.released`) only a migration
+  of a product that the database could have held: not applied, and added by a release that the
+  database holds (`chain_added_in <= at_seq`). Any other pending migration keeps A6 and A7, so a
+  product with no `promote_to` changes nothing. (b) An unbind of a held module whose file text is
+  not the recorded text is 22 `SET_ASIDE_DEPENDENCY` (`products.check_held_rebinds`): the rebind
+  would send the held text. (c) `verify`: `HOLD_DEPENDENCY` (warning), a new migration that is not
+  independent of a chain migration of a product with `promote_to`; `HOLD_DROPPED` (error), a pull
+  request that changes `[products]` so that a merged migration of a product with `promote_to` at
+  the base is no migration of any product (it would strand a database with `CHAIN_DIVERGED`);
+  `MIXED_HOLD_MERGED` (warning), a merged migration that the changed `[products]` would hold as a
+  whole. (d) `config.PROMOTION_ORDER` (dev to prod): `promote_to` is one of these, and nothing is
+  held in `disposable`. (e) `azsqlcd products --codeowners` writes a space of a path as `\ `.
 
 ---
 
