@@ -106,6 +106,11 @@ _FIX_DEPENDANT = (
     "it), withdraw the migration and add its statements again as a replacement (allow "
     "REPLACEMENT_EDGE): a release that only changes the module is refused with CATCHUP_REQUIRED"
 )
+# A35: a release with no migration broke a dependant of a module that it changes or drops
+_FIX_MODULE_DEPENDANT = (
+    "This release cannot be deployed as it is. Change this module (or tombstone it) in the same pull "
+    "request as the module that it uses, then merge; the new release starts at dev"
+)
 
 
 # ------------------------------------------------------------------ public data
@@ -938,6 +943,14 @@ def _unbind(run: _Run, step: Step, sent: _Sent) -> None:
     sent.modules.pop(key, None)
 
 
+def _broken_dependant(run: _Run) -> tuple[str, str]:
+    """(what the dependant uses, the fix) for DEPENDANT_BROKEN. With no migration the release only
+    changed or dropped modules (A35): there is no migration to withdraw."""
+    if any(step.kind == "batch" for unit in _have(run.plan).units for step in unit.steps):
+        return "a table", _FIX_DEPENDANT
+    return "a module", _FIX_MODULE_DEPENDANT
+
+
 def _refresh(run: _Run, step: Step) -> None:
     """Design (d) 4: sp_refreshsqlmodule of a managed dependant that the release does not change.
 
@@ -954,10 +967,11 @@ def _refresh(run: _Run, step: Step) -> None:
         if _lost(run, error) or error.cls is not ErrorClass.OTHER:
             raise
         finding = f"ERROR_{error.number}" if error.number is not None else "REFRESH_FAILED"
+        used, fix = _broken_dependant(run)
         raise failed(
             "DEPENDANT_BROKEN",
-            f"{key} does not bind after the change of a table it uses: its refresh failed "
-            f"({finding}: {error}). {_FIX_DEPENDANT}",
+            f"{key} does not bind after the change of {used} it uses: its refresh failed "
+            f"({finding}: {error}). {fix}",
             object=key,
             findings=[finding],
             step=step.id,
@@ -1089,10 +1103,10 @@ def _sweep_dependants(run: _Run, sent: _Sent) -> None:
             new = [f for f in found if f in catalog.NOT_BOUND_FINDINGS or fold(f) in gone]
         if new:
             hint = _FIX_COLUMN_GONE if any(f.startswith(COLUMN_GONE) for f in new) else ""
+            used, fix = _broken_dependant(run)
             raise failed(
                 "DEPENDANT_BROKEN",
-                f"{key} does not bind after the change of a table it uses: {', '.join(new)}. "
-                f"{hint}{_FIX_DEPENDANT}",
+                f"{key} does not bind after the change of {used} it uses: {', '.join(new)}. {hint}{fix}",
                 object=key,
                 findings=new,
             )

@@ -207,3 +207,42 @@ def test_a_release_that_drops_a_view_and_changes_another_module_checks_the_views
     assert (failed.code, failed.reason) == (21, "DEPENDANT_BROKEN"), failed.err
     assert project.report()["failed_step"] == f"refresh:{OPEN_REFS_KEY}"
     assert (db.modules, db.rows("object")) == before
+
+
+LAST_REF = (
+    "schema/procedures/sales.usp_LastRef.sql",
+    "CREATE OR ALTER PROCEDURE [sales].[usp_LastRef] AS\n"
+    "SELECT MAX([Reference]) AS [r] FROM [sales].[vw_OpenOrders];\n",
+)
+MODULE_FIX = "Change this module (or tombstone it) in the same pull request as the module that it uses"
+
+
+def test_a_release_with_no_migration_that_breaks_a_procedure_on_a_changed_view_names_the_module_fix(project):
+    """The message spoke of a table change and told the operator to withdraw a migration that this
+    release does not have."""
+    project.write(*LAST_REF)
+    db = deployed(project, release_1(project))
+    before = (dict(db.modules), db.rows("object"))
+    project.write(*VIEW_NO_REFERENCE)
+
+    failed = project.deploy(project.release("the view loses the reference"), db)
+
+    assert (failed.code, failed.reason) == (21, "DEPENDANT_BROKEN"), failed.err
+    assert project.report()["failed_step"] == "dependants"
+    assert "PROCEDURE:[sales].[usp_LastRef] does not bind after the change of a module it uses" in failed.err
+    assert MODULE_FIX in failed.err and "withdraw the migration" not in failed.err
+    assert (db.modules, db.rows("object")) == before
+
+
+def test_a_release_with_no_migration_whose_view_refresh_fails_names_the_module_fix(project):
+    _, db = with_open_refs(project)
+    project.write(*VIEW_NO_REFERENCE)
+
+    failed = project.deploy(project.release("the view loses the reference"), db)
+
+    assert (failed.code, failed.reason) == (21, "DEPENDANT_BROKEN"), failed.err
+    assert (
+        f"{OPEN_REFS_KEY} does not bind after the change of a module it uses: its refresh failed"
+        in failed.err
+    )
+    assert MODULE_FIX in failed.err and "withdraw the migration" not in failed.err
