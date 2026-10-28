@@ -1429,11 +1429,28 @@ def test_files_of_a_schema_that_the_scope_does_not_list_are_out_of_scope_and_not
 ):
     repo = start(tmp_path, more={"azsqlcd.toml": scoped('"sales"')})
     R.put(repo, BILLING)
-    found = errors(check(repo))
-    assert [(code, path) for code, path, _ in found if code == "OUT_OF_SCOPE"] == [
-        ("OUT_OF_SCOPE", path) for path in sorted(BILLING)
-    ]
-    assert ("PRF002", "migrations/migrations.sum", 1) in found
+    found = check(repo)
+    assert errors(found) == [("OUT_OF_SCOPE", path, 1) for path in sorted(BILLING)]
+    # OUT_OF_SCOPE is the error: the proof covers only what [scope] manages, so no PRF000 that takes
+    # the files, and no PRF002 that asks for a migration gen would refuse as "a defect of the tool"
+    assert [f.code for f in found if f.code in ("PRF000", "PRF002")] == []
+
+
+def test_a_scope_that_leaves_out_a_file_of_the_base_gives_out_of_scope_and_no_proof_error(tmp_path: Path):
+    # review UPG-2: a pull request that only adds [scope] while the file of an unlisted schema stays.
+    # No table-class file changed; the old proof compared the scoped start with every head file and
+    # gave PRF002 with "this is a defect of the tool"
+    repo = start(tmp_path, more=BILLING)
+    R.put(repo, {"azsqlcd.toml": scoped('"sales"')})
+    found = check(repo)
+    assert errors(found) == [("OUT_OF_SCOPE", path, 1) for path in sorted(BILLING)]
+    assert not any("defect of the tool" in f.message for f in found)
+
+    # gen writes nothing for an object outside the scope; the change of a managed file still counts
+    R.put(repo, {R.ORDER: WITH_NOTE})
+    generated = gen.generate(repo, "main", "add_note")
+    assert generated.text is not None and "[billing]" not in generated.text
+    assert generated.text.endswith(ADD_NOTE)
 
 
 def test_a_schema_that_leaves_the_scope_takes_its_files_out_with_no_migration_and_no_tombstone(

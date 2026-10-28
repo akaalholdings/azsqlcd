@@ -247,6 +247,14 @@ def _scoped_start(
     return Model([*kept, *entered]), sorted(obj.key for obj in entered)
 
 
+def _managed(model: Model, scope: config.Scope | None) -> Model:
+    """The objects of the model that [scope] manages. A file outside it is the lint error
+    OUT_OF_SCOPE: the proof and gen do not compare it (review UPG-2)."""
+    if scope is None:
+        return model
+    return Model([obj for obj in model.values() if config.in_scope(scope, obj.key)])
+
+
 def _entered(keys: Sequence[str]) -> Finding:
     schemas = sorted(
         {names.parse_object_key(key)[1] or names.parse_object_key(key)[2] for key in keys}, key=fold
@@ -1256,7 +1264,8 @@ def generate(root: release.StrPath, base_ref: str, name: str, renames: Sequence[
                 line=1,
             )
     start = _start_model(base_files, head_files, root, merge_base, head)
-    body = _draft(base_files, head_files, start, head, specs, _config(head_files).scope)
+    scope = _config(head_files).scope
+    body = _draft(base_files, head_files, _managed(start, scope), _managed(head, scope), specs, scope)
     if not body:
         others = (p for p in base_files.keys() | head_files.keys() if p.startswith("schema/"))
         changed = any(
@@ -1724,7 +1733,8 @@ def _prove(
         out += found
     if done is not None:
         out += _rename_findings(new, head)
-    differences = done.diff_paths(head) if done is not None else []
+    managed_head = _managed(head, cfg.scope)
+    differences = _managed(done, cfg.scope).diff_paths(managed_head) if done is not None else []
     if differences and withdrawn:
         line, entry = withdrawn[0]
         also = "".join(f", {other.file}" for _, other in withdrawn[1:])
@@ -1743,7 +1753,7 @@ def _prove(
             out.append(Finding("WDR004", ERROR, chain.SUM_PATH, line, message))
     elif differences and not any(_changes_model(entry) for entry, _ in new):
         try:
-            draft = "it writes:\n" + _draft(base_files, head_files, base, head, (), cfg.scope)
+            draft = "it writes:\n" + _draft(base_files, head_files, base, managed_head, (), cfg.scope)
         except ToolError as e:
             draft = f"it refuses, so hand-write the migration: {e}"
         message = (
