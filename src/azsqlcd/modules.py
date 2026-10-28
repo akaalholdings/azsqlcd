@@ -223,6 +223,21 @@ def read_module(path: str, data: bytes) -> ModuleFile:
 
 
 # ------------------------------------------------------------------ header rewrites
+def trigger_table(m: ModuleFile) -> str | None:
+    """The key of the table (or view) of a trigger file: the name after ON in its header. A name of
+    one part is in the schema of the trigger, as the engine reads it. None when it cannot be read."""
+    try:
+        end = lex.module_header(m.text).name_span[1]
+        toks = [t for t in lex.significant(lex.tokenize(m.text)) if t.pos >= end][:4]
+    except lex.LexError:
+        return None
+    if not toks or _word(toks[0]) != "ON" or len(toks) < 2 or toks[1].kind not in _IDENT:
+        return None
+    if len(toks) >= 4 and _is_op(toks[2], ".") and toks[3].kind in _IDENT:
+        return names.object_key("TABLE", toks[1].value, toks[3].value)
+    return names.object_key("TABLE", m.schema, toks[1].value)
+
+
 def _splice(text: str, edits: list[tuple[tuple[int, int], str]]) -> str:
     for (start, end), new in sorted(edits, reverse=True):
         text = text[:start] + new + text[end:]

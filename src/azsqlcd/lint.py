@@ -1872,28 +1872,15 @@ def _file_keys(path: str, module_keys: Mapping[str, str]) -> list[str]:
     ]
 
 
-def _trigger_table(m: modules.ModuleFile) -> str | None:
-    """The key of the table (or view) of a trigger file: the name after ON in its header. A name of
-    one part is in the schema of the trigger, as the engine reads it. None when it cannot be read."""
-    try:
-        end = lex.module_header(m.text).name_span[1]
-        toks = [t for t in lex.significant(lex.tokenize(m.text)) if t.pos >= end][:4]
-    except lex.LexError:
-        return None
-    if not toks or _word(toks[0]) != "ON" or len(toks) < 2 or toks[1].kind not in _IDENT:
-        return None
-    if len(toks) >= 4 and _is_op(toks[2], ".") and toks[3].kind in _IDENT:
-        return names.object_key("TABLE", toks[1].value, toks[3].value)
-    return names.object_key("TABLE", m.schema, toks[1].value)
-
-
 def _scope_findings(files: Mapping[str, bytes], parsed: _Parsed, scope: config.Scope | None) -> list[Finding]:
     """OUT_OF_SCOPE: a file for an object that [scope] does not manage. The config and the files
     contradict each other: plan, drift and export do not see the object, so its file would never
     be deployed, compared or recorded. A file that cannot be read is reported by its own rule."""
     out: list[Finding] = []
     module_keys = {m.path: m.key for m in parsed.modules}
-    tables = {m.path: _trigger_table(m) for m in parsed.modules if m.kind == "TRIGGER"} if scope else {}
+    tables = (
+        {m.path: modules.trigger_table(m) for m in parsed.modules if m.kind == "TRIGGER"} if scope else {}
+    )
     for path in sorted(files) if scope is not None else ():
         keys = _file_keys(path, module_keys)
         reasons = [config.out_of_scope(scope, key) for key in keys]
