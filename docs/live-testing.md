@@ -276,8 +276,8 @@ stopped inside that scenario, the next run refuses with `LIVE_BOUND_ENVIRONMENT`
 writes `tables_report.json`. Exit codes as in section 3. It runs two passes, each with a state
 and a repository of its own: first the partitioned tables, then the tables without partitions.
 
-First pass, partitioned tables (P1 to P5, 17 checks). Not run on a database yet: it was written
-against the fake engine of the unit tests (`tests/unit/test_live_tables_script.py`). The script
+First pass, partitioned tables (P1 to P5, 17 checks). It passed on 2026-10-26 (section 12). It is
+also run against the fake engine of the unit tests (`tests/unit/test_live_tables_script.py`). The script
 acts as the DBA: its owner session creates the partition function `[PF_azsqlcd_tm_year]` (three
 partitions by year) and the partition scheme `[PS_azsqlcd_tm_year]` (all partitions on
 `[PRIMARY]`), and drops both, with the tables of the pass, when the pass ends. A run that was

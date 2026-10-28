@@ -85,7 +85,6 @@ that no script and no checklist item covers the item.
 | A rule for a large data backfill in a non-transactional migration | A non-transactional batch that is not an index build cannot be marked not applied (section 4) | Keep data batches in transactional migrations, in sizes that fit the service limits |
 | The pyodbc adapter | Written only if a driver gate fails (G-D1 to G-D5) | `docs/live-testing.md`, section 6 |
 | The parser fixtures under `SET PARSEONLY ON` (blueprint step P4) | No engine check of the grammar that the parser accepts | The first deploy to dev |
-| The fixtures under `tests/fixtures/live/` | `tests/unit/test_sqlerrors.py` uses message texts from the documentation | The owner's spike run writes them (X1, L7, L8) |
 | `plan --connect-only` | No preflight for the network path and the database user | The first plan job |
 | The list of grants that a `DROP_MODULE` removes | The plan names the module only | A DBA reads `sys.database_permissions` before the approval |
 | A canary for the dependency views | An empty read of `sys.sql_expression_dependencies` is read as "no dependant" | `setup-sql` grants SELECT on the view (L14 proves the grant) |
@@ -1729,10 +1728,11 @@ schemes and nothing more.
 
 More than one partitioning column cannot exist in the engine; `ON [scheme]([a], [b])` is `SYNTAX`.
 
-### Not proven on a database
+### On a database: what passed and what is open
 
-`scripts/live_tables.py` has a first pass for partitioned tables (P1 to P5, 17 checks). It was
-written against the fake engine and was not run. Pass P4 decides the largest open assumption. A
+`scripts/live_tables.py` has a first pass for partitioned tables (P1 to P5, 17 checks). It passed
+on one Azure SQL Database on 2026-10-26 (`docs/live-testing.md`, section 12). The rows that it
+proves are marked "passed"; the rows "No test yet" and "Not run" stay open. A
 row with "no test yet" has no check in any script. The run needs a disposable Azure SQL
 Database:
 
@@ -1742,17 +1742,17 @@ uv run --extra db python scripts/live_tables.py --server S --database D --confir
 
 | Assumption | Proven by |
 |---|---|
-| The plan and the deploy refuse a release on a scheme that the database does not have, and send nothing | P1, not run |
-| The reader of a partitioned heap, clustered table and clustered columnstore table: the scheme through `sys.indexes.data_space_id`, `sys.data_spaces.type = 'PS'` and `sys.partition_schemes`; the row of `sys.index_columns` with `partition_ordinal = 1` for a heap (`index_id` 0); the derived table of the index query that counts the different compressions | P2, not run |
-| What the reader gives for each partitioned table is emitted as the file of the repository, byte for byte | P2 and P4, not run |
-| `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` on a partitioned heap sets every partition | P3, not run |
+| The plan and the deploy refuse a release on a scheme that the database does not have, and send nothing | P1, passed 2026-10-26 |
+| The reader of a partitioned heap, clustered table and clustered columnstore table: the scheme through `sys.indexes.data_space_id`, `sys.data_spaces.type = 'PS'` and `sys.partition_schemes`; the row of `sys.index_columns` with `partition_ordinal = 1` for a heap (`index_id` 0); the derived table of the index query that counts the different compressions | P2, passed 2026-10-26 |
+| What the reader gives for each partitioned table is emitted as the file of the repository, byte for byte | P2 and P4, passed 2026-10-26 |
+| `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` on a partitioned heap sets every partition | P3, passed 2026-10-26 |
 | The same statement on a clustered table, and `REBUILD WITH (...)` without `PARTITION` on a partitioned table (both parse; `gen` writes the first for a change of only the compression of the clustered key or index, and never the second) | No test yet |
 | `ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = COLUMNSTORE | COLUMNSTORE_ARCHIVE)` on a table with a clustered columnstore index sets the compression of that index (from the documentation; `gen` writes it for a change of only that compression) | Not run |
-| The engine adds the partitioning column to an index that does not hold it, and the row of `sys.index_columns` has `key_ordinal = 0`, `is_included_column = 0` and `partition_ordinal = 1`. The reader leaves that column out of the index. If the row is another one, every export of such an index differs from its file | P4, not run. The script prints the rows; fix the filter in `catalog_tables.py` `_keys_and_indexes` and the helper `tabular_rows` of `tests/unit/test_catalog_tables.py` together |
-| `sys.stats.is_incremental` is 1 for an index that was created with `STATISTICS_INCREMENTAL = ON` | P4, not run |
-| An index or a key that is created with no `ON` clause on a partitioned table goes on the scheme of the table | P5, not run |
-| A `SPLIT` of the partition function changes no capture | P5, not run |
-| The error of the engine for a statement on a scheme that does not exist. The fake engine answers with 1921 ("Invalid partition scheme"); the number is from memory. No decision of the tool reads it | P5 prints what the engine says, not run |
+| The engine adds the partitioning column to an index that does not hold it, and the row of `sys.index_columns` has `key_ordinal = 0`, `is_included_column = 0` and `partition_ordinal = 1`. The reader leaves that column out of the index. If the row is another one, every export of such an index differs from its file | P4, passed 2026-10-26 (`docs/live-testing.md`, section 12, engine facts: `key_ordinal` 0 and `partition_ordinal` 1) |
+| `sys.stats.is_incremental` is 1 for an index that was created with `STATISTICS_INCREMENTAL = ON` | P4, passed 2026-10-26 |
+| An index or a key that is created with no `ON` clause on a partitioned table goes on the scheme of the table | P5, passed 2026-10-26 |
+| A `SPLIT` of the partition function changes no capture | P5, passed 2026-10-26 |
+| The error of the engine for a statement on a scheme that does not exist. The fake engine answers with 1921 ("Invalid partition scheme"); the number is from memory. No decision of the tool reads it | P5 ran on 2026-10-26: the text is "Invalid partition scheme ... specified.", and the driver gives no error number with it (`docs/live-testing.md`, section 12) |
 | `STATISTICS_INCREMENTAL` in `ALTER TABLE ... ADD CONSTRAINT ... WITH (...)`; what the engine does with the option on an index that is not aligned with its table | No test yet |
 | The drop of a clustered index or key leaves the heap on its scheme | No test yet |
 | `CREATE CLUSTERED INDEX` or `ADD CONSTRAINT ... CLUSTERED` with an `ON` clause on a heap moves the rows there and leaves the nonclustered keys and indexes where they are. The whole hand route of `PARTITION_CHANGE` rests on this and on the row above | No test yet |
