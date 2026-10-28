@@ -135,13 +135,15 @@ number and date. Version numbers follow semantic versioning.
   product with `promote_to` touches an object outside it.
 - `azsqlcd products --env <env>` lists apart the held items that `not_managed` takes out of that
   environment (`not managed in <env>: ...`).
-
 - The optional input `runs-on-deploy` in `stage.yml`, `onboard.yml` and `resolve.yml`. When it
   is set, the jobs of the deploy identity (`stage.yml` deploy, `onboard.yml` baseline,
-  `resolve.yml` resolve) run on it. When it is empty, they run on `runs-on`, as before.
-  `drift.yml` does not have this input: drift uses the plan identity only. The caller workflows
-  of the template and of the example have the input as a comment line. How to split the runners
-  and the order of the steps: `docs/setup.md`, section 2.
+  `resolve.yml` resolve) run on it. The jobs of the plan identity stay on `runs-on`. With a managed
+  identity, a runner of a plan job then does not hold the deploy identity. When it is empty, the
+  deploy jobs run on `runs-on`, as before. `drift.yml` does not have this input: drift uses the plan identity
+  only. A caller can give the input only after its `uses:` lines name this release or a later
+  one, because 0.2.0 does not have the input. The caller workflows of the template and of the
+  example have the input as a comment line. How to split the runners and the order of the steps:
+  `docs/setup.md`, section 2.
 - `ALTER TABLE ... REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = ...)` accepts
   `COLUMNSTORE` and `COLUMNSTORE_ARCHIVE`, in `lint` and in the parser. The replay sets the value
   on the clustered columnstore index of the table. It blocks these values on a table that has no
