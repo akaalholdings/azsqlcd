@@ -760,3 +760,13 @@ def test_a_pattern_with_a_wildcard_in_its_schema_part_is_kept_and_a_managed_sche
         VALID + '\n[scope]\nschemas = ["sales"]\nexclude_objects = ["*.tmp*", "SALES.x?"]\n'
     ).scope
     assert scope == Scope(("sales",), (), ("*.tmp*", "SALES.x?"))
+
+
+def test_park_failed_is_off_unless_the_project_switches_it_on():
+    """Parking is opt-in: a project that does not set the key keeps the A7 rule as it is."""
+    assert load_config(VALID).project.park_failed is False
+    on = VALID.replace("table_model = false", "table_model = false\npark_failed = true")
+    assert load_config(on).project.park_failed is True
+    for value in ('"true"', "1", '"yes"'):
+        bad = VALID.replace("table_model = false", f"table_model = false\npark_failed = {value}")
+        assert refused_key(bad) == "project.park_failed"

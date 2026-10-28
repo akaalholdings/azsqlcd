@@ -5,9 +5,9 @@ mistake cannot fall back to a default without a message. Error messages name the
 never print a value. A required key that is missing is named with its table and one example line.
 
 Keys with a default: project.module_chunk (100: what the template has; it sizes only the
-transactions of a first converge), project.server_suffixes, project.data_batches, env.<name>.gated
-and env.<name>.auth. A setting that decides what a deploy may do (table_model, min_token_minutes,
-drift, the lock limits, the identities) has no default.
+transactions of a first converge), project.server_suffixes, project.data_batches,
+project.park_failed, env.<name>.gated and env.<name>.auth. A setting that decides what a deploy may
+do (table_model, min_token_minutes, drift, the lock limits, the identities) has no default.
 
 [scope] is optional. Without it every schema is managed, as before the table existed.
 """
@@ -162,6 +162,9 @@ class Project:
     # false: a '-- azsqlcd:data' batch in a migration is refused (lint DATA000). This version manages
     # structural changes; data batches are an option that the project switches on.
     data_batches: bool = False
+    # true: a migration whose batch fails in an environment is parked there (set_aside.py): later
+    # releases deploy past it. false: the A7 rule refuses them until the migration is withdrawn.
+    park_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -370,7 +373,7 @@ def load_config(text: str) -> Config:
         doc["project"],
         "project",
         ("name", "tenant_id", "table_model", "min_token_minutes"),
-        ("module_chunk", "server_suffixes", "data_batches"),
+        ("module_chunk", "server_suffixes", "data_batches", "park_failed"),
     )
     suffixes = DEFAULT_SERVER_SUFFIXES
     if "server_suffixes" in p:
@@ -389,6 +392,7 @@ def load_config(text: str) -> Config:
         min_token_minutes=_int(p, "min_token_minutes", "project", 0),
         server_suffixes=suffixes,
         data_batches=_bool(p, "data_batches", "project") if "data_batches" in p else False,
+        park_failed=_bool(p, "park_failed", "project") if "park_failed" in p else False,
     )
     if len(project.name) > 128:  # azsqlcd.meta.project is nvarchar(128)
         raise _fail("project.name", "must be at most 128 characters")
