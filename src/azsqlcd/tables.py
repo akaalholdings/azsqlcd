@@ -497,10 +497,11 @@ class Hooks:
     def unrecorded_objects(self, work: Work, state: State) -> list[str]:
         """Keys of the model of the release that have no managed row and that no pending migration
         creates (Part 2 (c) 8). Such an object was never compared with this database: run baseline.
+        A migration that is set aside here (work.set_aside) creates its objects when it runs.
         """
         managed = {fold(key) for key in _managed(state)}
         created: set[str] = set()
-        for migration in work.pending:
+        for migration in (*work.pending, *work.set_aside):
             for op in _operations(migration):
                 match op:
                     case CreateSchema():

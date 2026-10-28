@@ -2097,3 +2097,130 @@ def test_a_parked_migration_is_listed_in_the_job_summary_and_by_drift_until_the_
     assert pipe.resolve(r1, "test", "--unpark", m2).code == 0
     ended = drift()
     assert ended.code == 0 and "parked" not in ended.out and "parked" not in summary.read_text()
+
+
+REGION = Table(
+    "sales",
+    "Region",
+    (Column("RegionId", INT, False), Column("Name", TypeRef("nvarchar", length=50), False)),
+    (PrimaryKey("PK_Region", True, (KeyColumn("RegionId"),)),),
+)
+
+
+def test_a_parked_migration_that_creates_a_table_does_not_ask_for_a_baseline(pipe):
+    """The table that a parked migration creates is in the model of the release and has no row in the
+    database. It is not an object that was never compared: the parked migration creates it."""
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    pipe.write_objects(REGION)
+    r1 = pipe.release("a region table", "region")
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on(
+        "CREATE TABLE [sales].[Region]", sql_error("The fake engine refused the table.", number=50000)
+    )
+    assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+
+    rerun = pipe.promote(r1, "test")
+    assert rerun.code == 0, rerun.err
+    assert (
+        f"parked: {r1.file} (run {test.rows('run')[-2]['run_id']}, BATCH_FAILED)" in rerun.report["warnings"]
+    )
+    pipe.write_objects(CUSTOMER_EMAIL)
+    r2 = pipe.release("an email", "customer_email")
+    assert pipe.promote(r2, "dev").code == 0
+    later = pipe.promote(r2, "test")
+    assert later.code == 0, later.err
+    assert migrations(test)[-1] == (r2.file, "ok") and r1.file not in dict(migrations(test))
+    assert "TABLE:[sales].[Region]" not in test.model and not any(
+        "Region" in batch for batch in test.ddl[-3:]
+    )
+
+
+def test_a_parked_column_rename_holds_back_its_procedure_and_every_change_of_its_table(pipe):
+    """The names of sp_rename are in string literals. The plan reads the rename, so the procedure
+    that reads the new column, and a later migration on the table, wait for the rename."""
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    pipe.write_objects(ORDER_RENAMED)
+    migration = pipe.gen("rename_reference", RENAME)
+    pipe.write(*FIND_RENAMED)
+    renamed = pipe.merge("rename the reference of an order", migration)
+    assert pipe.promote(renamed, "dev").code == 0
+    test.fail_on("sp_rename", sql_error("The fake engine refused the rename.", number=50000))
+    assert pipe.promote(renamed, "test").reason == "BATCH_FAILED"
+
+    before = frozen(test)
+    rerun = pipe.promote(renamed, "test")
+    assert (rerun.code, rerun.reason) == (22, "SET_ASIDE_DEPENDENCY")
+    assert PROCEDURE_KEY in rerun.err and renamed.file in rerun.err and frozen(test) == before
+
+    pipe.write_objects(with_columns(ORDER_RENAMED, NOTE))
+    noted = pipe.release("a note of an order", "order_note")
+    assert pipe.promote(noted, "dev").code == 0
+    refused = pipe.promote(noted, "test")
+    assert (refused.code, refused.reason) == (22, "SET_ASIDE_DEPENDENCY") and frozen(test) == before
+
+
+def test_a_parked_migration_applied_by_hand_is_unparked_then_marked_applied(pipe):
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, _, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+    assert pipe.promote(r1, "test").code == 0  # M1 applied, M2 parked
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    assert pipe.promote(r2, "dev").code == 0
+    assert pipe.promote(r2, "test").code == 0  # past M2
+
+    # the owner adds the rank by hand, with a default for the rows that exist
+    test.out_of_band(
+        "ALTER TABLE [sales].[Order] ADD [Rank] tinyint NOT NULL CONSTRAINT [DF_fill] DEFAULT (0);",
+        "ALTER TABLE [sales].[Order] DROP CONSTRAINT [DF_fill];",
+    )
+    held = pipe.resolve(r2, "test", "--mark-applied", m2)
+    assert (held.code, held.reason) == (22, "RESOLVE_NOT_APPLICABLE") and f"--unpark {m2} first" in held.err
+    assert pipe.resolve(r2, "test", "--unpark", m2).code == 0
+    marked = pipe.resolve(r2, "test", "--mark-applied", m2)
+    assert marked.code == 0, marked.err
+    assert (m2, "ok") in migrations(test)
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert test.model == r2.model and pipe.drift(r2, "test").code == 0
+
+
+def test_a_parked_replacement_has_no_note_that_it_runs_late(pipe):
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, _, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL", sql_error(NO_RANK, number=4901), times=None)
+    assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+    assert pipe.promote(r1, "test").code == 0  # M1 applied, M2 parked
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    assert pipe.promote(r2, "dev").code == 0
+    assert pipe.promote(r2, "test").code == 0  # past M2
+    filled = (
+        "ALTER TABLE [sales].[Order] ADD [Rank] tinyint NOT NULL CONSTRAINT [DF_Order_Rank_fill] DEFAULT (0);"
+        "\nGO\nALTER TABLE [sales].[Order] DROP CONSTRAINT [DF_Order_Rank_fill];\nGO\n"
+    )
+    replacement = pipe.replace_migration(m2, "order_rank_filled", "the rows get rank 0", filled)
+    fixed = pipe.merge("withdraw and replace the rank", replacement)
+    assert pipe.promote(fixed, "dev").code == 0
+    late, notes = plan_notes(pipe, fixed, "test")
+    assert late.code == 0 and any(note.startswith(f"late replacement: {fixed.file}") for note in notes)
+    assert pipe.promote(fixed, "test").reason == "BATCH_FAILED"  # the replacement fails too: parked
+
+    planned, notes = plan_notes(pipe, fixed, "test")
+    assert planned.code == 0 and any(note.startswith(f"parked: {fixed.file}") for note in notes)
+    assert not any(note.startswith("late replacement:") for note in notes)

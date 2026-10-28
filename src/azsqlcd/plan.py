@@ -30,7 +30,7 @@ from azsqlcd.catalog import Difference, FenceFacts
 from azsqlcd.chain import Chain, ChainEntry, Migration
 from azsqlcd.config import Config, Scope, in_scope, resolve_target
 from azsqlcd.errors import ToolError, locked, refused
-from azsqlcd.model import fold
+from azsqlcd.model import Model, fold
 from azsqlcd.modules import ModuleFile
 from azsqlcd.release import Bundle, Manifest
 from azsqlcd.session import Session
@@ -122,6 +122,9 @@ class Work:
     units: tuple[Unit, ...] = ()
     destructive: tuple[Destructive, ...] = ()
     warnings: tuple[str, ...] = ()
+    # parsed: the migrations of the release that are set aside here. Not run; the table hooks take
+    # what they create for objects that a migration creates, not for objects never compared
+    set_aside: tuple[Migration, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,11 @@ class TableFindings:
 class TableHooks(Protocol):
     """What table_model = true adds to a plan. Without hooks a plan does not model tables."""
 
+    @property
+    def model(self) -> Model:
+        """The head model: the table-class objects of the release."""
+        ...
+
     def touched_table_objects(self, work: Work) -> Collection[str]:
         """Keys of the table-class objects that the pending migrations create, alter or drop."""
         ...
@@ -188,7 +196,8 @@ class TableHooks(Protocol):
 
     def unrecorded_objects(self, work: Work, state: State) -> list[str]:
         """Keys of the model of the release that have no managed row and that no pending migration
-        creates (Part 2 (c) 8). The database was never compared with them."""
+        and no set-aside migration (Work.set_aside) creates (Part 2 (c) 8). The database was never
+        compared with them."""
         ...
 
     def dependants_to_check(self, session: Session, work: Work) -> list[str]:
@@ -510,6 +519,7 @@ def _pending_entries(
     recorded_seq: int,
     at_seq: int,
     set_aside_here: Collection[str] = (),
+    held: Collection[str] = (),
 ) -> tuple[list[ChainEntry], list[str]] | None:
     """(the chain entries to apply, in effective order; notes). None: the database is past this
     release (A6).
@@ -518,7 +528,8 @@ def _pending_entries(
     of the last ok run. at_seq is the release that the database holds: recorded_seq, or the
     higher release of a deploy that committed a unit of work and whose run did not end ok.
     set_aside_here: the migrations that are set aside here now or were before (set_aside.Aside.known).
-    Later migrations of the chain ran past them, so such a pending one is no hole.
+    Later migrations of the chain ran past them, so such a pending one is no hole. held: the ones
+    set aside now (set_aside.Aside.active); they do not run, so they get no note that they run late.
     """
     by_file = {entry.file: entry for entry in ch.entries}
     for entry in ch.entries:
@@ -586,6 +597,7 @@ def _pending_entries(
         "database applied already: here it runs after them, so the order differs from the chain order "
         "(for example the order of added columns)"
         for entry in late
+        if entry.file not in held
     ]
     return pending, notes
 
@@ -988,7 +1000,11 @@ def _readback(keys: Collection[str], all_managed: bool = False) -> Step:
 
 
 def pending_work(
-    bundle: Bundle, recorded: State, module_chunk: int, aside: Aside = set_aside.NOTHING
+    bundle: Bundle,
+    recorded: State,
+    module_chunk: int,
+    aside: Aside = set_aside.NOTHING,
+    model: Model | None = None,
 ) -> Work:
     """What a deploy of this release does to a database with this recorded state. Pure.
 
@@ -1004,6 +1020,7 @@ def pending_work(
     aside: the set-aside migrations of the database (set_aside.read). A set-aside one is not
     planned; what runs must be independent of it (SET_ASIDE_DEPENDENCY), and the pending migrations
     of earlier releases run with this one in place of CATCHUP_REQUIRED. set_aside.NOTHING: as before.
+    model: the head model, when tables are modelled; the independence check follows a rename with it.
     """
     _refuse_unresolved(recorded)
     files, manifest = bundle.files, bundle.manifest
@@ -1026,7 +1043,7 @@ def pending_work(
     # the release that the database holds: a deploy that committed a unit of work and whose run
     # did not end ok (RUN_NOT_CLOSED, a session lost at COMMIT) left its release here (A6)
     at_seq = max(recorded_seq, recorded.committed_release_seq)
-    position = _pending_entries(ch, applied_ok, seq, recorded_seq, at_seq, aside.known)
+    position = _pending_entries(ch, applied_ok, seq, recorded_seq, at_seq, aside.known, aside.active)
     if position is None:
         return Work(outcome=ALREADY_PAST, applied=applied)
     entries, order_notes = position
@@ -1089,12 +1106,14 @@ def pending_work(
         )
     need = _module_changes(in_release, managed)
     aside_notes: list[str] = []
+    held_migrations = tuple(_read_migration(files, entry) for entry in held)
     if held:
         aside_notes = [aside.active[entry.file].note for entry in held]
         aside_notes += set_aside.check(
             pending,
-            [(aside.active[entry.file], _read_migration(files, entry)) for entry in held],
+            [(aside.active[migration.file], migration) for migration in held_migrations],
             [in_release[key] for key in need],
+            model,
         )
     drops = [key for key in tombstones if key in managed]  # E5: recorded as managed and tombstoned
 
@@ -1181,6 +1200,7 @@ def pending_work(
         units=units,
         destructive=tuple(destructive),
         warnings=(*catch_up_notes, *order_notes, *aside_notes, *warnings),
+        set_aside=held_migrations,
     )
 
 
@@ -1569,9 +1589,9 @@ def compute_plan(
             if run.status == "running"
         ]
 
-    work = pending_work(
-        bundle, recorded, config.project.module_chunk, set_aside.read(session, config, recorded)
-    )
+    aside = set_aside.read(session, config, recorded)
+    model = table_hooks.model if table_hooks is not None and aside.active else None
+    work = pending_work(bundle, recorded, config.project.module_chunk, aside, model)
     manifest = bundle.manifest
     recorded_sha = recorded.recorded_git_sha
     repo = repo_url.rstrip("/") if repo_url else None

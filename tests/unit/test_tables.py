@@ -1635,13 +1635,15 @@ def test_the_hooks_have_the_methods_that_plan_and_runner_call():
         "refresh_set",
         "unrecorded_objects",
         "read_back",
+        "model",  # an attribute: the head model, for the independence check of set-aside migrations
     }
     # dependants_to_check (OM-02) and dependant_findings (RO-2): the hooks have them; the protocol of
     # the plan gets them with the sweep. missing_partition_schemes: the hooks have it for the plan,
     # which refuses a release on a scheme that the database does not hold
     sweep = {"dependants_to_check", "dependant_findings", "missing_partition_schemes"}
     assert known <= wanted <= known | sweep
-    assert all(callable(getattr(Hooks, name)) for name in wanted | sweep)
+    assert all(callable(getattr(Hooks, name)) for name in (wanted | sweep) - {"model"})
+    assert Hooks(bundle(MODEL), config()).model == MODEL
 
 
 VIEW_TEXT = "CREATE OR ALTER VIEW [rpt].[vMargin] AS\nSELECT 1 AS [x];\n"
