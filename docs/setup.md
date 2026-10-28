@@ -168,7 +168,9 @@ So:
    2. In the caller workflows of the database repository, remove the `# ` of each
       `runs-on-deploy` line: in `db.yml` one for each stage, and one in `onboard.yml` and in
       `resolve.yml`. Do not change `runs-on`. The drift call has no `runs-on-deploy`: drift
-      uses the plan identity only. Merge this change by pull request.
+      uses the plan identity only. Merge this change by pull request. The input `runs-on-deploy`
+      is in the tool release after 0.2.0. The `uses:` lines must name that tag or a later one
+      (section 9). GitHub refuses a run that gives an input that the called workflow does not have.
    3. Then remove the deploy identities from the runners of `azsql-nonprod` and `azsql-prod`.
       If you do this step before step 2, a deploy job that still runs on `runs-on` cannot get
       the deploy identity and stops with 24 `TOKEN_UNAVAILABLE`.
@@ -336,13 +338,14 @@ the deploy identity (deploy, resolve, onboard baseline) run on `runs-on-deploy` 
    prod. The prod group reaches only the prod private endpoint. The non-production group does not
    reach it. With a managed identity, also `azsql-nonprod-deploy` and `azsql-prod-deploy` for the
    jobs of the deploy identity (section 2, managed identity), with the same network rule.
-3. **Group access.** Each group is limited to the database repositories. Limit both groups also
+3. **Group access.** Each group is limited to the database repositories. Limit the groups also
    to the workflows `akaalholdings/azsqlcd/.github/workflows/stage.yml@<tag>`, `resolve.yml@<tag>`,
    `drift.yml@<tag>` and `onboard.yml@<tag>` (runner group setting "Workflow access"). Without this
    limit a pull request that adds a job with `runs-on: {group: azsql-prod}` runs code in the prod
    network before any review. Limit a deploy group (`-deploy`) to `stage.yml@<tag>`,
-   `resolve.yml@<tag>` and `onboard.yml@<tag>` only: drift never needs the deploy identity. No
-   script checks this setting.
+   `resolve.yml@<tag>` and `onboard.yml@<tag>` only: drift never needs the deploy identity. After
+   the split, a plan group needs `stage.yml@<tag>`, `drift.yml@<tag>` and `onboard.yml@<tag>`
+   only: `resolve.yml` has no job of the plan identity. No script checks this setting.
 4. **Image.** bash, gh, az, uv, Python 3.12, and the libraries of the driver: `libltdl7`,
    `libkrb5-3`, `libgssapi-krb5-2`.
 5. **Offline mode (recommended for prod).** Fill the uv cache in the image for the tool tag
@@ -1095,7 +1098,9 @@ references in one repository must be the same tag.
       `uv run python scripts/setup_repo.py --repo <owner>/<name> --print-azure` in a checkout of
       `v<new>`, section 3 of the output. The subject holds the tag, so the old credentials do not
       match the new workflows.
-   b. Runner group "Workflow access" of both groups: add the workflows at `v<new>`.
+   b. Runner group "Workflow access" of every runner group (with the split of section 2, also the
+      two `-deploy` groups; a `-deploy` group gets `stage.yml`, `resolve.yml` and `onboard.yml`
+      only): add the workflows at `v<new>`.
    c. Run `azsqlcd lint` of the new version in the repository first. `build` runs lint over every
       migration, merged ones included; a new rule that fails a merged migration stops every
       release, and a merged migration cannot change (`docs/known-gaps.md`, section 4). Then one

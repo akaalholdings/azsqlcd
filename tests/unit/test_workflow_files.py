@@ -1928,6 +1928,46 @@ def test_a_caller_shows_runs_on_deploy_in_a_comment_under_each_runs_on_of_a_depl
             assert deploy.replace("-deploy", "") == plan, rel(path)
 
 
+def setup_section(heading: str) -> str:
+    """One section of docs/setup.md (up to the next heading of the same level), on one line."""
+    text = (REPO / "docs" / "setup.md").read_text(encoding="utf-8")
+    level = heading.split(" ")[0]
+    start = text.index(f"\n{heading}\n")
+    end = text.find(f"\n{level} ", start + 1)
+    return " ".join(text[start : end if end > 0 else None].split())
+
+
+def test_the_split_of_the_runners_says_that_the_pinned_tag_must_have_runs_on_deploy():
+    # the callers pin v0.2.0, which has no runs-on-deploy: GitHub refuses a run that passes an unknown
+    # input, so a team that removes the `# ` before it moves to a later tag stops every release
+    pinned = {
+        tag
+        for folder in CALLERS
+        for path in (folder / ".github" / "workflows").glob("*.yml")
+        for tag in re.findall(r"azsqlcd/\.github/workflows/\w+\.yml@v([\d.]+)", path.read_text("utf-8"))
+    }
+    assert pinned == {"0.2.0"}, pinned
+    split = setup_section("#### Managed identity")
+    split = split[split.index("To split the runners:") :]
+    assert "is in the tool release after 0.2.0" in split
+    assert "must name that tag or a later one (section 9)" in split
+
+
+def test_the_runner_group_steps_count_the_deploy_groups_of_the_split():
+    # after the split there are four groups: a step that says "both groups" leaves the -deploy
+    # groups without the workflows of a new tag, and their jobs stay queued
+    texts = {name: (REPO / "docs" / name).read_text(encoding="utf-8") for name in ("setup.md", "porting.md")}
+    for name, text in texts.items():
+        flat = " ".join(text.split())
+        for phrase in ("both groups", "both runner groups"):
+            assert phrase not in flat, f"{name}: {phrase}"
+    upgrade = setup_section("## 9. Upgrading the tool across repositories")
+    assert "of every runner group (with the split of section 2, also the two `-deploy` groups" in upgrade
+    assert "With a managed identity and the split of setup section 2: four groups." in " ".join(
+        texts["porting.md"].split()
+    )
+
+
 def test_the_sign_in_of_a_job_is_set_for_the_whole_job_before_any_database_command():
     """The variables are in `env:` of the job, as AZSQLCD_LOG_DIR is: every step of the job gets
     them, also the steps of the composite action. No step sets them again, and no value of the

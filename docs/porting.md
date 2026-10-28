@@ -390,8 +390,11 @@ fault of the driver or of the wiring.
    `drift.yml@v0.1.0` and `onboard.yml@v0.1.0`; the image (bash, gh, az, uv, Python 3.12,
    `libltdl7`, `libkrb5-3`, `libgssapi-krb5-2`); a private endpoint path to each server; egress to
    GitHub, `login.microsoftonline.com` and PyPI. Treat the workflows as Linux only (N4-12).
+   With a managed identity and the split of setup section 2: four groups. Also
+   `azsql-nonprod-deploy` and `azsql-prod-deploy`, each limited to `stage.yml`, `resolve.yml` and
+   `onboard.yml` only.
 
-   Check: Settings > Actions > Runner groups shows both groups with `<db-repo>` and the four
+   Check: Settings > Actions > Runner groups shows each group with `<db-repo>` and its
    workflows. No script checks this.
 
 6. `setup-sql` in the database of each environment (`docs/setup.md`, section 6). Print one script
@@ -545,7 +548,7 @@ is new: write it into `docs/known-gaps.md`. Then prove the GitHub wiring on a sc
 - Order (advice, not a rule of the tool): databases with low risk first, and only after the
   pilot has passed several releases through all five environments, with one stop that you
   recovered by the runbook. Modules only first; the table model for a database after that.
-- Before each new repository: add it to both runner groups (workflow access is for each group).
+- Before each new repository: add it to each runner group (workflow access is for each group).
 - A tool upgrade moves every repository: `docs/setup.md`, section 9. One identity holds at most
   20 federated credentials (not verified), so the credentials of two tool tags fit and those of
   three do not: delete the old ones.
