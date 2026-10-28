@@ -28,6 +28,7 @@ from azsqlcd.model import fold
 
 # Promotion order, then the environment of the live tests.
 ENVIRONMENTS = ("dev", "sandbox", "test", "preprod", "prod", "disposable")
+PROMOTION_ORDER = ENVIRONMENTS[:5]
 _GATED_BY_DEFAULT = frozenset({"test", "preprod", "prod"})
 
 _GUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -137,7 +138,7 @@ class Product:
     """[products.<name>] of azsqlcd.toml: the objects of one product (products.py).
 
     objects: patterns 'schema.name', as exclude_objects of [scope]. owners: GitHub owners for
-    CODEOWNERS. promote_to: the last environment, in the order of ENVIRONMENTS, that the changes of
+    CODEOWNERS. promote_to: the last environment, in the order of PROMOTION_ORDER, that the changes of
     the product reach; None: every environment.
     """
 
@@ -557,8 +558,10 @@ def _products(raw: object, scope: Scope | None) -> tuple[Product, ...]:
             if not _OWNER.fullmatch(owner):
                 raise _fail(f"{path}.owners[{i}]", "must be a GitHub owner: @user or @org/team")
         promote_to = _str(table, "promote_to", path) if "promote_to" in table else None
-        if promote_to is not None and promote_to not in ENVIRONMENTS:
-            raise _fail(f"{path}.promote_to", f"an environment name is one of: {', '.join(ENVIRONMENTS)}")
+        if promote_to is not None and promote_to not in PROMOTION_ORDER:
+            raise _fail(
+                f"{path}.promote_to", f"an environment of the promotion order: {', '.join(PROMOTION_ORDER)}"
+            )
         found.append(Product(name, objects, owners, promote_to))
     return tuple(found)
 

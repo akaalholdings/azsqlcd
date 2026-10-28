@@ -76,8 +76,9 @@ def test_an_object_belongs_to_the_first_product_that_matches_it_and_else_is_shar
 @pytest.mark.parametrize(
     ("promote_to", "held_in"),
     [
-        ("dev", {"sandbox", "test", "preprod", "prod", "disposable"}),
-        ("test", {"preprod", "prod", "disposable"}),
+        ("dev", {"sandbox", "test", "preprod", "prod"}),
+        ("test", {"preprod", "prod"}),
+        ("prod", set()),
     ],
 )
 def test_a_product_is_held_in_every_environment_after_its_promote_to(promote_to, held_in):
@@ -87,6 +88,7 @@ def test_a_product_is_held_in_every_environment_after_its_promote_to(promote_to,
     for env in ("dev", "sandbox", "test", "preprod", "prod", "disposable"):
         assert products.is_held(product, env) is (env in held_in), env
     assert not any(products.is_held(CONFIG.products[1], env) for env in ("dev", "prod"))  # no promote_to
+    # disposable, the environment of the live tests, is outside the promotion order: nothing is held there
 
 
 def test_a_migration_that_mixes_a_held_product_with_shared_objects_is_named_and_one_that_does_not_is_not():
@@ -110,7 +112,7 @@ def test_a_hold_sets_aside_the_migrations_of_a_held_product_and_releases_them_wh
     files = files_of(BALANCE, SHARED)
     sandbox = products.hold(CONFIG, "sandbox", files)
     assert sandbox is not None and set(sandbox.held_migrations) == {BALANCE.file}
-    merged = sandbox.merge(set_aside.NOTHING)
+    merged = sandbox.merge(set_aside.NOTHING, (), {BALANCE.file: 2}, 2)
     assert merged.active == {
         BALANCE.file: set_aside.SetAside(BALANCE.file, set_aside.HELD, 'product balance, promote_to = "dev"')
     }
@@ -123,15 +125,21 @@ def test_a_hold_sets_aside_the_migrations_of_a_held_product_and_releases_them_wh
     raised = load_config(HEAD + PRODUCTS.replace('promote_to = "dev"', 'promote_to = "test"'))
     later = products.hold(raised, "sandbox", files)
     assert later is not None and later.held_migrations == {}
-    assert later.merge(set_aside.NOTHING) == set_aside.Aside({}, frozenset({BALANCE.file}))
+    assert later.merge(set_aside.NOTHING, (), {BALANCE.file: 2}, 2) == set_aside.Aside(
+        {}, frozenset({BALANCE.file})
+    )
+    # only a migration that the database could have held: of a release it holds, and not applied
+    assert later.merge(set_aside.NOTHING, (), {BALANCE.file: 3}, 2) == set_aside.NOTHING
+    assert later.merge(set_aside.NOTHING, (BALANCE.file,), {BALANCE.file: 2}, 2) == set_aside.NOTHING
     # nothing is held in the first environment, so nothing there was set aside before
-    assert products.hold(CONFIG, "dev", files).merge(set_aside.NOTHING) == set_aside.NOTHING
+    dev = products.hold(CONFIG, "dev", files)
+    assert dev.merge(set_aside.NOTHING, (), {BALANCE.file: 2}, 2) == set_aside.NOTHING
 
 
 def test_a_park_stays_a_park_when_the_migration_is_also_held():
     parked = set_aside.SetAside(BALANCE.file, set_aside.PARKED, "run 4, BATCH_FAILED")
     merged = products.hold(CONFIG, "sandbox", files_of(BALANCE)).merge(
-        set_aside.Aside({BALANCE.file: parked})
+        set_aside.Aside({BALANCE.file: parked}), (), {}, 0
     )
     assert merged.active == {BALANCE.file: parked}
 
@@ -184,6 +192,14 @@ def test_codeowners_gives_one_glob_where_a_folder_holds_only_files_of_the_produc
         "/schema/tables/dbo.old_*.sql @sales/legacy-team",
         "/schema/tables/DBO.OLD_B.sql @sales/legacy-team",
     ]
+
+
+def test_codeowners_writes_a_space_of_a_path_with_a_backslash_so_that_it_stays_one_path():
+    files = {"schema/tables/sales.Balance Line.sql": b"", "schema/tables/sales.Order.sql": b""}
+    lower = load_config(HEAD + PRODUCTS.replace('"sales.Balance*"', '"sales.balance*"'))
+    line = products.codeowners(lower, files)[0]
+    assert line == "/schema/tables/sales.Balance\\ Line.sql @bal-owner"
+    assert line.replace("\\ ", "_").split() == ["/schema/tables/sales.Balance_Line.sql", "@bal-owner"]
 
 
 # ------------------------------------------------------------------ the command `products`

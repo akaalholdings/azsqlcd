@@ -1027,8 +1027,6 @@ def pending_work(
     are set aside (reason held); its module changes and drops are not sent. None: as before.
     """
     _refuse_unresolved(recorded)
-    if hold is not None:
-        aside = hold.merge(aside)
     files, manifest = bundle.files, bundle.manifest
     seq, recorded_seq = manifest.release_seq, recorded.recorded_release_seq
     ch = (
@@ -1049,6 +1047,8 @@ def pending_work(
     # the release that the database holds: a deploy that committed a unit of work and whose run
     # did not end ok (RUN_NOT_CLOSED, a session lost at COMMIT) left its release here (A6)
     at_seq = max(recorded_seq, recorded.committed_release_seq)
+    if hold is not None:
+        aside = hold.merge(aside, applied_ok, manifest.chain_added_in, at_seq)
     position = _pending_entries(ch, applied_ok, seq, recorded_seq, at_seq, aside.known, aside.active)
     if position is None:
         return Work(outcome=ALREADY_PAST, applied=applied)
@@ -1142,6 +1142,13 @@ def pending_work(
         pending, {entry.file: entry.sha256 for entry in entries}, need, in_release, managed
     )
     also += unbinds  # an unbind is a change of a module, and the file must bind it again
+    if hold is not None:
+        unbound_by = {
+            step.object_key: step.migration
+            for step in steps
+            if step.kind == "unbind" and step.object_key is not None and step.migration is not None
+        }
+        products.check_held_rebinds(hold, unbound_by, in_release, managed)
     if nontx is not None and also:
         # A7 passed, so the migration is of this release; module changes can be of releases that
         # this database did not get (a module-only release may be skipped). Not so in a catch-up

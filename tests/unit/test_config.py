@@ -813,6 +813,10 @@ def test_the_products_tables_are_read_in_name_order_with_their_three_keys():
         ('[products.balance]\nobjects = ["sales.x"]\nowners = ["@a/b/c"]', "products.balance.owners[0]"),
         ('[products.balance]\nobjects = ["sales.x"]\npromote_to = "staging"', "products.balance.promote_to"),
         ('[products.balance]\nobjects = ["sales.x"]\npromote_to = ""', "products.balance.promote_to"),
+        (
+            '[products.balance]\nobjects = ["sales.x"]\npromote_to = "disposable"',
+            "products.balance.promote_to",
+        ),
         ('[products.balance]\nobjects = ["salesx"]', "products.balance.objects[0]"),
         ('[products.balance]\nobjects = ["*"]', "products.balance.objects[0]"),
         ('[products.balance]\nobjects = ["[sales].[x]"]', "products.balance.objects[0]"),

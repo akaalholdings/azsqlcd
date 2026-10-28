@@ -3,7 +3,7 @@
 [products.<name>] of azsqlcd.toml names the objects of a product with patterns schema.name, as
 [scope] exclude_objects does. An object belongs to at most one product (lint PRODUCT_OVERLAP); an
 object that no product names is shared. A product with promote_to is held in every environment
-that comes after promote_to in the order of config.ENVIRONMENTS.
+that comes after promote_to in config.PROMOTION_ORDER (dev to prod).
 
 In an environment where a product is held, a pending migration that touches an object of the
 product is set aside with the reason `held` (set_aside.py: it does not run, the releases after it
@@ -23,10 +23,11 @@ from dataclasses import dataclass, field
 
 from azsqlcd import chain, modules, names, set_aside
 from azsqlcd.chain import Migration
-from azsqlcd.config import ENVIRONMENTS, Config, Product
+from azsqlcd.config import PROMOTION_ORDER, Config, Product
 from azsqlcd.errors import ToolError, refused
 from azsqlcd.modules import ModuleFile
 from azsqlcd.set_aside import Aside, SetAside
+from azsqlcd.state import ObjectRow
 
 _MIGRATIONS_DIR = "migrations/"
 
@@ -48,10 +49,11 @@ def overlapping(config: Config, schema: str, name: str) -> list[str]:
 
 
 def is_held(product: Product, env: str) -> bool:
-    """The changes of the product do not reach env: env comes after promote_to."""
-    if product.promote_to is None or env not in ENVIRONMENTS:
+    """The changes of the product do not reach env: env comes after promote_to in the promotion
+    order. disposable, the environment of the live tests, is outside it: nothing is held there."""
+    if product.promote_to is None or env not in PROMOTION_ORDER:
         return False
-    return ENVIRONMENTS.index(env) > ENVIRONMENTS.index(product.promote_to)
+    return PROMOTION_ORDER.index(env) > PROMOTION_ORDER.index(product.promote_to)
 
 
 def touched_products(config: Config, migration: Migration) -> tuple[list[str], list[tuple[str, str]]]:
@@ -103,11 +105,15 @@ class Hold:
         product = product_of_key(self.config, key)
         return product if product is not None and product.name in self.held else None
 
-    def merge(self, aside: Aside) -> Aside:
+    def merge(
+        self, aside: Aside, applied: Collection[str], added_in: Mapping[str, int], at_seq: int
+    ) -> Aside:
         """The set-aside facts of the database with the held migrations of this environment. A
-        migration of a product that is not held here (any more) counts as set aside before
-        (Aside.released), so it runs at its place in the chain; not so in the first environment,
-        where nothing is ever held."""
+        migration of a product that is not held here now counts as set aside before
+        (Aside.released), so it runs at its place in the chain, only when the database could have
+        held it: it is not applied and a release that the database holds (at_seq) added it
+        (added_in: chain_added_in of the manifest). Any other pending migration keeps A6 and A7.
+        Only in the environments where a hold can be: after the first of the promotion order."""
         active: dict[str, SetAside] = dict(aside.active)
         by_name = {p.name: p for p in self.config.products}
         for file in self.held_migrations:
@@ -115,8 +121,14 @@ class Hold:
             why = f'product {product.name}, promote_to = "{product.promote_to}"'
             active.setdefault(file, SetAside(file, set_aside.HELD, why))
         released = set(aside.released)
-        if self.env != ENVIRONMENTS[0]:
-            released |= {file for file in self.migration_product if file not in self.held_migrations}
+        if self.env in PROMOTION_ORDER[1:]:
+            released |= {
+                file
+                for file in self.migration_product
+                if file not in self.held_migrations
+                and file not in applied
+                and added_in.get(file, at_seq + 1) <= at_seq
+            }
         return Aside(active, frozenset(released))
 
     def notes(
@@ -224,6 +236,34 @@ def check_held_modules(
             )
 
 
+def check_held_rebinds(
+    hold: Hold,
+    unbound_by: Mapping[str, str],
+    in_release: Mapping[str, ModuleFile],
+    managed: Mapping[str, ObjectRow],
+) -> None:
+    """Refuse (SET_ASIDE_DEPENDENCY) an unbind of a held module whose file text is not the text that
+    this database holds: the module must be bound again after the unbind, and only its file text
+    can do that, which is held here. unbound_by: module key -> the migration that unbinds it."""
+    for key, who in unbound_by.items():
+        product = hold.holds(key)
+        module = in_release.get(key)
+        if product is None or module is None or managed[key].source_sha256 == module.checksum:
+            continue
+        raise refused(
+            "SET_ASIDE_DEPENDENCY",
+            f"{who} unbinds {key}, a module of the product {product.name}, which is held in {hold.env} "
+            f'(promote_to = "{product.promote_to}"). The module must be bound again after the unbind, '
+            "and its file text, which is held here, is not the text that this database holds. Either "
+            f"raise promote_to of [products.{product.name}] by pull request, or take {who} out of the "
+            "release",
+            blocked=who,
+            set_aside=key,
+            reason=set_aside.HELD,
+            object=key,
+        )
+
+
 def _fold_key(key: str) -> tuple[str, str]:
     _, schema, name = names.parse_object_key(key)
     return (schema or "").casefold(), name.casefold()
@@ -273,10 +313,15 @@ def codeowners(config: Config, files: Mapping[str, bytes]) -> list[str]:
                 }
                 in_folder = {path for path in mine if path.rsplit("/", 1)[0] == folder}
                 if matched and matched <= in_folder and matched & left and _single(pattern):
-                    lines.append(f"/{glob} {owners}")
+                    lines.append(f"/{_escaped(glob)} {owners}")
                     left -= matched
-        lines += [f"/{path} {owners}" for path in sorted(left)]
+        lines += [f"/{_escaped(path)} {owners}" for path in sorted(left)]
     return lines
+
+
+def _escaped(path: str) -> str:
+    """A space ends a path in CODEOWNERS: a space of a path is written with a backslash."""
+    return path.replace(" ", "\\ ")
 
 
 def _single(pattern: str) -> bool:

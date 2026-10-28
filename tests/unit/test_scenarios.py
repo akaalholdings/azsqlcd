@@ -2456,3 +2456,69 @@ def test_a_baseline_where_a_product_is_held_does_not_ask_for_its_objects(pipe, t
     assert BALANCE_VIEW_KEY in dict(rows(dev, "VIEW")) and "TABLE:[sales].[Balance]" in dict(
         rows(dev, "TABLE")
     )
+
+
+def test_a7_holds_for_a_product_migration_that_no_environment_held(pipe):
+    """A product with no promote_to holds nothing: a skipped release is CATCHUP_REQUIRED, as
+    without [products]. Only a migration that the database could have held (of a release it got)
+    runs past A7."""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    pipe.write("azsqlcd.toml", toml() + '\n[products.balance]\nobjects = ["sales.Balance*"]\n')
+    pipe.write_objects(BALANCE)
+    r2 = pipe.release("the table of balance", "balance")
+    assert pipe.promote(r2, "dev").code == 0
+    pipe.write_objects(ORDER_NOTE)
+    r3 = pipe.release("a note of an order", "order_note")
+    assert pipe.promote(r3, "dev").code == 0
+    before = frozen(pipe.dbs["sandbox"])
+    refused = pipe.promote(r3, "sandbox")  # r2 was never promoted to sandbox
+    assert (refused.code, refused.reason) == (22, "CATCHUP_REQUIRED"), refused.err
+    assert f"promote r{r2.seq} first" in refused.err and frozen(pipe.dbs["sandbox"]) == before
+
+
+REFS = '\n[products.refs]\nobjects = ["sales.vw_Refs"]\n'
+REFS_KEY = names.object_key("VIEW", "sales", "vw_Refs")
+
+
+def refs_view(where: str = "") -> tuple[str, str]:
+    return (
+        "schema/views/sales.vw_Refs.sql",
+        "CREATE OR ALTER VIEW [sales].[vw_Refs] WITH SCHEMABINDING AS\n"
+        f"SELECT [OrderId], [Reference] FROM [sales].[Order]{where};\n",
+    )
+
+
+def test_a_shared_unbind_of_a_held_module_whose_text_changed_is_refused_and_never_sends_the_held_text(pipe):
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    pipe.write("azsqlcd.toml", toml() + REFS)
+    pipe.write(*refs_view())
+    r2 = pipe.release("a schema-bound view of the product refs")
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r2, env).code == 0
+    pipe.write("azsqlcd.toml", toml() + REFS + 'promote_to = "dev"\n')
+    pipe.write(*refs_view(" WHERE [Status] = 9"))
+    r3 = pipe.release("refs stays in dev; its view changes")
+    for env in ("dev", "sandbox"):
+        assert pipe.promote(r3, env).code == 0
+    sandbox = pipe.dbs["sandbox"]
+    assert "[Status] = 9" not in texts(sandbox)[REFS_KEY]
+
+    wide = TypeRef("nvarchar", length=80)
+    pipe.write_objects(
+        dataclasses.replace(
+            ORDER,
+            columns=tuple(
+                dataclasses.replace(c, type=wide) if c.name == "Reference" else c for c in ORDER.columns
+            ),
+        )
+    )
+    r4 = pipe.release("a longer reference (shared)", "widen_reference")
+    assert any("azsqlcd:unbind [sales].[vw_Refs]" in batch for batch in r4.batches)
+    assert pipe.promote(r4, "dev").code == 0
+    before = frozen(sandbox)
+    refused = pipe.promote(r4, "sandbox")
+    assert (refused.code, refused.reason) == (22, "SET_ASIDE_DEPENDENCY"), refused.err
+    assert REFS_KEY in refused.err and "promote_to" in refused.err and r4.file in refused.err
+    assert frozen(sandbox) == before and "[Status] = 9" not in texts(sandbox)[REFS_KEY]
