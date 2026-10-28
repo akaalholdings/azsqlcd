@@ -1,4 +1,4 @@
-"""Transitive dependants (A35) through the command line on FakeDatabase, which keeps the references
+"""Transitive dependants (A36) through the command line on FakeDatabase, which keeps the references
 of each module, also to views: a module on a module on a changed table, and the dependants of a
 module that the release changes, are refreshed in dependency order and checked after the change.
 """
@@ -70,7 +70,7 @@ def test_a_view_on_a_view_on_a_changed_table_is_refreshed_after_it_and_shown_wit
 
 
 def test_a_view_that_selects_a_dropped_column_through_a_changed_view_fails_the_deploy(project):
-    """Before A35 the deploy ended ok and left vw_OpenRefs broken: it is no direct dependant of the
+    """Before A36 the deploy ended ok and left vw_OpenRefs broken: it is no direct dependant of the
     table, and the release changed vw_OpenOrders, whose dependants nothing checked."""
     _, db = with_open_refs(project)
     before = (db.model, dict(db.modules), db.rows("step"), db.rows("object"))

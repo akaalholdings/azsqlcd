@@ -26,7 +26,7 @@ from azsqlcd.state import SCHEMA, capture_sha256, literal, rows
 
 APPLOCK_RESOURCE = "azsqlcd:deploy"  # the session applock of deploy; plan only tests it (A4)
 KEY_CHUNK = 500  # keys in one batch; more keys are read in several batches
-DEPENDANT_DEPTH = 32  # levels of modules on modules that dependant_closure reads (A35)
+DEPENDANT_DEPTH = 32  # levels of modules on modules that dependant_closure reads (A36)
 # broken_references: the engine could not bind the module. The read of
 # sys.dm_sql_referenced_entities raises 2020 alone (a procedure names a table that does not exist),
 # or 207 (a column is gone) or 208 (an object is gone) before it; the driver returns only the first
@@ -490,7 +490,7 @@ class Dependant:
     key: str
     kind: str  # VIEW | PROCEDURE | FUNCTION | TRIGGER
     schema_bound: bool
-    # A35: the keys from the object that the module was found through to the root, nearest first.
+    # A36: the keys from the object that the module was found through to the root, nearest first.
     # Empty for a module that references a root directly
     via: tuple[str, ...] = ()
 
@@ -562,7 +562,7 @@ def _referencing(session: Session, keys: Collection[str]) -> list[tuple[Dependan
 def dependant_closure(
     session: Session, table_keys: Collection[str], modules: Collection[str] = ()
 ) -> Closure:
-    """A35: the modules that reference one of the tables, or one of the modules, at any depth.
+    """A36: the modules that reference one of the tables, or one of the modules, at any depth.
 
     The first level is dependants_of(table_keys), the query of before. Each later level asks
     sys.sql_expression_dependencies once (one batch for each KEY_CHUNK keys) for the modules that

@@ -2532,7 +2532,7 @@ def test_the_dependants_to_check_are_read_at_plan_time_and_sealed_in_the_plan():
     assert planned(b, st, table_release()[2]).dependants == ()
     no_change = bundle(seq=7)
     assert planned(no_change, recorded(seq=6), table_hooks=Hooks(dependants=[reader])).dependants == ()
-    # A35: a release with no migration that changes a module checks the dependants of that module
+    # A36: a release with no migration that changes a module checks the dependants of that module
     no_migration = bundle(modules=[proc("usp_new")], seq=7)
     found = planned(no_migration, recorded(seq=6), table_hooks=Hooks(dependants=[reader]))
     assert found.dependants == (reader,)

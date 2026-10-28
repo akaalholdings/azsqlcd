@@ -1,4 +1,4 @@
-"""Transitive dependants (A35), the catalog part: catalog.dependant_closure on rows of FakeSession.
+"""Transitive dependants (A36), the catalog part: catalog.dependant_closure on rows of FakeSession.
 
 tests/unit/test_transitive_closed_loop.py runs the command line on FakeDatabase.
 """

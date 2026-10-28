@@ -149,7 +149,7 @@ class TableFindings:
     blockers: tuple[str, ...] = ()  # each one refuses the plan; text for the operator, names only
     # not read by the plan: Plan.pre_broken is the dependants with a finding in dependant_findings
     pre_broken: tuple[str, ...] = ()
-    notes: tuple[str, ...] = ()  # A35: the path of each transitive dependant to check; the depth limit
+    notes: tuple[str, ...] = ()  # A36: the path of each transitive dependant to check; the depth limit
 
 
 class TableHooks(Protocol):
@@ -1709,7 +1709,7 @@ def compute_plan(
     pre_broken: tuple[str, ...] = ()
     dependants: tuple[str, ...] = ()
     dependant_findings: dict[str, tuple[str, ...]] = {}
-    # A35: a release that changes or drops modules only refreshes and checks the dependants of them
+    # A36: a release that changes or drops modules only refreshes and checks the dependants of them
     if table_hooks is not None and (work.pending or ((work.module_changes or work.drops) and units)):
         # A partition scheme is a prerequisite that a DBA owns: no model statement creates one.
         # Without it the unit would fail at the statement that names it, after the batches before it

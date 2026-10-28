@@ -388,7 +388,7 @@ def _problem(
 
 def _bound_chain(session: Session, module: str) -> str:
     """' (schema-bound chain: a -> b -> module; ...)' for the schema-bound modules on a schema-bound
-    blocker, through schema-bound modules only (A35); '' when there is none."""
+    blocker, through schema-bound modules only (A36); '' when there is none."""
     closure = catalog.dependant_closure(session, [], [module])
     bound = {fold(d.key) for d in closure.dependants if d.schema_bound} | {fold(module)}
     chains = [
@@ -400,7 +400,7 @@ def _bound_chain(session: Session, module: str) -> str:
 
 
 def _changed_modules(work: Work) -> list[str]:
-    """The module roots of the dependant search (A35): the modules that the release changes or drops.
+    """The module roots of the dependant search (A36): the modules that the release changes or drops.
     The plan reads before the drop, so the name of a dropped module still resolves."""
     return [*(change.key for change in work.module_changes), *work.drops]
 
@@ -418,7 +418,7 @@ class Hooks:
         self._bundle = bundle
         self._scope = config.scope
         self.model = head_model(bundle.files)
-        # A35: the dependant reads of one plan, kept while the session and the Work are the same
+        # A36: the dependant reads of one plan, kept while the session and the Work are the same
         # objects. compute_plan builds a new Work for each plan, so a new plan reads again
         self._reads_of: tuple[Session, Work] | None = None
         self._closures: dict[tuple[tuple[str, ...], tuple[str, ...]], catalog.Closure] = {}
@@ -435,7 +435,7 @@ class Hooks:
         return self._closures[roots]
 
     def _broken_now(self, session: Session, key: str) -> list[str]:
-        """catalog.broken_references, read once for each module in a plan (A35)."""
+        """catalog.broken_references, read once for each module in a plan (A36)."""
         if self._reads_of is None or self._reads_of[0] is not session:
             return catalog.broken_references(session, key)
         if fold(key) not in self._broken:
@@ -659,7 +659,7 @@ class Hooks:
                         f"'-- azsqlcd:unbind {module.split(':', 1)[1]}'"
                     )
                     found[-1] += _bound_chain(session, module)
-            # A35: an unmanaged module at any depth, also through managed modules
+            # A36: an unmanaged module at any depth, also through managed modules
             closure = catalog.dependant_closure(session, [target.table_key])
             for dependant in closure.dependants:
                 if fold(dependant.key) in managed:
@@ -708,7 +708,7 @@ class Hooks:
 
     def _dependants(self, session: Session, work: Work, recorded: State) -> tuple[list[str], list[str]]:
         """(pre-broken, refresh set): the managed, unchanged dependants of the touched tables and of
-        the changed modules, at any depth (A35). The refresh set is in dependency order."""
+        the changed modules, at any depth (A36). The refresh set is in dependency order."""
         managed = {fold(key): row for key, row in self._managed(recorded).items()}
         changed = {fold(key) for key in (*(c.key for c in work.module_changes), *work.drops, *work.unbinds)}
         tables = [key for key in self.touched_table_objects(work) if key.startswith("TABLE:")]
@@ -741,7 +741,7 @@ class Hooks:
 
     def refresh_set(self, session: Session, work: Work) -> list[str]:
         """Managed, unchanged, not schema-bound views and table-valued functions on a touched
-        table or on a changed module, at any depth, that bind now, in dependency order (A12, A35)."""
+        table or on a changed module, at any depth, that bind now, in dependency order (A12, A36)."""
         return self._dependants(session, work, state.read_state(session))[1]
 
     def _to_check(self, session: Session, work: Work, recorded: State) -> tuple[list[str], tuple[str, ...]]:
@@ -773,7 +773,7 @@ class Hooks:
 
         Every managed module of any kind, schema-bound or not, that references a table which a
         pending statement creates, alters, drops or renames, or a module that the release changes,
-        at any depth (A35), as sys.sql_expression_dependencies holds it now. The set is read
+        at any depth (A36), as sys.sql_expression_dependencies holds it now. The set is read
         before the change: after DROP TABLE or sp_rename the old name resolves to no object, and
         the catalog no longer tells who used it. A module that the release drops is left out; one
         that the release changes stays in.

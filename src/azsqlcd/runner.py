@@ -106,7 +106,7 @@ _FIX_DEPENDANT = (
     "it), withdraw the migration and add its statements again as a replacement (allow "
     "REPLACEMENT_EDGE): a release that only changes the module is refused with CATCHUP_REQUIRED"
 )
-# A35: a release with no migration broke a dependant of a module that it changes or drops
+# A36: a release with no migration broke a dependant of a module that it changes or drops
 _FIX_MODULE_DEPENDANT = (
     "This release cannot be deployed as it is. Change this module (or tombstone it) in the same pull "
     "request as the module that it uses, then merge; the new release starts at dev"
@@ -945,7 +945,7 @@ def _unbind(run: _Run, step: Step, sent: _Sent) -> None:
 
 def _broken_dependant(run: _Run) -> tuple[str, str]:
     """(what the dependant uses, the fix) for DEPENDANT_BROKEN. With no migration the release only
-    changed or dropped modules (A35): there is no migration to withdraw."""
+    changed or dropped modules (A36): there is no migration to withdraw."""
     if any(step.kind == "batch" for unit in _have(run.plan).units for step in unit.steps):
         return "a table", _FIX_DEPENDANT
     return "a module", _FIX_MODULE_DEPENDANT
