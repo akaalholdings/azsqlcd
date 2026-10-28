@@ -748,7 +748,9 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   outside `plan_sha256`. `drift` gives the class `unscoped`, which is not drift (exit 0). The table
   hooks take a module outside the scope as unmanaged (blockers, `[ack]`, no refresh, no unbind).
 - Rows of objects that leave the scope (review M2): `plan.left_scope` lists the managed rows that
-  the scope of the release does not manage. The plan adds a tx unit of `unscope:<key>` steps (in
+  the scope of the release does not manage. A managed DML trigger leaves with its table: the
+  recorded capture names the table (`parent`), and `verify` asks for no tombstone for its removed
+  file (review V1). The plan adds a tx unit of `unscope:<key>` steps (in
   `plan_sha256`, so the approved plan holds it); the runner sends no statement for such a step and
   writes `state.mark_dropped` for the key in the transaction of the unit. No new column and no new
   status: `dropped` already means "no longer managed". An object that comes back has no managed

@@ -1982,6 +1982,19 @@ def _removed_key(path: str, data: bytes) -> str | None:
         return None
 
 
+def _leaves_scope(path: str, data: bytes, key: str | None, scope: config.Scope | None) -> bool:
+    """The removed module file is of an object that [scope] does not manage: its key is outside, or
+    it is a DML trigger whose table is outside (a trigger follows its table, as _scope_findings)."""
+    if key is None:
+        return False
+    if not config.in_scope(scope, key):
+        return True
+    if names.parse_object_key(key)[0] != "TRIGGER":
+        return False
+    table = _trigger_table(modules.read_module(path, data))
+    return table is not None and not config.in_scope(scope, table)
+
+
 def _has_tombstone(path: str, key: str | None, tombstones: tuple[chain.Tombstone, ...]) -> bool:
     """A tombstone holds the object key of the module of the removed file, as the planner compares it.
 
@@ -2109,7 +2122,7 @@ def lint_change(
                     "letter case that the object was created with)"
                 )
                 out.append(_finding("MODULE_CASE", twin, 1, message))
-            elif key is not None and not config.in_scope(scope, key):
+            elif _leaves_scope(path, base_files[path], key, scope):
                 continue  # it leaves [scope]: the tool stops managing it and never drops it
             elif not _has_tombstone(path, key, head.tombstones):
                 entry = key if key is not None else f"{_kind(path)}:[<schema>].[<name>]"

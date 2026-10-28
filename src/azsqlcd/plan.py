@@ -411,6 +411,12 @@ def _is_module(key: str) -> bool:
     return names.parse_object_key(key)[0] in names.MODULE_KINDS
 
 
+def _row_in_scope(scope: Scope | None, key: str, row: ObjectRow) -> bool:
+    """[scope] manages the object of the row. A DML trigger follows its table: the recorded capture
+    names the table (parent), so no catalog read is needed."""
+    return catalog.capture_in_scope(scope, key, row.capture)
+
+
 def scoped_state(recorded: State, scope: Scope | None) -> State:
     """The recorded state as [scope] sees it: the rows of the objects that it does not manage are
     left out. Such a row is of an object that left the scope: the tool stops managing it, so it
@@ -418,7 +424,8 @@ def scoped_state(recorded: State, scope: Scope | None) -> State:
     if scope is None:
         return recorded
     return replace(
-        recorded, objects={key: row for key, row in recorded.objects.items() if in_scope(scope, key)}
+        recorded,
+        objects={key: row for key, row in recorded.objects.items() if _row_in_scope(scope, key, row)},
     )
 
 
@@ -431,7 +438,9 @@ def left_scope(recorded: State, scope: Scope | None) -> list[str]:
     recorded: the plan stops (BASELINE_REQUIRED) until `baseline --schema` compares it again.
     """
     return sorted(
-        key for key, row in recorded.objects.items() if row.status == "managed" and not in_scope(scope, key)
+        key
+        for key, row in recorded.objects.items()
+        if row.status == "managed" and not _row_in_scope(scope, key, row)
     )
 
 

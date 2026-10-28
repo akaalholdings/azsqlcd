@@ -1434,6 +1434,44 @@ def test_a_trigger_follows_its_table_out_of_the_scope(tmp_path, capsys):
     assert drift.code == 0 and "tr_Load" not in drift.out
 
 
+def test_a_managed_trigger_leaves_the_scope_with_its_table_and_is_never_dropped(tmp_path, capsys):
+    """Review V1: verify asked for a tombstone (TMB001) and the plan for one (MODULE_ORPHAN); with the
+    tombstone the deploy sent DROP TRIGGER for the trigger of a table that the tool stopped managing."""
+    project = Project(tmp_path, capsys)
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write_objects(SALES, CUSTOMER, ORDER, TEMP_LOAD)
+    trigger = (
+        "schema/triggers/dbo.tr_Load.sql",
+        "CREATE OR ALTER TRIGGER [dbo].[tr_Load] ON [dbo].[temp_Load] AFTER INSERT AS\n"
+        "BEGIN\n    SET NOCOUNT ON;\nEND;\n",
+    )
+    key = names.object_key("TRIGGER", "dbo", "tr_Load")
+    project.write(*trigger)
+    db = deployed(project, project.release("create", "create_all"))
+    assert status_of(db, key) == status_of(db, TEMP_LOAD.key) == "managed"
+
+    # dbo.temp_* leaves the scope; the files of the table and of its trigger go (lint, OUT_OF_SCOPE)
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]\nexclude_objects = ["dbo.temp_*"]'))
+    for path in (names.path_for("TABLE", "dbo", "temp_Load"), trigger[0]):
+        (project.repo / path).unlink()
+    left = project.release("dbo.temp_* leaves the scope")  # lint and verify: 0, no TMB001
+    out = project.out("plan")
+    planned = project.tool("plan", *left.where, "--out", str(out), db=db)
+    assert planned.code == 0, planned.err  # no MODULE_ORPHAN
+    document = json.loads((out / "plan.json").read_text())
+    steps = [step["id"] for unit in document["units"] for step in unit["steps"]]
+    assert steps == [f"unscope:{TEMP_LOAD.key}", f"unscope:{key}"] and document["destructive"] == []
+    sent = len(db.ddl)
+
+    done = project.deploy(left, db)
+
+    assert done.code == 0, done.err
+    assert db.ddl[sent:] == [] and db.module(key) is not None and db.table(("dbo", "temp_Load")) is not None
+    assert status_of(db, key) == status_of(db, TEMP_LOAD.key) == "dropped"
+    drift = project.tool("drift", *left.where, db=db)
+    assert (drift.code, drift.out.strip()) == (0, "no drift")
+
+
 def test_the_baseline_of_a_schema_with_nothing_to_record_writes_no_step(tmp_path, capsys, monkeypatch):
     """Review minor 5: each run wrote one more empty baseline step."""
     project = Project(tmp_path, capsys, table_model=False)
