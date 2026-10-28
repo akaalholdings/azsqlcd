@@ -46,7 +46,12 @@ number and date. Version numbers follow semantic versioning.
   dropped; `align.md` counts these objects by kind and schema. A statement that can lose data (a
   dropped column, a narrowing type change) is written commented out after
   `-- REVIEW: loses data: <why>`, and `ALTER COLUMN ... DROP MASKED` after
-  `-- REVIEW: unmasks column ...`. The tool never runs the script: a DBA reviews it and runs it,
+  `-- REVIEW: unmasks column ...`. An expression (DEFAULT, CHECK, computed column, filter) is
+  compared by its presence only, as read-back and drift compare it: the engine gives it back in its
+  own normal form. The objects of a product that is held in the environment are not compared and
+  get no statement (also no rename of a constraint); `align.md` lists them under "Held in <env>". A
+  module that names a held object that the database lacks, or holds in another shape than its file,
+  goes to Hand-write. The tool never runs the script: a DBA reviews it and runs it,
   then `azsqlcd baseline` must pass. No new reason code; a file that cannot be written is
   `EXPORT_INCOMPLETE`. The state tables are not read or changed. Proven against the fake engine
   only.
@@ -73,14 +78,19 @@ number and date. Version numbers follow semantic versioning.
   tag accepts `action=unpark`; `resolve.yml@v0.2.0` refuses it, so a caller needs this tag.
 - Without the key, or with `park_failed = false`, every batch, output, plan, report and state write
   is the same as in 0.2.0.
-- Set-aside migrations (review fixes, A41): a parked migration that creates a table, schema, type,
-  sequence or synonym, or renames a table, no longer makes later deploys stop with
-  `BASELINE_REQUIRED`. The independence check follows a rename: with `table_model = true` it uses
-  the head model (also the tables with a key to the renamed table); without it, it uses the names of
-  the rename statement. A module that names a set-aside table without its schema is refused (dbo,
-  A17). `resolve --mark-applied` works for a migration that was unparked after later migrations ran
-  past it. A parked migration is refused with the advice to unpark it first. A parked replacement no
-  longer gets the note `late replacement: ...`.
+- Set-aside migrations (A41): a parked migration that creates a table, schema, type, sequence or
+  synonym, or renames a table, does not make later deploys stop with `BASELINE_REQUIRED`. The
+  independence check follows a rename: with `table_model = true` it uses the head model (also the
+  tables with a key to the renamed table); without it, it uses the names of the rename statement. A
+  module that names a set-aside table without its schema is refused (dbo, A17). `resolve
+  --mark-applied` works for a migration that was unparked after later migrations ran past it, also
+  where a product is held. A parked migration is refused with the advice to unpark it first. A
+  parked replacement gets no note `late replacement: ...`.
+- A migration that runs late past set-aside migrations (a held one after `promote_to` is raised, a
+  parked one after `resolve --unpark`) and touches an object outside `[scope]` is refused by the
+  plan with 22 `OUT_OF_SCOPE`: the release does not model that object. The advice of
+  `SET_ASIDE_DEPENDENCY` says that the set-aside migration runs at its place in the chain after the
+  unpark or the raise of `promote_to`.
 - Products and holds (opt-in). `azsqlcd.toml` takes `[products.<name>]` with `objects` (patterns
   `schema.name`, as `[scope] exclude_objects`), `owners` (`@user` or `@org/team`) and `promote_to`
   (the last environment that the changes of the product reach). An object belongs to one product at
@@ -88,7 +98,9 @@ number and date. Version numbers follow semantic versioning.
 - In an environment after `promote_to`, a pending migration that touches an object of the product is
   held: it does not run there, and later releases deploy past it, as past a parked migration
   (`SET_ASIDE_DEPENDENCY` when they are not independent of it). A module change of the product is
-  not sent there. When a later release raises or removes `promote_to`, the held migrations run
+  not sent there. A pending migration or a module that names a held module is refused with 22
+  `SET_ASIDE_DEPENDENCY` where the database does not have that module, or has it with another text
+  than its file. When a later release raises or removes `promote_to`, the held migrations run
   first, in chain order, and the held modules are sent.
 - `plan` and `deploy` notes: `held: ...`, `products: <name> (<n> migrations, <m> modules)`, `held in
   <env>: ...`, in the plan text, `plan.json`, `report.json` and the job summary.
@@ -101,9 +113,9 @@ number and date. Version numbers follow semantic versioning.
   with `--codeowners`, CODEOWNERS lines.
 - Without `[products]` the tool behaves as before: the same batches, plan text, plan.json, plan
   hash, reports and state writes.
-- Products and holds, review fixes: a product migration runs past the catch-up rule (A7) and the
-  hole check only when the database could have held it (not applied, and added by a release that the
-  database holds). A product with no `promote_to` changes nothing.
+- A product migration runs past the catch-up rule (A7) and the hole check only when the database
+  could have held it (not applied, and added by a release that the database holds). A product with
+  no `promote_to` changes nothing.
 - A shared migration that unbinds a held module whose file text changed is refused with 22
   `SET_ASIDE_DEPENDENCY`. The held text is never sent.
 - `verify`: new warning `HOLD_DEPENDENCY` (a new migration that will stop where a product is held),
@@ -115,25 +127,35 @@ number and date. Version numbers follow semantic versioning.
 - `azsqlcd products --codeowners` writes a space in a path as `\ `.
 - `[env.<name>] not_managed` in `azsqlcd.toml`: a list of patterns `schema.name` (`*` and `?`), with
   the syntax and the checks of `[scope] exclude_objects`. In that environment the matching objects
-  are outside the scope: they are not read, compared, baselined or listed as unmanaged, `drift`
-  reports nothing for them, and their module files are not sent. A managed row of such an object is
-  marked `dropped`.
+  are outside the scope: they are not read, compared, baselined, exported or listed as unmanaged,
+  `drift` reports nothing for them, and their module files are not sent. A DML trigger follows its
+  table. A managed row of such an object is marked `dropped`. A schema whose every object of the
+  release the patterns match is not asked for by plan or baseline.
 - A pending migration that touches only objects that the environment does not manage is skipped
   there for good. The deploy records it as a migration step with the status `not_applied` and the
-  note `not_managed in <env>`. It never runs there, also after the pattern is taken away. Other
-  environments run it as usual.
+  note `not_managed in <env>`. It never runs there, also after the pattern is taken away, and it
+  creates nothing there: when the pattern is taken away, its objects are asked for with
+  `BASELINE_REQUIRED`. Other environments run it as usual. Such a skip does not turn off the
+  catch-up rule (`CATCHUP_REQUIRED`) in that environment. The object of a raw batch directive counts
+  as touched.
 - New reason code `MIXED_NOT_MANAGED` (22): a pending migration touches objects that the environment
   manages and objects that it does not.
 - Plan note `not managed in <env>: <count> object(s); skipped migrations: ...` in the output,
-  `plan.json`, `report.json` and the job summary.
-- When a pattern is taken away, the table `BASELINE_REQUIRED` names `azsqlcd baseline --schema
-  <name>`, also without `[scope]`.
+  `plan.json`, `report.json` and the job summary. The plan also has a note for each data or raw
+  batch that runs, and for each migration or module to send that names a matched object.
+- `BASELINE_REQUIRED` names `azsqlcd baseline --schema <name>` also without `[scope]` in three
+  cases: every object it lists has a dropped row (an object that left `[scope]` or `[env.<name>]
+  not_managed` and came back); an object is in a schema that a migration skipped as not managed
+  touches; the database has a baseline step and a table row, so a whole baseline is refused there
+  (`ALREADY_BASELINED`).
 - No change to the state tables. Without the key in an environment, the plan, the batches and the
   state writes are the same as before.
 - Parking, holds and `not_managed` in one environment: each set-aside migration keeps one reason. A
   park or a skip as not managed wins over a hold, so a product migration that an environment does
-  not manage never runs there, also after `promote_to` is raised. `drift` lists the parks only. The
-  notes `held in <env>: ...` and `products: ...` count the held migrations only.
+  not manage never runs there, also after `promote_to` is raised. A held product migration that
+  touches objects that `not_managed` matches and managed objects is held, not refused with
+  `MIXED_NOT_MANAGED`; the refusal comes when `promote_to` is raised. `drift` lists the parks only.
+  The notes `held in <env>: ...` and `products: ...` count the held migrations only.
 - New verify warning `HOLD_OUT_OF_SCOPE`: a pull request changes `[scope]`, and a migration of a
   product with `promote_to` touches an object outside it.
 - `azsqlcd products --env <env>` lists apart the held items that `not_managed` takes out of that
@@ -193,25 +215,12 @@ number and date. Version numbers follow semantic versioning.
   names the schema-bound modules on it (`schema-bound chain: ...`).
 - The plan gives a note with the path of each dependant that it found through other modules. It
   also gives a note when the search stops at 32 levels.
-- `DEPENDANT_BROKEN` for a release with no migration now says "the change of a module it uses" and
-  tells the operator to change the dependant in the same pull request. It no longer says to
-  withdraw a migration (A37).
+- `DEPENDANT_BROKEN` also comes for a release with no migration, when the change of a module breaks
+  a module that uses it. Its message then says "the change of a module it uses" and tells the
+  operator to change the dependant in the same pull request (A37).
 - A plan reads each dependant once (A37).
 - A release whose dependants are all direct gives the same plan and the same SQL as before. No new
   reason code. No change to the state tables.
-
-- `BASELINE_REQUIRED` names `azsqlcd baseline --schema <name>` also without `[scope]` in three
-  cases: every object it lists has a dropped row (an object that left `[scope]` or `[env.<name>]
-  not_managed` and came back); an object is in a schema that a migration skipped as not managed
-  touches; the database has a baseline step and a table row, so a whole baseline is refused there
-  (`ALREADY_BASELINED`).
-- `gen` writes one `ALTER TABLE ... REBUILD WITH (DATA_COMPRESSION = ...)` for a change of only the
-  compression of the clustered key or index, with `PARTITION = ALL` on a partitioned table and
-  `allow LONG_LOCK`. Before, it wrote a drop and a create of the key or index: two writes of every
-  row, and a heap between them. A foreign key on such a key is no longer dropped and added again.
-  Any other change of the options of the clustered item stays a drop and a create. The output of
-  two older fixture pairs changed: `index_filter_and_option_change` and
-  `partitioned_index_compression_and_statistics_change`.
 - No `DATA_COMPRESSION` and the value that no option gives (`NONE` on a rowstore key or index,
   `COLUMNSTORE` on a columnstore index) are one state of the model. A hand-written rebuild proves
   both. The read-back report names an option that the file states and the database does not hold
@@ -232,27 +241,13 @@ details.
 
 - A release that only drops a view now fails with 21 `DEPENDANT_BROKEN` when a managed view still
   uses that view (A37). Before, the deploy ended ok and left that view broken.
-- `[env.<name>] not_managed`: a DML trigger follows its table. A trigger on a table that the
-  environment does not manage is not sent there, and its row is marked dropped.
-- `[env.<name>] not_managed`: a migration skipped as not managed no longer turns off the catch-up
-  rule (`CATCHUP_REQUIRED`) in that environment.
-- `[env.<name>] not_managed`: a schema whose every object of the release the patterns match is not
-  asked for by plan or baseline. A migration that creates the schema and its objects is skipped
-  there.
-- `[env.<name>] not_managed`: the object of a raw batch directive counts as touched. The plan has a
-  note for each data or raw batch that runs, and for each migration or module to send that names a
-  matched object.
-- `[env.<name>] not_managed` with parking: a migration skipped as not managed creates nothing. When
-  the pattern is taken away, its objects are asked for with `BASELINE_REQUIRED` as before.
-- A held product migration that touches objects that `[env.<name>] not_managed` matches and managed
-  objects is held, not refused with `MIXED_NOT_MANAGED`. Later releases deploy past it. The refusal
-  comes when `promote_to` is raised.
-- A migration that runs late past set-aside migrations (a held one after `promote_to` is raised, a
-  parked one after `resolve --unpark`) and touches an object outside `[scope]` is refused by the
-  plan with 22 `OUT_OF_SCOPE`. Before, the deploy failed its read-back with 21
-  `READBACK_MISMATCH`.
-- The advice of `SET_ASIDE_DEPENDENCY` says that the set-aside migration runs at its place in the
-  chain after the unpark or the raise of `promote_to`, not first.
+- `gen` writes one `ALTER TABLE ... REBUILD WITH (DATA_COMPRESSION = ...)` for a change of only the
+  compression of the clustered key or index, with `PARTITION = ALL` on a partitioned table and
+  `allow LONG_LOCK`. Before, it wrote a drop and a create of the key or index: two writes of every
+  row, and a heap between them. A foreign key on such a key is no longer dropped and added again.
+  Any other change of the options of the clustered item stays a drop and a create. The output of
+  two older fixture pairs changed: `index_filter_and_option_change` and
+  `partitioned_index_compression_and_statistics_change`.
 
 ## 0.2.0 - 2026-10-26
 
