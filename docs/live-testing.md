@@ -799,7 +799,7 @@ and the read-back and `drift` found no difference. Still:
 
 Read-back, `baseline` and `drift` compare an expression by its presence only. After the run,
 `align` was changed to do the same, with a unit test that gives the expressions in the form of the
-engine. Not run on a database again.
+engine. Proven on a database in the final run below.
 
 What passed in `s2_flow.py`:
 
@@ -836,8 +836,29 @@ every `--mark-applied` stopped with 22 `CHAIN_DIVERGED`:
    This follows from item 3.
 
 After the run, `plan` and `--mark-applied` were changed to use the same set-aside work, with the
-park check first, and a unit test was added. Not run on a database again.
+park check first, and a unit test was added. Proven on a database in the final run below.
 
-Still not proven after this run: the two fixes above on a database; the 0.3.0 features on GitHub
-Actions; the other items that `docs/known-gaps.md`, sections 15 to 19, gives as not run on a
-database.
+### Final run on the release commit (2026-10-28)
+
+The scenarios ran again on the release commit (`f307711`, version 0.3.0), after the fixes above,
+on three sets of databases of the same temporary server. The server was deleted after the run.
+
+| Scenario | Result |
+|---|---|
+| `s0_regression.py`: the demo repository, then a generated migration, dev > sandbox > test | 12 pass, 0 fail |
+| `s1_stack_a.py` | 37 pass, 1 fail. The failed check looked for the text "nothing to align" in the console output. The tool writes "Nothing to align." into `align.md`, as `docs/setup.md` says. This is a defect of the check, not of the tool |
+| `s2_flow.py` | 69 pass, 0 fail. In the run before, the network failed for two checks: one deploy stopped with 24 `CONNECTION_LOST` before it sent a batch, and the Azure CLI got no token for one `drift` |
+| `s3_partitions.py`: a table on a partition scheme, a change of only the compression of its clustered key, a columnstore index that is not aligned | 18 pass, 0 fail |
+
+The two fixes above are proven on a database:
+
+- In test, `align` writes statements only for `[sales].[Customer]` and `[sales].[Address]`, the two
+  tables that were changed by hand. It writes no statement for the DEFAULT, CHECK and filtered
+  index objects that the tool deployed, and no Hand-write item. It checks the disabled CHECK
+  constraint again.
+- `resolve --mark-applied` of a parked migration ends with 22 `RESOLVE_NOT_APPLICABLE` in sandbox
+  and in test. After `resolve --unpark` of a migration that a DBA applied by hand, while a product
+  is held, `--mark-applied` ends with exit 0. The next deploy to test and `drift` in test pass.
+
+Still not proven: the 0.3.0 features on GitHub Actions; the other items that
+`docs/known-gaps.md`, sections 15 to 19, gives as not run on a database.
