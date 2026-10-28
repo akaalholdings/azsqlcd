@@ -757,6 +757,12 @@ writes the rows again and holds a long lock for each build: plan the time.
 - Drift: `db.yml` runs the drift report every night for all five environments. A failed scheduled
   run notifies only the person who last changed the schedule; watch the workflow, or route the
   notification.
+- A constraint that somebody dropped and added again with no name is drift after the baseline.
+  The drift report shows the property `constraint_name [<name of the file>] (<kind>, live name
+  [<name in the database>])` and one line `rename <table key> EXEC sys.sp_rename ...;`. A plan that
+  stops for it prints the same line. Do not drop the constraint and do not use `accept-drift`. A
+  DBA reviews the statement and runs it, then the drift report is clean again.
+  `docs/runbook.md`, "A constraint with a name that the engine made", has the special cases.
 - Approvers: open the compare link in the plan summary before you approve. Reject approvals of
   older releases.
 

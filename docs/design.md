@@ -295,10 +295,10 @@ and `tables.py` are not in the map of "Build contracts".
 | `state.py` | setup script; reads and write statements of schema `azsqlcd` | config, errors, names, session, sqlerrors |
 | `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts; `schema_condition`, `list_schemas` | config, errors, names, session, sqlerrors, state |
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
-| `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables only), chain, config, errors, lex, model, modules, names, release, session, sqlerrors, state |
+| `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, sqlerrors, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
-| `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables only), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, state, tables |
+| `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
 | `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | catalog, chain, config, errors, gen, lint, onboard, plan, release, runner, session, sqlerrors, state, tables |
 
@@ -335,7 +335,7 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 |---|---|---|
 | `plan --out DIR` | `DIR/plan.json`. Outputs: `pending` (`true` or `false`), `plan_sha256` | 0 / 22 / 24 / 25 |
 | `deploy (--expect-plan-file FILE \| --inline-plan) --out DIR [--approved-by S] [--approved-utc TIME] [--triggering-actor S] [--ci-run-url S]` | `DIR/report.json` for every end; `DIR/plan.json` with `--inline-plan`. `--approved-utc` is an ISO time with a time zone. Output: `plan_sha256` | 0 / 21 / 22 / 23 / 24 / 25 |
-| `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
+| `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. One more line, `rename <table key> <EXEC sys.sp_rename statement>`, for each recorded constraint that has a name of the engine (A35). A plan refusal for drift prints the same lines on stderr. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
 | `export --root DIR --env E --target T --out DIR [--schema NAME]` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
 | `baseline [--report-only] --confirm-database NAME [--out DIR] [--schema NAME]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
 | `resolve --confirm-database NAME --reason TEXT (--mark-applied M \| --mark-not-applied M \| --accept-drift KEY \| --adopt-module KEY \| --clear-run RUN_ID \| --rebind-environment ENV) [--force-no-readback] [--out DIR]` | With `--out`: `DIR/report.json`. `--force-no-readback` is for `--mark-applied` only. `--rebind-environment` must name the environment of `--env` | 0 / 21 / 22 / 23 / 24 / 25 |
@@ -790,6 +790,23 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
 - New reason codes `OUT_OF_SCOPE` and `SCHEMA_NOT_FOUND` (22). New finding codes `OUT_OF_SCOPE`
   (lint) and `SCHEMA_UNSCOPED` (plan note, drift class `unscoped`). New plan step kind `unscope`.
 - Proven against fakes only. `docs/known-gaps.md`, section 15, has the limits.
+
+### Drift of a constraint name
+
+- A35 (owner decision, 2026-10-07; ported 2026-10-28). A constraint of a managed table that the
+  database holds under a name that the engine made is drift. `tables.Hooks.table_drift` gives the
+  difference `constraint_name [<recorded name>] (<kind>, live name [<name>])`, so `drift`, the
+  plan and the runner have the rule from one function. An engine-named constraint is the recorded
+  constraint with the same capture value (for a key on a scheme, the place is a part of it); the
+  fixed name of the reader does not decide it, so two CHECK constraints do not swap. The
+  read-back records such a constraint under the name of its file. The way out is the
+  `sp_rename` statement of `catalog_tables.rename_constraints_sql`: `drift` prints it as a
+  `rename` line, and a plan refusal has the same lines in its detail `renames`, which the command
+  line prints. No message holds the statement: a message goes into the triage log. A table
+  outside `[scope]` is not read, so it gives no such difference. The state tables are unchanged:
+  the difference is a property and two hashes, as every drift item. No new reason code;
+  `docs/runbook.md`, "A constraint with a name that the engine made", has the way out. Proven
+  against fakes only.
 
 ---
 
