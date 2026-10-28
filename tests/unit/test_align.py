@@ -9,14 +9,18 @@ flags away again. Then `baseline` must pass.
 """
 
 import dataclasses
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import support.fake_database as fake_database
-from azsqlcd.model import Check, Column, Expression, Model, Schema, Table, TypeRef
+from azsqlcd import align as align_module
+from azsqlcd.catalog_tables import CatalogRead
+from azsqlcd.model import Check, Column, Expression, KeyColumn, Model, PrimaryKey, Schema, Table, TypeRef
 from support.fake_database import FakeDatabase
-from unit.test_catalog_tables import rows_from_model
+from unit.test_catalog_tables import price, rows_from_model
 from unit.test_closed_loop import (
     CUSTOMER,
     FUNCTION,
@@ -139,9 +143,17 @@ COUNTS = {"[sales].[Customer]": 20, "[sales].[Order]": 500}
 class Counted(FakeDatabase):
     """A database whose tables hold rows: catalog.table_facts gives COUNTS."""
 
+    counts = COUNTS
+
     def _q_table_facts(self, toks):
         found = super()._q_table_facts(toks)
-        return [(key, COUNTS[key.partition(":")[2]], 0) for key, _, _ in found]
+        return [(key, self.counts[key.partition(":")[2]], 0) for key, _, _ in found]
+
+
+class LargeCustomer(Counted):
+    """The table that a foreign key references holds more rows than the table of the foreign key."""
+
+    counts = {"[sales].[Customer]": 500, "[sales].[Order]": 20}
 
 
 def test_constraint_state_and_engine_names_give_their_statements_smallest_table_first(project, monkeypatch):
@@ -176,12 +188,12 @@ def test_constraint_state_and_engine_names_give_their_statements_smallest_table_
         "EXEC sys.sp_rename N'[sales].[PK__Customer__3214EC07]', N'PK_Customer', N'OBJECT';\nGO\n" in script
     )
     state = script[script.index("-- 4. Constraint state") :]
-    assert state.splitlines()[1:] == [
-        "-- [sales].[Customer]: 20 rows",
-        "ALTER TABLE [sales].[Customer] WITH CHECK CHECK CONSTRAINT [CK_Customer_Id];",
-        "GO",
+    assert state.splitlines()[1:] == [  # every rebuild first: see the test of the rebuild order
         "-- [sales].[Order]: 500 rows",
         "ALTER INDEX [IX_Order_Status] ON [sales].[Order] REBUILD;",
+        "GO",
+        "-- [sales].[Customer]: 20 rows",
+        "ALTER TABLE [sales].[Customer] WITH CHECK CHECK CONSTRAINT [CK_Customer_Id];",
         "GO",
         "-- [sales].[Order]: 500 rows",
         "ALTER TABLE [sales].[Order] WITH CHECK CHECK CONSTRAINT [CK_Order_Status];",
@@ -231,3 +243,162 @@ def test_align_of_one_schema_reads_and_writes_that_schema_only(project):
 
     assert "CREATE SCHEMA [bal]" in script and "CREATE TABLE [bal].[Balance]" in script
     assert "[sales]" not in script
+
+
+def test_an_engine_named_constraint_of_a_table_that_has_no_file_keeps_its_name(project, monkeypatch):
+    release_1(project)
+    db = project.database()
+    loose = Table(
+        "sales",
+        "Loose",
+        (Column("Id", TypeRef("int"), False),),
+        (PrimaryKey("PK_Loose", True, (KeyColumn("Id"),)),),
+    )
+    db.model = Model([SALES, CUSTOMER, ORDER, loose])
+
+    def flagged(model):
+        rows = rows_from_model(model)
+        for row in rows["indexes"]:
+            if row["name"] == "PK_Loose":
+                row["name"], row["constraint_is_system_named"] = "PK__Loose__3214EC07", 1
+        return rows
+
+    monkeypatch.setattr(fake_database, "rows_from_model", flagged)
+    _, script, report = align(project, db)
+
+    # no file gives the table a name for its key: the tool must not make one up
+    assert "-- 1. Constraint names" not in script and "sp_rename" not in script
+    assert "[Loose]" not in script
+    assert report.count("TABLE:[sales].[Loose]") == 1
+    assert "TABLE:[sales].[Loose]" in report[report.index("## Only in the database") :]
+
+
+def test_every_rebuild_comes_before_every_constraint_check(project, monkeypatch):
+    built = release_1(project)
+    setup = project.tool("setup-sql", *TARGET, "--root", str(project.repo))
+    db = LargeCustomer("sales", setup_sql=setup.out)
+    db.model = Model([SALES, CUSTOMER, ORDER])
+    db.out_of_band(*(text for _, text in (FUNCTION, VIEW, PROCEDURE)))
+
+    def flagged(model):
+        rows = rows_from_model(model)
+        for row in rows["indexes"]:
+            if row["name"] in ("PK_Customer", "PK_Order", "IX_Order_Status"):
+                row["is_disabled"] = 1  # ALTER INDEX ... DISABLE of the keys of both tables
+        for row in rows["foreign_keys"]:
+            row["is_disabled"] = row["is_not_trusted"] = 1  # the engine disables the foreign key too
+        return rows
+
+    monkeypatch.setattr(fake_database, "rows_from_model", flagged)
+    _, script, _ = align(project, db)
+
+    # the referenced key is in the larger table: a foreign key cannot be enabled while the unique
+    # index of its key is disabled, and no index can be rebuilt while the clustered index is disabled
+    state = script[script.index("-- 4. Constraint state") :]
+    assert state.splitlines()[1:] == [
+        "-- [sales].[Order]: 20 rows",
+        "ALTER INDEX [PK_Order] ON [sales].[Order] REBUILD;",
+        "GO",
+        "-- [sales].[Order]: 20 rows",
+        "ALTER INDEX [IX_Order_Status] ON [sales].[Order] REBUILD;",
+        "GO",
+        "-- [sales].[Customer]: 500 rows",
+        "ALTER INDEX [PK_Customer] ON [sales].[Customer] REBUILD;",
+        "GO",
+        "-- [sales].[Order]: 20 rows",
+        "ALTER TABLE [sales].[Order] WITH CHECK CHECK CONSTRAINT [FK_Order_Customer];",
+        "GO",
+    ]
+    monkeypatch.setattr(fake_database, "rows_from_model", rows_from_model)
+    assert baseline(project, built, db).code == 0
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_the_report_does_not_follow_the_order_of_the_catalog_rows(project, monkeypatch, reverse):
+    def replicated(table: Table, name: str, sql: str) -> Table:
+        check = Check(name, Expression.from_sql(sql), not_for_replication=True)
+        return dataclasses.replace(table, constraints=(*table.constraints, check))
+
+    customer = replicated(CUSTOMER, "CK_Customer_N", "([CustomerId]>(0))")
+    order = replicated(ORDER, "CK_Order_N", "([Status]<(9))")
+    project.write_objects(SALES, customer, order)
+    project.release("not for replication", "replicated")
+    db = project.database()
+    db.model = Model([SALES, customer, order])
+
+    def flagged(model):
+        rows = rows_from_model(model)
+        for row in rows["checks"]:
+            row["is_disabled"] = row["is_not_trusted"] = 1
+        if reverse:
+            rows["tabulars"].reverse()
+        return rows
+
+    monkeypatch.setattr(fake_database, "rows_from_model", flagged)
+    _, _, report = align(project, db)
+
+    hand = report[report.index("## Hand-write") : report.index("## Only in the database")]
+    assert hand.index("TABLE:[sales].[Customer]") < hand.index("TABLE:[sales].[Order]")
+
+
+# ------------------------------------------------------------------ align._tables and the files alone
+def tables_of(live: list, files: list, **read: Any) -> align_module.AlignResult:
+    found = align_module._tables(CatalogRead(Model(live), {}, (), (), **read), Model(files))
+    return align_module._result("dev", "sales-dev", None, found, (), [], [])
+
+
+def test_a_change_that_has_only_hand_write_items_is_not_nothing_to_align():
+    temporal = price()
+    plain = dataclasses.replace(temporal, temporal=None, columns=temporal.columns[:2])
+
+    found = tables_of([SALES, plain], [SALES, temporal])
+
+    assert [item.note.split(":")[0] for item in found.hand_write] == ["TEMPORAL_CHANGE"]
+    assert found.sql == "-- no statement: see Hand-write in align.md\n"
+    assert "Nothing to align." not in found.md
+
+
+def test_a_mask_that_only_the_database_has_is_dropped_only_after_review():
+    masked = dataclasses.replace(
+        CUSTOMER, columns=(CUSTOMER.columns[0], dataclasses.replace(CUSTOMER.columns[1], masked="default()"))
+    )
+
+    found = tables_of([SALES, masked], [SALES, CUSTOMER])
+
+    # every reader of the column sees the real values after it: a reviewer must accept that
+    assert (
+        "-- REVIEW: unmasks column [Name] of [sales].[Customer]\n"
+        "-- ALTER TABLE [sales].[Customer] ALTER COLUMN [Name] DROP MASKED;\nGO\n"
+    ) in found.sql
+    review = found.md[found.md.index("## To review") : found.md.index("## Modules")]
+    assert "TABLE:[sales].[Customer]" in review and "unmasks column [Name]" in review
+
+
+def test_many_objects_only_in_the_database_take_linear_time():
+    many = [Table("sales", f"T{n:05}", (Column("Id", TypeRef("int"), False),)) for n in range(4000)]
+
+    started = time.monotonic()
+    found = tables_of([SALES, *many], [SALES])
+    elapsed = time.monotonic() - started
+
+    assert len(found.only_here) == 4000 and found.sql == "-- nothing to align\n"
+    assert elapsed < 3, elapsed  # 5.5 s when each object rebuilt the whole model
+    assert "| TABLE | [sales] | 4000 |" in found.md
+
+
+def test_a_file_for_the_name_of_an_external_or_a_history_table_is_hand_written():
+    ext = Table("sales", "Ext", (Column("Id", TypeRef("int"), False),))
+    history = Table("sales", "Price_History", (Column("Id", TypeRef("int"), False),))
+
+    found = tables_of(
+        [SALES],
+        [SALES, ext, history],
+        history_tables=(("TABLE:[sales].[Price_History]", "TABLE:[sales].[Price]"),),
+        external_tables=("TABLE:[sales].[Ext]",),
+    )
+
+    assert "CREATE TABLE" not in found.sql
+    assert {(item.object_key, item.note) for item in found.hand_write} == {
+        ("TABLE:[sales].[Ext]", "an external table holds this name"),
+        ("TABLE:[sales].[Price_History]", "the history table of TABLE:[sales].[Price] holds this name"),
+    }

@@ -11,15 +11,18 @@ Sections of align.sql, in the order in which they run:
      names of the files, so the renames come first.
   2. Table-class objects: the operations of diff.diff (the engine of gen, in its order). A change
      that diff refuses gets no statement; the object is listed under "Hand-write" with the code
-     and the reason, and is left as the database has it. An object that only the database has is
-     never dropped. A statement that loses data is written commented out, after a line
-     "-- REVIEW: loses data: <why>".
+     and the reason, and is left as the database has it. So is a file for the name of an external
+     table or of a history table. An object that only the database has is never dropped. A
+     statement that loses data, or that unmasks a column, is written commented out, after a line
+     "-- REVIEW: loses data: <why>" or "-- REVIEW: unmasks column ...".
   3. Modules: the file text of each module that differs from its file or is missing, in the order
      of a deploy. A module is never dropped.
   4. Constraint state: WITH CHECK CHECK CONSTRAINT for a CHECK or FOREIGN KEY constraint that is
      disabled or not trusted, ALTER INDEX ... REBUILD for a disabled index or key, each after a
-     comment with the row count of its table, smallest table first. A constraint or an index that
-     section 2 creates again is not listed: it is created enabled and trusted.
+     comment with the row count of its table. Every rebuild comes first (a foreign key cannot be
+     enabled while the index of the key that it references is disabled), smallest table first and
+     the clustered index first in its table; then the checks, smallest table first. A constraint or
+     an index that section 2 creates again is not listed: it is created enabled and trusted.
 """
 
 from __future__ import annotations
@@ -46,11 +49,13 @@ from azsqlcd.model import (
     PrimaryKey,
     Table,
     Unique,
+    UnmaskColumn,
     fold,
 )
 from azsqlcd.session import Session
 
 NOTHING = "nothing to align"
+NO_STATEMENT = "no statement: see Hand-write in align.md"
 SECTIONS = ("1. Constraint names", "2. Table-class objects", "3. Modules", "4. Constraint state")
 # diff.classify codes of a statement that can lose rows or values
 _LOSES = {
@@ -73,6 +78,12 @@ class Statement:
     object_key: str
     sql: str  # one statement, ending with ';'
     loses: str | None = None  # why it can lose data; then it is written commented out
+    unmasks: str | None = None  # the column that it unmasks; then it is written commented out
+
+    @property
+    def review(self) -> str | None:
+        """The text of its '-- REVIEW:' line; None when the statement runs as it is."""
+        return f"loses data: {self.loses}" if self.loses is not None else self.unmasks
 
 
 @dataclass(frozen=True)
@@ -143,6 +154,12 @@ def _loses(op: Operation, codes: list[str]) -> str | None:
     return _LOSES[found[0]]
 
 
+def _unmasks(op: Operation, codes: list[str]) -> str | None:
+    if "UNMASK" not in codes or not isinstance(op, UnmaskColumn):
+        return None
+    return f"unmasks column {names.quote(op.column)} of {names.qualified(op.schema, op.table)}"
+
+
 @dataclass
 class _Tables:
     renames: list[SystemNamed]
@@ -158,29 +175,35 @@ class _Tables:
 def _tables(live_read: catalog_tables.CatalogRead, head: Model) -> _Tables:
     live = live_read.model
     hand: list[Item] = []
-    only: list[Item] = []
     unsupported = {fold(u.object_key): u for u in live_read.unsupported}
-    for key in list(head):
-        found = unsupported.get(fold(key))
-        if found is not None:
-            hand.append(Item(key, f"{found.code}: {found.reason}"))
-            head = head.remove(key)
-    only += [
+    external = {fold(key) for key in live_read.external_tables}
+    history = {fold(key): current for key, current in live_read.history_tables}
+    kept = []
+    for obj in head.values():
+        key = fold(obj.key)
+        if key in unsupported:
+            hand.append(Item(obj.key, f"{unsupported[key].code}: {unsupported[key].reason}"))
+        elif key in external:
+            hand.append(Item(obj.key, "an external table holds this name"))
+        elif key in history:
+            hand.append(Item(obj.key, f"the history table of {history[key]} holds this name"))
+        else:
+            kept.append(obj)
+    head = Model(kept)
+    only = [
         Item(u.object_key, f"{u.code}: {u.reason}") for u in live_read.unsupported if u.object_key not in head
     ]
-    for key in live:
-        if key not in head:
-            only.append(Item(key, "no file"))
-            head = head.add(live[key])  # never dropped: it stays as the database has it
 
     # the live model holds a fixed name for each engine-named constraint; give it the declared
-    # name (after the rename) or its live name (no file holds it: a statement names it so)
+    # name (after the rename) or its live name (no file holds it: a statement names it so). A
+    # table with no file gives no declared name: it stays as the database has it
     by_table: dict[str, list[SystemNamed]] = {}
     for item in live_read.system_named:
         by_table.setdefault(fold(item.table_key), []).append(item)
     renames: list[SystemNamed] = []
     declared_of: dict[str, str] = {}
-    for items in by_table.values():
+    named: dict[str, Table] = {}
+    for key, items in by_table.items():
         table = live.get(items[0].table_key)
         declared = head.get(items[0].table_key)
         if not isinstance(table, Table):
@@ -192,7 +215,12 @@ def _tables(live_read: catalog_tables.CatalogRead, head: Model) -> _Tables:
                 renames.append(replace(item, fixed_name=name))
                 declared_of[fold(f"{item.table_key}.{item.fixed_name}")] = name
             table = _renamed(table, item.fixed_name, name if name is not None else item.live_name)
-        live = live.replace(table)
+        named[key] = table
+    # each model is built once: Model.add and Model.replace build the whole model again
+    live = Model(named.get(fold(obj.key), obj) for obj in live.values())
+    extra = [live[key] for key in live if key not in head]
+    only += [Item(obj.key, "no file") for obj in extra]
+    head = Model([*head.values(), *extra])  # never dropped: it stays as the database has it
 
     refused: set[str] = set()
     while True:
@@ -215,7 +243,12 @@ def _tables(live_read: catalog_tables.CatalogRead, head: Model) -> _Tables:
     state = live
     for op in ops:
         statements.append(
-            Statement(_key_of(op), emit.emit_operation(op), _loses(op, diff.classify(op, state)))
+            Statement(
+                _key_of(op),
+                emit.emit_operation(op),
+                _loses(op, codes := diff.classify(op, state)),
+                _unmasks(op, codes),
+            )
         )
         state = replay.apply(state, op)
     paths: dict[str, list[str]] = {}
@@ -253,7 +286,7 @@ def _states(
 ) -> tuple[list[tuple[str, int, str]], list[Item]]:
     """The constraint state statements in run order, and the constraints that keep their state.
     filed: the case-folded keys of the objects that have a file; no other table is looked at."""
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, int, str]] = []  # (table key, rank, statement)
     notes: list[Item] = []
     for key, capture in read.captures.items():
         table = head.get(key)
@@ -261,6 +294,7 @@ def _states(
             continue
         wanted = {fold(c.name): c for c in table.constraints if c.name is not None}
         indexes = {fold(i.name) for i in table.indexes}
+        clustered = table.clustered_item()
         for label, value in sorted(capture.items()):
             if not isinstance(value, dict) or not label.startswith(("constraint [", "index [")):
                 continue
@@ -281,20 +315,25 @@ def _states(
                         )
                     )
                     continue
-                found.append((key, f"ALTER TABLE {target} WITH CHECK CHECK CONSTRAINT {names.quote(name)};"))
+                found.append(
+                    (key, 2, f"ALTER TABLE {target} WITH CHECK CHECK CONSTRAINT {names.quote(name)};")
+                )
             elif value.get("is_disabled") and (
                 (label.startswith("index [") and fold(name) in indexes)
                 or isinstance(constraint, PrimaryKey | Unique)
             ):
-                found.append((key, f"ALTER INDEX {names.quote(name)} ON {target} REBUILD;"))
-    facts = catalog.table_facts(session, sorted({key for key, _ in found})) if found else {}
+                # no other index of a table can be rebuilt while its clustered index is disabled
+                first = clustered is not None and fold(clustered.name or "") == fold(name)
+                found.append(
+                    (key, 0 if first else 1, f"ALTER INDEX {names.quote(name)} ON {target} REBUILD;")
+                )
+    facts = catalog.table_facts(session, sorted({key for key, _, _ in found})) if found else {}
     rows = {fold(key): fact.rows for key, fact in facts.items()}
-    # in a table the rebuilds first: a foreign key is checked against the index of its key
-    ordered = sorted(
-        ((key, rows.get(fold(key), 0), sql) for key, sql in found),
-        key=lambda s: (s[1], fold(s[0]), not s[2].startswith("ALTER INDEX"), s[2]),
-    )
-    return ordered, notes
+    # every rebuild before every check: a foreign key cannot be enabled while the index of the key
+    # that it references (in any table) is disabled
+    ordered = sorted(found, key=lambda s: (s[1] == 2, rows.get(fold(s[0]), 0), fold(s[0]), s[1], s[2]))
+    notes.sort(key=lambda item: (fold(item.object_key), item.note))
+    return [(key, rows.get(fold(key), 0), sql) for key, _, sql in ordered], notes
 
 
 def align(
@@ -365,10 +404,10 @@ def _script(
     if found.statements:
         lines = [f"-- {SECTIONS[1]}\n"]
         for statement in found.statements:
-            if statement.loses is None:
+            if statement.review is None:
                 lines.append(f"{statement.sql}\nGO\n")
             else:
-                lines.append(f"-- REVIEW: loses data: {statement.loses}\n{_commented(statement.sql)}\nGO\n")
+                lines.append(f"-- REVIEW: {statement.review}\n{_commented(statement.sql)}\nGO\n")
         parts.append("".join(lines))
     if ordered:
         parts.append(f"-- {SECTIONS[2]}\n" + "".join(f"{module.text.rstrip()}\nGO\n" for module in ordered))
@@ -378,11 +417,11 @@ def _script(
             + "".join(f"-- {key.partition(':')[2]}: {count} rows\n{sql}\nGO\n" for key, count, sql in states)
         )
     if not parts:
-        return f"-- {NOTHING}\n"
+        return f"-- {NOTHING}\n" if not found.hand else f"-- {NO_STATEMENT}\n"
     head = (
         "-- azsqlcd align. Review every statement. A DBA runs this script in a maintenance window; the tool\n"
-        "-- runs none of it. Then run azsqlcd baseline. A line '-- REVIEW: loses data' is followed by a\n"
-        "-- statement that is commented out: run it only when the loss is accepted.\n\n"
+        "-- runs none of it. Then run azsqlcd baseline. A line '-- REVIEW:' (loses data, or unmasks a\n"
+        "-- column) is followed by a statement that is commented out: run it only when that is accepted.\n\n"
     )
     return head + "\n".join(parts)
 
@@ -406,11 +445,12 @@ def _report(
     empty: bool,
 ) -> str:
     of = "" if schema is None else f", the schema {names.quote(schema)}"
-    review = [s for s in found.statements if s.loses is not None]
+    review = [s for s in found.statements if s.review is not None]
     counts = (
         ("Constraint names", len(found.renames)),
         ("Table-class statements", len(found.statements)),
-        ("To review: loses data", len(review)),
+        ("To review: loses data", len([s for s in review if s.loses is not None])),
+        ("To review: unmasks", len([s for s in review if s.unmasks is not None])),
         ("Modules", len(module_items)),
         ("Constraint state", len(states)),
         ("Hand-write", len(found.hand)),
@@ -423,8 +463,8 @@ def _report(
         "Nothing to align.\n" if empty else "",
         "| Section | Count |\n|---|---|\n" + "".join(f"| {name} | {count} |\n" for name, count in counts),
         "## Steps\n",
-        "1. Review align.sql. Each statement under a line `-- REVIEW: loses data` is commented out; take it "
-        "only when the loss is accepted.\n"
+        "1. Review align.sql. Each statement under a line `-- REVIEW:` (loses data, or unmasks a column) is "
+        "commented out; take it only when that is accepted.\n"
         '2. Write what is under "Hand-write" by hand, or leave the object as it is and refresh the '
         "database from prod.\n"
         "3. A DBA runs align.sql in a maintenance window. The tool never runs it.\n"
@@ -433,7 +473,7 @@ def _report(
         + " (`--report-only` first). It must pass.\n",
     ]
     parts += _list("Table-class objects that differ", found.differs)
-    parts += _list("To review: loses data", [Item(s.object_key, s.loses or "") for s in review])
+    parts += _list("To review", [Item(s.object_key, s.review or "") for s in review])
     parts += _list("Modules", module_items)
     parts += _list(
         "Constraint names",
@@ -444,10 +484,19 @@ def _report(
     )
     parts += _list("Constraint state", [Item(key, f"{count} rows: {sql}") for key, count, sql in states])
     parts += _list("Hand-write", found.hand)
-    parts += _list(
-        "Only in the database",
-        found.only,
-    )
+    parts += _list("Only in the database", found.only)
+    if found.only:
+        by_kind: dict[tuple[str, str], int] = {}
+        for item in found.only:
+            kind = (item.object_key.partition(":")[0], names.quote(names.schema_of(item.object_key)))
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+        parts.append(
+            "| Kind | Schema | Count |\n|---|---|---|\n"
+            + "".join(
+                f"| {kind} | {_cell(schema)} | {count} |\n"
+                for (kind, schema), count in sorted(by_kind.items())
+            )
+        )
     parts.append(
         "An object only in the database is never dropped: add its file, exclude it in `[scope]` of "
         "azsqlcd.toml, or drop it by hand.\n"
@@ -465,7 +514,7 @@ def _result(
     states: list[tuple[str, int, str]],
 ) -> AlignResult:
     sql = _script(found, ordered, states)
-    empty = sql == f"-- {NOTHING}\n"
+    empty = sql == f"-- {NOTHING}\n"  # a Hand-write item gives NO_STATEMENT
     return AlignResult(
         renames=tuple(found.renames),
         statements=tuple(found.statements),
