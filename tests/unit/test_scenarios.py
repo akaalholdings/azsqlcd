@@ -2138,6 +2138,35 @@ def test_a_parked_migration_that_creates_a_table_does_not_ask_for_a_baseline(pip
     )
 
 
+def test_under_scope_a_table_that_a_parked_migration_alters_is_no_stale_managed_row(pipe):
+    """With [scope] the plan refuses a managed table row that the release models otherwise while no
+    pending migration changes it (STALE_MANAGED_ROW). A parked migration changes the table when it
+    runs: the row is not stale, and the releases after it deploy past it."""
+    pipe.write(
+        "azsqlcd.toml",
+        toml().replace("table_model = true", "table_model = true\npark_failed = true")
+        + '\n[scope]\nschemas = ["sales"]\n',
+    )
+    pipe.push("parking under a scope")
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, m1, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+
+    again = pipe.promote(r1, "test")
+    assert again.code == 0, again.err
+    assert migrations(test)[-1] == (m1, "ok") and m2 not in dict(migrations(test))
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert migrations(test)[-1] == (r2.file, "ok")
+
+
 def test_a_parked_column_rename_holds_back_its_procedure_and_every_change_of_its_table(pipe):
     """The names of sp_rename are in string literals. The plan reads the rename, so the procedure
     that reads the new column, and a later migration on the table, wait for the rename."""

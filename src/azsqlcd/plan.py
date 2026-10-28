@@ -1467,9 +1467,11 @@ def _refuse_stale_rows(
     """Under [scope]: refuse a managed table-class row whose object the release models otherwise
     while no pending migration changes it and it has no drift (review V2). The proof of verify
     allows that only for an object that enters the scope (PRF000), and for an object of a withdrawn
-    migration that this database ran (left out here). So the row is of an object that left the scope
-    in a release that this target did not deploy: the deploy of that release did not mark the row
-    dropped, and the plan would take the row as the truth. Read-only; STALE_MANAGED_ROW.
+    migration that this database ran (left out here). An object that a set-aside migration
+    (work.set_aside) changes is left out too: it changes the object when it runs. So the row is of
+    an object that left the scope in a release that this target did not deploy: the deploy of that
+    release did not mark the row dropped, and the plan would take the row as the truth. Read-only;
+    STALE_MANAGED_ROW.
     """
     ran = {applied.id for applied in work.applied if applied.status == "ok"}
     files = bundle.files
@@ -1483,7 +1485,9 @@ def _refuse_stale_rows(
         for entry in entries
         if entry.withdrawn and entry.file in ran and f"migrations/{entry.file}" in files
     )
-    left = {fold(key) for key in hooks.touched_table_objects(replace(work, pending=withdrawn))}
+    left = {
+        fold(key) for key in hooks.touched_table_objects(replace(work, pending=(*withdrawn, *work.set_aside)))
+    }
     held = [key for key in keys if fold(key) not in skipped and fold(key) not in left]
     if not held:
         return
