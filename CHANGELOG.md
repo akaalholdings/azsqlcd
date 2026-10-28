@@ -49,6 +49,89 @@ number and date. Version numbers follow semantic versioning.
   `EXPORT_INCOMPLETE`. The state tables are not read or changed. Proven against the fake engine
   only.
 
+- Opt-in parking of a migration that fails: `[project] park_failed = true` (default `false`). A
+  deploy fails on a batch of migration M in an environment (21 `BATCH_FAILED`, 21
+  `GOVERNANCE_LIMIT`, or 23 `NONTX_FAILED`). The deploy ends as before, with the same exit code and
+  reason code. From then on M is parked in that environment. The next deploy, of the same release or
+  of a later one, runs everything except M. The pending migrations of earlier releases run with the
+  release in chain order (plan note `catch-up past set-aside: ...`), in place of `CATCHUP_REQUIRED`.
+  A lost session, a lock timeout or a deadlock parks nothing. No state table changed: a park is the
+  run row of the failed deploy. How to use it: `docs/setup.md`, section 7, "Park a migration that
+  fails".
+- The plan output, `plan.json`, `report.json` (`warnings`), the job summary of `plan` and `deploy`,
+  and `drift` show each parked migration: `parked: <file> (run <id>, <reason code>)`. In `drift`, a
+  park is reported and is never drift: the exit code does not change.
+- Reason code 22 `SET_ASIDE_DEPENDENCY`. A pending migration or a module of the release is not
+  independent of a parked migration, so the plan stops. The message names the migration or the
+  module, the parked migration, its reason, the run, and the shared object. A raw or data batch is
+  compared by the names in its text (note `independence not proven for a raw batch: <file>`).
+- `resolve --unpark <file>` (RESOLVE with `-f action=unpark -f subject=<file>`) ends a park. The
+  next deploy runs the migration at its place among the pending migrations. A withdrawn parked
+  migration never runs, and its replacement (`replaces=`) runs as before.
+- Without the key, or with `park_failed = false`, every batch, output, plan, report and state write
+  is the same as in 0.2.0.
+- Set-aside migrations (review fixes, A36): a parked migration that creates a table, schema, type,
+  sequence or synonym, or renames a table, no longer makes later deploys stop with
+  `BASELINE_REQUIRED`. The independence check follows a rename: with `table_model = true` it uses
+  the head model (also the tables with a key to the renamed table); without it, it uses the names of
+  the rename statement. A module that names a set-aside table without its schema is refused (dbo,
+  A17). `resolve --mark-applied` works for a migration that was unparked after later migrations ran
+  past it. A parked migration is refused with the advice to unpark it first. A parked replacement no
+  longer gets the note `late replacement: ...`.
+- Products and holds (opt-in). `azsqlcd.toml` takes `[products.<name>]` with `objects` (patterns
+  `schema.name`, as `[scope] exclude_objects`), `owners` (`@user` or `@org/team`) and `promote_to`
+  (the last environment that the changes of the product reach). An object belongs to one product at
+  most (lint error `PRODUCT_OVERLAP`).
+- In an environment after `promote_to`, a pending migration that touches an object of the product is
+  held: it does not run there, and later releases deploy past it, as past a parked migration
+  (`SET_ASIDE_DEPENDENCY` when they are not independent of it). A module change of the product is
+  not sent there. When a later release raises or removes `promote_to`, the held migrations run
+  first, in chain order, and the held modules are sent.
+- `plan` and `deploy` notes: `held: ...`, `products: <name> (<n> migrations, <m> modules)`, `held in
+  <env>: ...`, in the plan text, `plan.json`, `report.json` and the job summary.
+- `verify` and `gen` give `MIXED_HOLD` for a new migration that touches objects of a product with
+  `promote_to` and other objects.
+- `plan` does not ask for a baseline of the objects of a held product, and `baseline` does not
+  compare or record the held objects that a database lacks.
+- New offline command `azsqlcd products [--env E] [--codeowners]`: each product with its owners,
+  `promote_to` and object file count; with `--env`, what the files hold back from that environment;
+  with `--codeowners`, CODEOWNERS lines.
+- Without `[products]` the tool behaves as before: the same batches, plan text, plan.json, plan
+  hash, reports and state writes.
+- Products and holds, review fixes: a product migration runs past the catch-up rule (A7) and the
+  hole check only when the database could have held it (not applied, and added by a release that the
+  database holds). A product with no `promote_to` changes nothing.
+- A shared migration that unbinds a held module whose file text changed is refused with 22
+  `SET_ASIDE_DEPENDENCY`. The held text is never sent.
+- `verify`: new warning `HOLD_DEPENDENCY` (a new migration that will stop where a product is held),
+  new error `HOLD_DROPPED` (a change of `[products]` that would strand a held migration with
+  `CHAIN_DIVERGED`), new warning `MIXED_HOLD_MERGED` (a changed `[products]` holds a merged mixed
+  migration as a whole).
+- `promote_to` must name an environment of the promotion order (dev, sandbox, test, preprod, prod).
+  Nothing is held in disposable.
+- `azsqlcd products --codeowners` writes a space in a path as `\ `.
+- `[env.<name>] not_managed` in `azsqlcd.toml`: a list of patterns `schema.name` (`*` and `?`), with
+  the syntax and the checks of `[scope] exclude_objects`. In that environment the matching objects
+  are outside the scope: they are not read, compared, baselined or listed as unmanaged, `drift`
+  reports nothing for them, and their module files are not sent. A managed row of such an object is
+  marked `dropped`.
+- A pending migration that touches only objects that the environment does not manage is skipped
+  there for good. The deploy records it as a migration step with the status `not_applied` and the
+  note `not_managed in <env>`. It never runs there, also after the pattern is taken away. Other
+  environments run it as usual.
+- New reason code `MIXED_NOT_MANAGED` (22): a pending migration touches objects that the environment
+  manages and objects that it does not.
+- Plan note `not managed in <env>: <count> object(s); skipped migrations: ...` in the output,
+  `plan.json`, `report.json` and the job summary.
+- When a pattern is taken away, the table `BASELINE_REQUIRED` names `azsqlcd baseline --schema
+  <name>`, also without `[scope]`.
+- No change to the state tables. Without the key in an environment, the plan, the batches and the
+  state writes are the same as before.
+- Parking, holds and `not_managed` in one environment: each set-aside migration keeps one reason. A
+  park or a skip as not managed wins over a hold, so a product migration that an environment does
+  not manage never runs there, also after `promote_to` is raised. `drift` lists the parks only. The
+  notes `held in <env>: ...` and `products: ...` count the held migrations only.
+
 ### Changed
 
 - With `[scope]`, `export`, `plan` and `drift` do not read the schemas outside it and list nothing
@@ -97,10 +180,28 @@ number and date. Version numbers follow semantic versioning.
 - A release whose dependants are all direct gives the same plan and the same SQL as before. No new
   reason code. No change to the state tables.
 
+- `BASELINE_REQUIRED` names `azsqlcd baseline --schema <name>` also without `[scope]` in three
+  cases: every object it lists has a dropped row (an object that left `[scope]` or `[env.<name>]
+  not_managed` and came back); an object is in a schema that a migration skipped as not managed
+  touches; the database has a baseline step and a table row, so a whole baseline is refused there
+  (`ALREADY_BASELINED`).
+
 ### Fixed
 
 - A release that only drops a view now fails with 21 `DEPENDANT_BROKEN` when a managed view still
   uses that view (A37). Before, the deploy ended ok and left that view broken.
+- `[env.<name>] not_managed`: a DML trigger follows its table. A trigger on a table that the
+  environment does not manage is not sent there, and its row is marked dropped.
+- `[env.<name>] not_managed`: a migration skipped as not managed no longer turns off the catch-up
+  rule (`CATCHUP_REQUIRED`) in that environment.
+- `[env.<name>] not_managed`: a schema whose every object of the release the patterns match is not
+  asked for by plan or baseline. A migration that creates the schema and its objects is skipped
+  there.
+- `[env.<name>] not_managed`: the object of a raw batch directive counts as touched. The plan has a
+  note for each data or raw batch that runs, and for each migration or module to send that names a
+  matched object.
+- `[env.<name>] not_managed` with parking: a migration skipped as not managed creates nothing. When
+  the pattern is taken away, its objects are asked for with `BASELINE_REQUIRED` as before.
 
 ## 0.2.0 - 2026-10-26
 

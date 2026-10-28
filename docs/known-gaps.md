@@ -1971,3 +1971,97 @@ A36 and A37; section 3, row A12). Limits:
 | align: order of section 4 | Every rebuild comes before every check; the clustered index comes first in its table. This order follows two engine facts that are not proven on a live database: a FOREIGN KEY cannot be enabled while the unique index of the key that it references is disabled, and no nonclustered index can be rebuilt while the clustered index of its table is disabled. Only the fake proves the output order |
 | align: report size | `align.md` lists each object that only the database has, one row each, with a count per kind and schema after the list. With many thousands of such objects the list is long; it is not cut to the first rows |
 | align: workflow | No workflow runs align (`onboard.yml` has no align action). It is a workstation command only |
+
+## 19. Set-aside migrations: parking, product holds and per-environment not_managed (2026-10-28)
+
+Three opt-in features set a pending migration aside in one environment: a park after a failure
+(`[project] park_failed`, A35 and A36), a hold of a product (`[products.<name>] promote_to`, A37 and
+A38), and a skip of objects that the environment does not manage (`[env.<name>] not_managed`, A39
+and A40). A41 is their combination.
+
+### Parking
+
+- Proven against the fake database only. No live run on Azure SQL Database yet.
+- Independence uses a token scan. It counts only names that are written with their schema
+  (`[sales].[Order]`, `sales.Order`). A raw or data batch that names an object without its schema is
+  not compared on that name. Such a batch can run past a parked migration that touches the object.
+  The engine then fails it, and that migration is parked too.
+- A model batch counts as a reference only what its text names: foreign key targets, and types,
+  sequences and functions that are written with their schema in defaults, checks and computed
+  columns. A type or a function without its schema is not seen.
+- A failed non-transactional migration is parked only after the two resolve steps of "Unknown run"
+  (`--mark-not-applied`, then `--clear-run`). Until then the plan stops with the existing codes, as
+  before.
+- Three reasons are built: `parked`, `held` (products, A37) and `not_managed` (A39). `held` is
+  merged in `plan.pending_work` (`products.Hold.merge`), not in `set_aside.read`, because a hold
+  needs the environment and the files of the release.
+- LOOK has no SQL query that lists only the parks. The operator reads the run rows (`failed_step`
+  and `note`) and the resolve steps with the note `unpark <file>`, or runs `azsqlcd drift`.
+
+| Limit | Way out | Where |
+|---|---|---|
+| A set-aside migration: a name written without its schema in a raw or data batch, and a three-part name (`[db].[s].[n]`), is not compared by the independence check | Write the schema; read the note `independence not proven` | `set_aside.py` `footprint` |
+| `park_failed` set back to `false` while a parked migration is pending: `CHAIN_DIVERGED`, and `--unpark` is refused | Set the key to `true` again; unpark or withdraw the migration | `plan.py` `_pending_entries` |
+| A migration id of 199 or 200 characters is never parked: `failed_step` (nvarchar(200)) cuts off `#<n>`. The deploy then refuses later releases with `CATCHUP_REQUIRED`, as without `park_failed` | Keep migration ids at 196 characters or fewer | `set_aside.py` `batch_migration` |
+
+### Products and holds
+
+- After `promote_to` is raised or removed, the tool cannot know whether a pending product migration
+  was held before, because no state records a hold. So in every environment except dev, a pending
+  migration that touches an object of any product runs with the catch-up past set-aside (note
+  `catch-up past set-aside: ...`) in place of `CATCHUP_REQUIRED`. This happens also when the
+  migration was never held there and the database skipped its release. In dev, nothing is ever held,
+  and A7 applies as before.
+- While a migration is held in an environment, a skipped release is not refused there with
+  `CATCHUP_REQUIRED`. Its migrations run with the next release, in chain order (note `catch-up past
+  set-aside`). For a hold that stays, release-by-release promotion is not enforced in the
+  environments after `promote_to`.
+- A migration that touches objects of two products is given to the held product when one of them is
+  held. Otherwise it is given to the first product in name order. `MIXED_HOLD` stops a new migration
+  of this kind only when one of the products has `promote_to`.
+- When a `[products.<name>]` table is removed while its migrations are held in an environment, the
+  planner no longer knows them as set aside there. A later release then gets `CATCHUP_REQUIRED` or
+  `CHAIN_DIVERGED`. Raise or remove `promote_to` first, and remove the table after the held
+  migrations have run.
+- `drift` lists no pending or held migrations. `azsqlcd products --env` reads no database: it lists
+  what the files hold back, not what a target has applied or parked.
+- A drop (tombstone) of a module of a held product is not sent in the held environment. It is sent
+  after `promote_to` is raised.
+- A held module that an environment holds already keeps its old text there. If a shared migration
+  changes a table so that the old text does not bind, the plan does not predict it: the deploy stops
+  with 21 `DEPENDANT_BROKEN` and is rolled back. The message names remedies for a normal module; for
+  a held module the way out is to raise `promote_to` of its product by pull request, or to change
+  the shared migration.
+- `HOLD_DEPENDENCY`, `HOLD_DROPPED` and `MIXED_HOLD_MERGED` are judged from the files only. `verify`
+  cannot know whether a migration of a product is still pending in an environment. `HOLD_DEPENDENCY`
+  and `MIXED_HOLD_MERGED` are therefore warnings, and `HOLD_DROPPED` can refuse a removal that would
+  be safe; the two-step way (remove `promote_to`, promote everywhere, then remove the product)
+  always works.
+- `verify` warns for new migrations that depend on a held migration, not for new or changed shared
+  modules that name a held object. Such a module is refused at deploy with `SET_ASIDE_DEPENDENCY`
+  where the product is held.
+- `azsqlcd products --codeowners` finds the files of a product by their file name
+  (`<schema>.<name>.sql`), not by the module header.
+- Proven against fakes only. No live run on Azure SQL Database.
+
+### Objects that one environment does not manage
+
+- Proven against fakes only. No run on Azure SQL Database or GitHub Actions.
+- `drift` does not list the migrations that an environment skipped. Only `plan` and `deploy` show
+  them (notes).
+- Without `[scope]`, a module that comes back after a pattern is taken away stops the plan with
+  `NAME_COLLISION`, not `BASELINE_REQUIRED`. `azsqlcd baseline --schema <name>` is the way out in
+  both cases.
+- Without `[scope]`, an environment with `not_managed` reads with a scope of every schema. So an
+  external table in that environment is skipped by its type, not reported as `UNSUPPORTED`.
+- A migration that was skipped as not managed does not stop later migrations or modules that name
+  its objects. The plan gives the note `not_managed: <what> names ...`; such a statement can fail at
+  the deploy.
+
+### The three together
+
+- Proven against fakes only, by two scenario tests (design A41).
+- Each set-aside migration has one reason. A park or a skip as not managed wins over a hold. A
+  product migration that an environment does not manage is skipped there for good: it does not run
+  there after `promote_to` is raised. To run it there, take the pattern away before the first
+  deploy of its release there, or withdraw and replace the migration.
