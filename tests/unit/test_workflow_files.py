@@ -253,10 +253,16 @@ def test_token_jobs_use_only_the_plan_or_the_deploy_environment(name: str):
 
 
 def test_jobs_without_a_database_identity_run_on_the_light_runner():
+    # a job of a plan environment: runs-on; of the deploy environment: runs-on-deploy, else runs-on
     for name in ("stage.yml", "drift.yml", "resolve.yml", "onboard.yml"):
         for job_id, job in jobs(WORKFLOWS / name).items():
-            runner = "runs-on" if "environment" in job else "runs-on-light"
-            assert job["runs-on"] == f"${{{{ fromJSON(inputs.{runner}) }}}}", f"{name}: {job_id}"
+            if "environment" not in job:
+                runner = "inputs.runs-on-light"
+            elif job["environment"].endswith("-plan"):
+                runner = "inputs.runs-on"
+            else:
+                runner = "inputs.runs-on-deploy || inputs.runs-on"
+            assert job["runs-on"] == f"${{{{ fromJSON({runner}) }}}}", f"{name}: {job_id}"
 
 
 @pytest.mark.parametrize("path", WORKFLOW_FILES, ids=rel)
@@ -1821,6 +1827,105 @@ def test_no_job_of_a_plan_environment_can_name_the_deploy_identity_in_either_way
             assert "deploy_client_id" not in json.dumps(job), where
         else:
             assert "plan_client_id" not in json.dumps(job), where
+
+
+# With a managed identity the identity is bound to the runner machine. A caller can give the jobs of
+# the deploy identity their own runners (`runs-on-deploy`): then no runner of a plan job holds it.
+PLAN_RUNNER, DEPLOY_RUNNER = '{"group":"azsql-nonprod"}', '{"group":"azsql-nonprod-deploy"}'
+CALLERS = (TEMPLATE, REPO / "examples" / "demo-db")
+
+
+def workflow_inputs(name: str) -> dict[str, Any]:
+    return triggers(load(WORKFLOWS / name))["workflow_call"].get("inputs") or {}
+
+
+def runner_of(name: str, job_id: str, given: dict[str, str]) -> Any:
+    """The runner of a job of a reusable workflow for the inputs that a caller passes. An input
+    that the caller does not pass has its default. `||` gives one of its operands, as in GitHub."""
+    values = {key: spec.get("default", "") for key, spec in workflow_inputs(name).items()} | given
+    expression = jobs(WORKFLOWS / name)[job_id]["runs-on"]
+    inner = re.fullmatch(r"\$\{\{ fromJSON\((.*)\) \}\}", expression)
+    assert inner, expression
+    text = re.sub(r"inputs\.([a-z-]+)", lambda found: repr(values[found.group(1)]), inner.group(1))
+    return json.loads(eval(text.replace("||", " or "), {"__builtins__": {}}, {}))  # noqa: S307
+
+
+def identity_jobs(identity: str) -> list[tuple[str, str]]:
+    """(file, job id) of every database job that signs in with this identity."""
+    found = []
+    for where, used in SIGN_IN.items():
+        name, job_id = where.split(": ")
+        if used == identity:
+            found.append((name, job_id))
+    return found
+
+
+def test_runs_on_deploy_is_an_optional_input_of_each_workflow_that_has_a_job_of_the_deploy_identity():
+    with_deploy = {name for name, _ in identity_jobs("deploy_client_id")}
+    assert with_deploy == {"stage.yml", "onboard.yml", "resolve.yml"}
+    for name in REUSABLE:
+        inputs = workflow_inputs(name)
+        if name in with_deploy:
+            spec = inputs["runs-on-deploy"]
+            assert spec["type"] == "string" and spec["default"] == "", name
+            assert not spec.get("required", False), name
+        else:
+            # drift.yml has only the plan identity: an input that no job reads would mislead a caller
+            assert "runs-on-deploy" not in inputs, name
+
+
+def test_a_job_of_the_deploy_identity_runs_on_runs_on_deploy_when_the_caller_gives_it():
+    given = {"runs-on": PLAN_RUNNER, "runs-on-deploy": DEPLOY_RUNNER}
+    for name, job_id in identity_jobs("deploy_client_id"):
+        assert runner_of(name, job_id, given) == json.loads(DEPLOY_RUNNER), f"{name}: {job_id}"
+
+
+def test_a_job_of_the_plan_identity_never_runs_on_runs_on_deploy():
+    given = {"runs-on": PLAN_RUNNER, "runs-on-deploy": DEPLOY_RUNNER}
+    for name, job_id in identity_jobs("plan_client_id"):
+        assert "runs-on-deploy" not in json.dumps(jobs(WORKFLOWS / name)[job_id]), f"{name}: {job_id}"
+        assert runner_of(name, job_id, given) == json.loads(PLAN_RUNNER), f"{name}: {job_id}"
+
+
+@pytest.mark.parametrize("given", [{}, {"runs-on-deploy": ""}], ids=["not-passed", "empty"])
+def test_without_runs_on_deploy_every_database_job_runs_on_runs_on_as_before(given: dict[str, str]):
+    for where in SIGN_IN:
+        name, job_id = where.split(": ")
+        runner = runner_of(name, job_id, {"runs-on": '{"group":"azsql-prod"}'} | given)
+        assert runner == {"group": "azsql-prod"}, where
+
+
+@pytest.mark.parametrize("folder", CALLERS, ids=lambda folder: folder.name)
+def test_a_caller_passes_only_inputs_that_the_called_workflow_has(folder: Path):
+    # GitHub refuses the whole run when a caller passes an input that the called workflow does not have
+    for path in sorted((folder / ".github" / "workflows").glob("*.yml")):
+        for job_id, job in jobs(path).items():
+            if "uses" in job:
+                inputs = workflow_inputs(called_file(job["uses"]).name)
+                assert set(job.get("with") or {}) <= set(inputs), f"{rel(path)}: {job_id}"
+
+
+@pytest.mark.parametrize("folder", CALLERS, ids=lambda folder: folder.name)
+def test_a_caller_shows_runs_on_deploy_in_a_comment_under_each_runs_on_of_a_deploy_call(folder: Path):
+    """The comment is the change that a team makes for a managed identity. Without the `# `, it is
+    a valid input that names other runner groups than runs-on, and prod stays apart."""
+    with_deploy = {name for name, _ in identity_jobs("deploy_client_id")}
+    for path in sorted((folder / ".github" / "workflows").glob("*.yml")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        calls = [
+            job
+            for job in jobs(path).values()
+            if "uses" in job and called_file(job["uses"]).name in with_deploy
+        ]
+        shown = [at for at, line in enumerate(lines) if line.strip().startswith("# runs-on-deploy: ")]
+        assert len(shown) == len(calls), rel(path)
+        for at in shown:
+            above = yaml.safe_load(lines[at - 1].strip())
+            below = yaml.safe_load(lines[at].strip().removeprefix("# "))
+            assert set(above) == {"runs-on"} and set(below) == {"runs-on-deploy"}, rel(path)
+            plan, deploy = above["runs-on"], below["runs-on-deploy"]
+            assert "-deploy" in deploy and "-deploy" not in plan, rel(path)
+            assert deploy.replace("-deploy", "") == plan, rel(path)
 
 
 def test_the_sign_in_of_a_job_is_set_for_the_whole_job_before_any_database_command():

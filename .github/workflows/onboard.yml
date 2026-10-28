@@ -38,9 +38,17 @@ on:
         type: string
         default: ''
       runs-on:
-        description: 'JSON. Runner of the database jobs, for example {"group":"azsql-nonprod"}. Ephemeral runners only.'
+        description: >-
+          JSON. Runner of the database jobs, for example {"group":"azsql-nonprod"}. Ephemeral runners only.
+          The baseline job uses runs-on-deploy when it is set.
         type: string
         required: true
+      runs-on-deploy:
+        description: >-
+          JSON. Runner of the baseline job (deploy identity). Empty = runs-on. With a managed identity, give
+          the deploy identity runners that hold no plan identity, for example {"group":"azsql-nonprod-deploy"}.
+        type: string
+        default: ''
       runs-on-light:
         description: JSON. Runner of the job that holds no database identity. Needs bash, gh and jq.
         type: string
@@ -223,7 +231,7 @@ jobs:
   baseline:
     needs: targets
     if: ${{ inputs.action == 'baseline' }}
-    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    runs-on: ${{ fromJSON(inputs.runs-on-deploy || inputs.runs-on) }}
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
