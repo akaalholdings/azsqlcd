@@ -21,6 +21,28 @@ number and date. Version numbers follow semantic versioning.
   or a trigger file on a table, outside `[scope]`.
 - Finding `SCHEMA_UNSCOPED`: a plan note and a drift line (class `unscoped`) for a schema in
   neither list of `[scope]`. It never changes an exit code.
+- `azsqlcd align --root DIR --env E --target T [--schema S] [--out DIR]` (A38). It is read-only
+  and writes `onboarding/<env>/align.sql` and `align.md`. `align.sql` holds:
+  1. `sp_rename` of each constraint with an engine-made name that a file holds in the same shape.
+     A table that only the database has keeps the engine names of its constraints.
+  2. The table-class statements of the gen engine (`diff.diff`, in its order).
+  3. The file text of each module that differs or is missing, in deploy order.
+  4. `ALTER INDEX ... REBUILD` for disabled indexes and keys (smallest table first, the clustered
+     index first in its table), then `WITH CHECK CHECK CONSTRAINT` for CHECK and FOREIGN KEY
+     constraints that are disabled or not trusted. Each has the row count of its table in a
+     comment.
+
+  A change that gen refuses gets no statement and is listed under "Hand-write" in `align.md` with
+  its code, sorted. A file for the name of an external table or a history table goes to
+  Hand-write. When only Hand-write items differ, `align.sql` is
+  `-- no statement: see Hand-write in align.md`. An object that only the database has is never
+  dropped; `align.md` counts these objects by kind and schema. A statement that can lose data (a
+  dropped column, a narrowing type change) is written commented out after
+  `-- REVIEW: loses data: <why>`, and `ALTER COLUMN ... DROP MASKED` after
+  `-- REVIEW: unmasks column ...`. The tool never runs the script: a DBA reviews it and runs it,
+  then `azsqlcd baseline` must pass. No new reason code; a file that cannot be written is
+  `EXPORT_INCOMPLETE`. The state tables are not read or changed. Proven against the fake engine
+  only.
 
 ### Changed
 

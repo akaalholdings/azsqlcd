@@ -48,6 +48,7 @@ each build task.
 15. Schema scope (2026-10-26): what is not proven, and the limits.
 16. Drift of a constraint name (A35, 2026-10-28): upgrade note and limits.
 17. Transitive dependants (A36, A37, 2026-10-28): limits.
+18. `azsqlcd align` (A38, A39, 2026-10-28): limits, and what is not proven.
 
 Ids: L1 to L17, L5b and X1 to X10 are spike items of `scripts/live_spike.py`. "Acc" names a
 scenario of `scripts/live_acceptance.py`. G1 to G7 are the GitHub checklist. All are in
@@ -61,7 +62,7 @@ that no script and no checklist item covers the item.
 | Cut | What to do instead |
 |---|---|
 | `init` (create a full schema in an empty database) | New database: run `setup-sql`, then the first deploy applies the chain. An existing schema cannot be copied into an empty database by the tool |
-| `align` (run an alignment script through the runner) | The tool writes `rename-constraints.sql`. A DBA reads it and runs it by hand. Other differences: refresh the environment from prod, or a DBA aligns by hand |
+| `align` runs a script through the runner | The tool writes the script (`azsqlcd align`, A38: read-only, `onboarding/<env>/align.sql` and `align.md`). It never runs it. A DBA reviews and runs it by hand, with no run row; then `baseline` must pass |
 | Compensating migrations (`undoes=`) | Fix forward with a new migration, or withdraw and replace |
 | The `stub` directive for type changes | Hand-written migration with a new type name; `gen` refuses the change (`USER_TYPE_CHANGE`) |
 | Function kind change (scalar, inline, multi-statement) | New function name and a tombstone for the old one (`KND001` refuses the change of kind) |
@@ -553,7 +554,7 @@ today.
 | A row of `azsqlcd.object` that was changed by hand to invalid JSON (`STATE_INVALID`) | Every command, `resolve` included, reads the state first | A DBA restores the value from a point-in-time copy |
 | A database with a case-sensitive catalog collation (`FENCE_CASE_SENSITIVE`) | The tool compares names without case; there is no override | The tool cannot manage the database |
 | A state version that the tool does not read (`STATE_VERSION_UNSUPPORTED`) | No upgrade command | Use the tool version that wrote the state |
-| A table that differs between environments at onboarding | `baseline` refuses (`READBACK_MISMATCH`); `align` is cut | Refresh the environment from prod, or a DBA aligns it by hand |
+| A table that differs between environments at onboarding | `baseline` refuses (`READBACK_MISMATCH`); `azsqlcd align` writes the script, and a DBA runs it | Refresh the environment from prod, or review and run `align.sql` |
 | A change of the owner of a schema, or of an alias type or a table type that a module uses | No migration statement exists (`SCHEMA_OWNER_CHANGE`, `USER_TYPE_CHANGE`); `stub` is cut | A DBA changes the owner. A type: a new type name |
 | A data type change of a column that has a DEFAULT | The proof passes; the engine refuses at the first deploy (exit 21) | Withdraw and replace: drop the DEFAULT, alter, add the DEFAULT |
 | A broken lower environment while prod needs a fix | Each stage before `from_stage` must prove that it holds the release | Repair the lower environment first. There is no emergency path |
@@ -571,7 +572,7 @@ The blueprint had two adversarial reviews. Their fixes are the amendments of `do
 | 1 | Dispatch input not bound to `main` | Fixed, one part open | `release.yml` accepts only `^r[0-9]+$`, checks out `refs/tags/`, never creates on a dispatch; `build` refuses a commit off `main` (A23). Open: tag creation is not restricted; immutable releases are not used; `plan` does not repeat the first-parent check; test B1 |
 | 2 | Self-hosted runner: persistence and shared use | Partly | `runs-on` is a required input of each stage and the template uses two runner groups. Ephemeral runners, group access and the workflow limit are requirements in `docs/setup.md`; no script checks them. A read-only tool environment and azure/login pre-cleanup are not set; ephemeral runners make both unnecessary. Test B2 |
 | 3 | Ruleset and CODEOWNERS coverage | Fixed, two parts open | `setup_repo.py` sets and checks the ruleset; CODEOWNERS covers the five paths. `EXECUTE AS` in a module header is the lint warning `EXA001`, not a reviewed list. Open: environment admin bypass is a manual item; no organisation-level required workflow for `verify` |
-| 4 | `align` and onboarding scripts bypass promotion | Fixed by the cut | `align` is cut; no workflow runs a hand-written script. Open: a DBA runs `rename-constraints.sql` by hand, outside the pipeline and with no run row |
+| 4 | `align` and onboarding scripts bypass promotion | Fixed by the cut | `align` is cut; no workflow runs a hand-written script. Open: a DBA runs `rename-constraints.sql` (and `align.sql` too) by hand, outside the pipeline and with no run row |
 | 5 | Bundle extraction and mutable release assets | Tool (A21), built | Assets stay mutable (section 6). Test B4 |
 | 6 | Approver cannot see the SQL | Tool (A27), built | The approval dialog of GitHub does not show the job summary; the approver must open the run. The link shapes are not proven on GitHub Enterprise |
 | 7 | OIDC subject binds names only | Partly | `--print-azure` prints the `job_workflow_ref` subjects and no default subject for prod; `--check` reports the subject form. Open: the switch is manual and not verified (G6); the subject holds names, not `repository_id`; no scheduled check; prod-plan has no reviewers |
@@ -649,7 +650,7 @@ Built as the amendment says, with nothing open beyond the live proof of section 
 | 20 | A type that a module uses cannot change | Cut (A30) | `stub` is not built (section 4) |
 | 22 | First deploy and baseline compare at onboarding | Partly | The live text of each module that differs and the acknowledgement file are built. A write baseline reads each table back against the model, without expression text; it does not repeat the catalog-to-catalog compare. No rule that the baseline of prod must find zero differences against a fresh export |
 | 23 | `init` records migrations without their data batches | Cut (A30) | `init` is not built |
-| 25 | `align` runs unreviewed SQL | Cut (A30) | A DBA runs `rename-constraints.sql` by hand, with no run row |
+| 25 | `align` runs unreviewed SQL | Cut (A30) | A DBA runs `rename-constraints.sql` (and `align.sql` too) by hand, outside the pipeline and with no run row |
 | 27 | Driver gate G-D1 | Open | L2 has nine batch shapes, also RAISERROR after a result set. Not run |
 | 28 | Function kind change | Cut (A30) | `KND001` refuses. The plan does not list the grants that a `DROP_MODULE` removes |
 | 29 | Token expiry during a deploy | Partly | A lost session in a transaction is exit 23 with the run row `running`. The plan prints the token minutes left; it does not warn when the expected minutes exceed them. L13 not run |
@@ -1947,3 +1948,20 @@ A36 and A37; section 3, row A12). Limits:
   OBJECT_ID before the deploy.
 - Proven against fakes only. The fake gives a view the columns that it uses, not the columns of its
   select list.
+
+## 18. `azsqlcd align` (A38, A39, 2026-10-28)
+
+`azsqlcd align` writes `onboarding/<env>/align.sql` and `align.md` (`docs/design.md`, A38 and A39;
+`docs/setup.md`). It is read-only: a DBA reviews the script and runs it, then `baseline` must pass.
+
+| Limit | Detail |
+|---|---|
+| align: not proven on an engine | Proven against the fake engine only. The fake runs no `ALTER TABLE ... CHECK CONSTRAINT`, no `ALTER INDEX ... REBUILD` and no rename of a name that it does not hold; `tests/unit/test_align.py` applies the effect of these statements by hand |
+| align: a refused object | A change that diff refuses is reset to the database version of the object, and diff runs again. Other objects that need the refused change can then be refused too (`ORDER_BLOCKED`) and are listed under Hand-write |
+| align: ORD002 | A DEFAULT, CHECK or computed column that names a function: align writes the table statements before the modules, so the function must exist first. `gen` handles this with a deploy-module line; align does not |
+| align: constraint state | A NOT FOR REPLICATION constraint is listed under Hand-write and gets no statement: the engine keeps it not trusted. An object only in the database gets no constraint state statement. A table that is reset under Hand-write gets the state statements of its live constraints, also those that its file does not hold |
+| align: data loss | Only the `diff.classify` codes `DROP_COLUMN`, `ALTER_COLUMN_LOSSY` and the drops of a table, sequence or type count as data loss. ADD of a NOT NULL column with no DEFAULT to a table with rows is not marked: the engine refuses it |
+| align: `--target` | Required, as for every database command (`export` and `baseline` too). There is no default target when the environment has only one |
+| align: order of section 4 | Every rebuild comes before every check; the clustered index comes first in its table. This order follows two engine facts that are not proven on a live database: a FOREIGN KEY cannot be enabled while the unique index of the key that it references is disabled, and no nonclustered index can be rebuilt while the clustered index of its table is disabled. Only the fake proves the output order |
+| align: report size | `align.md` lists each object that only the database has, one row each, with a count per kind and schema after the list. With many thousands of such objects the list is long; it is not cut to the first rows |
+| align: workflow | No workflow runs align (`onboard.yml` has no align action). It is a workstation command only |
