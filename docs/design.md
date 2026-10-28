@@ -300,7 +300,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A35) | chain, config, diff, errors, modules, names, parse, session, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
-| `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, state, tables |
+| `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
 | `align.py` | `align`: the alignment script and its report (A38); read-only | catalog, catalog_tables, config, diff, emit, gen, model, modules, names, onboard, plan, replay, session, tables |
 | `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | align, catalog, chain, config, errors, gen, lint, onboard, plan, release, runner, session, sqlerrors, state, tables |
@@ -338,7 +338,7 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 |---|---|---|
 | `plan --out DIR` | `DIR/plan.json`. Outputs: `pending` (`true` or `false`), `plan_sha256` | 0 / 22 / 24 / 25 |
 | `deploy (--expect-plan-file FILE \| --inline-plan) --out DIR [--approved-by S] [--approved-utc TIME] [--triggering-actor S] [--ci-run-url S]` | `DIR/report.json` for every end; `DIR/plan.json` with `--inline-plan`. `--approved-utc` is an ISO time with a time zone. Output: `plan_sha256` | 0 / 21 / 22 / 23 / 24 / 25 |
-| `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. One more line, `rename <table key> <EXEC sys.sp_rename statement>`, for each recorded constraint that has a name of the engine (A35). A plan refusal for drift prints the same lines on stderr. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
+| `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. One more line, `rename <table key> <EXEC sys.sp_rename statement>`, for each recorded constraint that has a name of the engine (A35). A plan refusal for drift prints the same lines on stderr. With `park_failed = true` also one line `parked: <file> (run <id>, <reason code>)` for each park (A35), never drift. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
 | `export --root DIR --env E --target T --out DIR [--schema NAME]` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
 | `baseline [--report-only] --confirm-database NAME [--out DIR] [--schema NAME]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
 | `align --root DIR [--schema NAME] [--out DIR]` | `onboarding/<env>/align.sql` and `align.md` under `--out` (default `--root`); read-only (A38). Takes `--root` in place of `--bundle` and `--digest` | 0 / 22 / 24 |
@@ -898,8 +898,26 @@ fails", is the procedure.
   (`modules.named_objects`), names written with their schema only.
 - New reason code `SET_ASIDE_DEPENDENCY` (22). New plan finding `parked`. `resolve --unpark`
   answers `RESOLVE_NOT_APPLICABLE` for a migration that is not parked.
-- Not done: `drift` lists no pending migrations, so it shows no parked one. Proven against fakes
-  only.
+- Where a set-aside migration is shown: the plan output (`note: parked: <file> (run <id>, <reason
+  code>)`), `plan.json` (`notes`), `report.json` (`warnings`), the job summary of `plan` and
+  `deploy`, and `drift`. `drift` prints one line `parked: <file> (run <id>, <reason code>)` for
+  each park that still holds (`set_aside.in_force`: not applied here, not withdrawn in the chain of
+  the release) and one line of its job summary. A park is reported, never drift: the exit code
+  does not change. LOOK shows the run row of the park (`failed_step`, `note`).
+- Plug-in points for a later reason, with the signatures of this build: `REASONS`, `WAY_OUT`,
+  `read(session, config, recorded) -> Aside`, `SetAside(file, reason, why)`,
+  `Aside(active, released)`, `check(pending, aside, sent_modules) -> notes`,
+  `in_force(aside, steps, files) -> tuple[SetAside, ...]`, `plan.pending_work(bundle, recorded,
+  module_chunk, aside)`. `read` is the one place that switches a reason on; `check`, `in_force`
+  and the planner take every reason as it is.
+- Strict default: with no reason switched on, `read` sends no batch and returns `NOTHING`. The
+  test `test_with_park_failed_off_the_plan_and_the_state_writes_are_those_of_the_code_without_parking`
+  runs one story (a failure, a failed rerun, a later release refused with `CATCHUP_REQUIRED`,
+  `drift`, a refused `--unpark`) with and without the set-aside code paths, for a project without
+  the key and with `park_failed = false`: the batches, outputs, `plan.json` files, job summaries,
+  reports and state rows are equal.
+- Not done: a name that a raw or data batch writes without its schema is not compared. Proven
+  against fakes only.
 
 ---
 

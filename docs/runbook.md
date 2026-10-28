@@ -89,6 +89,10 @@ Replace `<...>`. All commands run in the database repository.
   `SELECT step_id, run_id, kind, migration_id, status, applied_utc, note FROM azsqlcd.step WHERE run_id = <run_id>;`
   `azsqlcd.run.note` of a run that did not end `ok` holds its reason code, or `reconciled` for a
   dead run that a later deploy closed.
+  With `[project] park_failed = true`, a deploy run with the status `failed` or `unknown`, a
+  `failed_step` `<file>#<n>` and the note `BATCH_FAILED`, `GOVERNANCE_LIMIT` or `NONTX_FAILED`
+  parked that migration. A later `resolve` step with the note `unpark <file>` ended the park.
+  `azsqlcd drift` lists each park that still holds: `parked: <file> (run <id>, <reason code>)`.
 
 `resolve` actions (A16). Each one takes the lock and writes a run row and a `resolve` step. The run
 row copies the recorded release; a `resolve` never moves it.
@@ -352,8 +356,7 @@ Reported, never a failure: the exit code of `plan`, `deploy` and `drift` does no
 |---|---|---|---|
 | `SCHEMA_UNSCOPED` | `plan`: a note in the output (`note: SCHEMA_UNSCOPED [<schema>]: ...`), in `plan.json` and in the job summary. `drift`: the line `unscoped SCHEMA:[<schema>] SCHEMA_UNSCOPED - -` | `azsqlcd.toml` has `[scope]`, `schemas` is not `["*"]`, and the database has a schema that is in neither `schemas` nor `exclude`. The tool does not read, list or compare its objects | Review the schema. Onboard it (`docs/setup.md`, section 7, "One schema at a time"), or add it to `[scope] exclude` by pull request |
 | `TOMBSTONE_UNMANAGED` | `plan`: a note in the output (`note: TOMBSTONE_UNMANAGED <object key>: ...`), in `plan.json` and in the job summary. Only with `[scope]` | The release has a `[[drop]]` for a module of `[scope]` that the database has and that has no managed row. Usually the object left `[scope]` (its row was marked `dropped`) and came back. The tool never drops an object that it does not manage, so the deploy keeps it | Drop the object by hand. Or let the tool manage it first: its file without the `[[drop]]`, then `azsqlcd baseline --schema <schema>`; drop it with the tombstone in a later release |
-
-| `parked` | `plan` and `deploy`: a note in the output (`note: parked: <file> (run <id>, <reason code>)`), in `plan.json`, in `report.json` (`warnings`) and in the job summary | `[project] park_failed = true`, and the batch of the migration failed in this database (21 `BATCH_FAILED`, 21 `GOVERNANCE_LIMIT`, or 23 `NONTX_FAILED`). The migration does not run here, and the releases after it deploy past it. The note `catch-up past set-aside: ...` lists the migrations of earlier releases that run with this release. The note `independence not proven for a raw batch: <file>` says that a raw or data batch was compared by its names only | Fix the cause, then `azsqlcd resolve --unpark <file>`, or withdraw and replace the migration. `docs/setup.md`, section 7, "Park a migration that fails" |
+| `parked` | `plan` and `deploy`: a note in the output (`note: parked: <file> (run <id>, <reason code>)`), in `plan.json`, in `report.json` (`warnings`) and in the job summary. `drift`: the line `parked: <file> (run <id>, <reason code>)` and a line of the job summary; the exit code does not change | `[project] park_failed = true`, and the batch of the migration failed in this database (21 `BATCH_FAILED`, 21 `GOVERNANCE_LIMIT`, or 23 `NONTX_FAILED`). The migration does not run here, and the releases after it deploy past it. The note `catch-up past set-aside: ...` lists the migrations of earlier releases that run with this release. The note `independence not proven for a raw batch: <file>` says that a raw or data batch was compared by its names only | Fix the cause, then `azsqlcd resolve --unpark <file>`, or withdraw and replace the migration. `docs/setup.md`, section 7, "Park a migration that fails" |
 
 External tables under `[scope]` are skipped by their type: `plan` gives one note with their number,
 `export` one line in `export.md`; no external table is listed one by one.

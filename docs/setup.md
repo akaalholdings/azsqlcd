@@ -730,7 +730,8 @@ What the tool does:
 3. The next deploy, of the same release or of a later one, runs everything but M. The plan has
    the note `parked: <file> (run <id>, <reason code>)`. The pending migrations of earlier
    releases run with the release, in chain order (note `catch-up past set-aside: ...`), in place
-   of `CATCHUP_REQUIRED`.
+   of `CATCHUP_REQUIRED`. `azsqlcd drift` lists the park too (`parked: <file> (run <id>, <reason
+   code>)`); a park is no drift.
 4. What runs must be independent of M. A pending migration may not touch an object that M
    touches or names, and may not name an object that M touches. A module of the release may not
    name an object that M touches. Else the plan stops with 22 `SET_ASIDE_DEPENDENCY`. A raw or
