@@ -1176,11 +1176,14 @@ fixture pairs for its state.
 | N3-F8 (rest) | minor | `lint` and `verify` run below the repository root say only that `azsqlcd.toml` does not exist (the finding `CONFIG_INVALID` of `lint.py`). `gen`, `setup-sql` and `export` name the directory and `--root` since wave 3 | Run in the root, or give `--root` |
 | N5-01 | major | `verify` after a one-table change takes about 100 s on 2,000 tables (limit about 60 s): `validate_model` builds the whole model again for each replayed statement | None. Numbers below |
 | N5-05, N5-08, N5-09 | minor | A plan reads all module files in full to compare checksums; `lex.split_batches` is quadratic in the batches of one file; `release.build` reads every revision of `migrations.sum` | Cost only |
-| N6-F1 | major | A change of `DATA_COMPRESSION` of a heap or of a clustered index passes `gen` and `verify` and cannot deploy. In progress at the time of writing (a `rebuild table` statement and the refusal `COMPRESSION_INHERITED` are in `diff.py`; their tests did not pass yet) | Do not change the compression of a heap or of a clustered index through the table model until the fixture pair `heap_compression_change` passes |
 | N6-F2 | minor | A table file with two clustered indexes passes the parser, the model, `NF000`, diff and replay | The engine refuses it at the first deploy (rollback) |
 | N6-F3 | minor | Lint reads `ALTER COLUMN ... ADD` or `DROP <property>` as a lossy type change. Masking (`ADD MASKED`, `DROP MASKED`) has its own rule since then; `ROWGUIDCOL`, `SPARSE`, `NOT FOR REPLICATION`, `PERSISTED` do not | Allow line `ALTER_COLUMN_LOSSY` |
 
-Fixed in these waves, and so not in the table: N1-F1 (a tombstoned module that was dropped
+Fixed in these waves, and so not in the table: N6-F1 (a change of `DATA_COMPRESSION` of a heap
+is one `ALTER TABLE ... REBUILD WITH (DATA_COMPRESSION = ...)` since 0.1.0, fixture pair
+`heap_compression_change`; a change of only the compression of a clustered key or index is one
+rebuild of the table, section 14, "Limits"; a new clustered key or index on a compressed heap
+that states no `DATA_COMPRESSION` is refused with `COMPRESSION_INHERITED`), N1-F1 (a tombstoned module that was dropped
 behind the tool is no drift: the plan notes it and the deploy marks it dropped), N1-F2 (the
 `DRIFT_TOUCHED` message names `resolve --mark-applied <migration>` when the catalog equals the
 model after the next pending migration), N1-F3 (a refresh that the engine refuses is 21
