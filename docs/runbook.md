@@ -105,6 +105,7 @@ row copies the recorded release; a `resolve` never moves it.
 | `adopt-module` | object key | Make an unmanaged module managed. The key must spell kind, schema and name exactly as the catalog does. Use it only for a module that has a file in the release; else the next plan stops with `MODULE_ORPHAN` |
 | `clear-run` | run id | A run with the status `unknown`, after inspection. The run row keeps the status `unknown`; plans run again |
 | `rebind-environment` | environment name | After a refresh of the database from another environment. The subject must equal the `environment` input |
+| `unpark` | migration file | End the park of a migration in this database (`[project] park_failed = true`). The next deploy runs it at its place among the pending migrations. A migration that was applied by hand: `unpark`, then `mark-applied`. `resolve.yml` of a tag after 0.2.0 only |
 
 After a failed non-transactional step two actions are needed: first `mark-applied` or
 `mark-not-applied` for the step, then `clear-run` for the run. See "Unknown run".

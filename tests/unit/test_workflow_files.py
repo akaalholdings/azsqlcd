@@ -1529,6 +1529,16 @@ def test_runbook_has_a_row_for_every_reason_code_under_the_exit_code_that_the_to
     assert not missing, f"docs/runbook.md has no row for (exit, reason code): {missing}"
 
 
+def test_runbook_has_a_row_for_every_resolve_action_of_the_command_line():
+    # the operator looks up the action of a reason code in the table of resolve actions (A16)
+    from azsqlcd import cli
+
+    runbook = (REPO / "docs" / "runbook.md").read_text(encoding="utf-8")
+    table = runbook[runbook.index("`resolve` actions (A16)") : runbook.index("After a failed")]
+    rows = set(re.findall(r"^\| `([a-z-]+)` \|", table, flags=re.MULTILINE))
+    assert rows == {action.replace("_", "-") for action in cli._RESOLVE_ACTIONS}, rows
+
+
 def test_runbook_gen_refused_row_names_every_refusal_of_gen():
     # The operator reads the code of a gen refusal and looks it up in the GEN_REFUSED row.
     # RENAME_INVALID is a reason code of its own, with its own row.
