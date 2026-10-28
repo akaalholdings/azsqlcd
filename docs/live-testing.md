@@ -725,7 +725,7 @@ Engine facts:
 - The driver ends a connect attempt after 15 seconds. A paused database needs about 35 to 50
   seconds before a connect passes.
 
-Columnstore alignment, measured 2026-10-28 (one Azure SQL Database; statements by hand, no script):
+Columnstore alignment, measured 2026-10-28 (Azure SQL Database):
 
 1. A nonclustered columnstore index `ON [PRIMARY]` on a table on a partition scheme: refused. The
    text is "The statement failed because a columnstore index must be partition-aligned with the
