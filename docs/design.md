@@ -299,7 +299,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, not_managed, products, release, session, set_aside, sqlerrors, state |
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
 | `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines, the pull-request rules of holds (A42, A43) | chain, config, errors, modules, names, set_aside, state |
-| `not_managed.py` | `[env.<name>] not_managed`: which pending migrations an environment skips, `MIXED_NOT_MANAGED` (A39, A40) | chain, config, errors, model, modules, names, set_aside |
+| `not_managed.py` | `[env.<name>] not_managed`: which pending migrations an environment skips, `MIXED_NOT_MANAGED` (A44, A45) | chain, config, errors, model, modules, names, set_aside |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, not_managed, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -993,7 +993,7 @@ Owner problem: the databases of some environments are not at the level of the fi
 objects, so those objects cannot be managed there yet. `docs/setup.md`, section 7, "Objects that
 one environment does not manage", is the procedure.
 
-- A39. `[env.<name>] not_managed`: patterns `schema.name` with the syntax and checks of `[scope]
+- A44. `[env.<name>] not_managed`: patterns `schema.name` with the syntax and checks of `[scope]
   exclude_objects` (`config._check_patterns`). `config.for_env(config, env)` (applied by
   `cli._release` for plan, deploy, drift, baseline and resolve) joins them to the scope as
   `Scope.not_managed`; without [scope] the scope is every schema. In that environment the objects
@@ -1015,7 +1015,7 @@ one environment does not manage", is the procedure.
   plan, the batches and the state writes are those of before.
 - New reason code `MIXED_NOT_MANAGED` (22). New plan finding `not_managed`. Proven against fakes
   only.
-- A40. Review of A39. (a) A DML trigger follows its table: `plan._managed_files` takes out a
+- A45. Review of A44. (a) A DML trigger follows its table: `plan._managed_files` takes out a
   trigger file whose table (the name after `ON`, `modules.trigger_table`) a pattern matches, and
   `plan.scoped_state` and `plan.left_scope` take a trigger row out by its recorded `parent`
   (`catalog.capture_in_scope`), only when the environment has `not_managed`. (b) A skip does not
@@ -1033,7 +1033,7 @@ one environment does not manage", is the procedure.
 
 ### Parking, holds and not_managed together (2026-10-28)
 
-- A41. The three reasons of A35, A37 and A39 in one environment. Each set-aside migration keeps
+- A46. The three reasons of A40, A42 and A44 in one environment. Each set-aside migration keeps
   one reason: `compute_plan` adds the skips of `not_managed` to the `Aside` first, and
   `Hold.merge` keeps an entry that is there (`setdefault`), so a park or a skip wins over a hold.
   A product migration that an environment does not manage is skipped there for good, also after
@@ -1044,7 +1044,7 @@ one environment does not manage", is the procedure.
   not a parked or skipped migration of a product. No state-table change. Scenario tests:
   `test_a_held_a_skipped_and_a_parked_migration_in_one_environment`,
   `test_a_product_migration_that_test_does_not_manage_is_skipped_there_not_held`.
-- A42. Review of A41 (2026-10-28). (a) `compute_plan` computes the hold before the skips of
+- A47. Review of A46 (2026-10-28). (a) `compute_plan` computes the hold before the skips of
   `not_managed`; `not_managed.skips` takes the held migrations and does not refuse one that mixes
   the two sides (`MIXED_NOT_MANAGED`): it does not run here. The refusal comes when the hold ends.
   A held migration of matching objects only is still skipped for good. (b) `pending_work` takes

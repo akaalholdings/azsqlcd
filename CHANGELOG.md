@@ -70,7 +70,7 @@ number and date. Version numbers follow semantic versioning.
   migration never runs, and its replacement (`replaces=`) runs as before.
 - Without the key, or with `park_failed = false`, every batch, output, plan, report and state write
   is the same as in 0.2.0.
-- Set-aside migrations (review fixes, A36): a parked migration that creates a table, schema, type,
+- Set-aside migrations (review fixes, A41): a parked migration that creates a table, schema, type,
   sequence or synonym, or renames a table, no longer makes later deploys stop with
   `BASELINE_REQUIRED`. The independence check follows a rename: with `table_model = true` it uses
   the head model (also the tables with a key to the renamed table); without it, it uses the names of

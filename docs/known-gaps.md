@@ -49,6 +49,8 @@ each build task.
 16. Drift of a constraint name (A35, 2026-10-28): upgrade note and limits.
 17. Transitive dependants (A36, A37, 2026-10-28): limits.
 18. `azsqlcd align` (A38, A39, 2026-10-28): limits, and what is not proven.
+19. Set-aside migrations: parking, product holds and per-environment not_managed (A40 to A47,
+    2026-10-28): limits, and what is not proven.
 
 Ids: L1 to L17, L5b and X1 to X10 are spike items of `scripts/live_spike.py`. "Acc" names a
 scenario of `scripts/live_acceptance.py`. G1 to G7 are the GitHub checklist. All are in
@@ -1975,9 +1977,9 @@ A36 and A37; section 3, row A12). Limits:
 ## 19. Set-aside migrations: parking, product holds and per-environment not_managed (2026-10-28)
 
 Three opt-in features set a pending migration aside in one environment: a park after a failure
-(`[project] park_failed`, A35 and A36), a hold of a product (`[products.<name>] promote_to`, A37 and
-A38), and a skip of objects that the environment does not manage (`[env.<name>] not_managed`, A39
-and A40). A41 is their combination.
+(`[project] park_failed`, A40 and A41), a hold of a product (`[products.<name>] promote_to`, A42 and
+A43), and a skip of objects that the environment does not manage (`[env.<name>] not_managed`, A44
+and A45). A46 is their combination.
 
 ### Parking
 
@@ -1992,7 +1994,7 @@ and A40). A41 is their combination.
 - A failed non-transactional migration is parked only after the two resolve steps of "Unknown run"
   (`--mark-not-applied`, then `--clear-run`). Until then the plan stops with the existing codes, as
   before.
-- Three reasons are built: `parked`, `held` (products, A37) and `not_managed` (A39). `held` is
+- Three reasons are built: `parked`, `held` (products, A42) and `not_managed` (A44). `held` is
   merged in `plan.pending_work` (`products.Hold.merge`), not in `set_aside.read`, because a hold
   needs the environment and the files of the release.
 - LOOK has no SQL query that lists only the parks. The operator reads the run rows (`failed_step`
@@ -2060,7 +2062,7 @@ and A40). A41 is their combination.
 
 ### The three together
 
-- Proven against fakes only, by two scenario tests (design A41).
+- Proven against fakes only, by two scenario tests (design A46).
 - Each set-aside migration has one reason. A park or a skip as not managed wins over a hold. A
   product migration that an environment does not manage is skipped there for good: it does not run
   there after `promote_to` is raised. To run it there, take the pattern away before the first
