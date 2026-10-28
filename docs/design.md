@@ -729,7 +729,8 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
 
 - `azsqlcd.toml` takes the optional table `[scope]`: `schemas` (required in the table; `["*"]` is
   every schema that is not excluded), `exclude`, `exclude_objects` (patterns `schema.name`, `*` and
-  `?`). `config.Scope`, `config.out_of_scope(scope, key)`. Names are compared with `model.fold`.
+  `?`; split at the first dot, each part matches its own name). `config.Scope`,
+  `config.out_of_scope(scope, key)`. Names are compared with `model.fold`.
   Without the table, `Config.scope` is None and every function behaves as before: no batch
   changes, no output changes.
 - Reads. `catalog.schema_condition` limits a read of every object to the schemas of the scope in
@@ -742,26 +743,40 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   for `SCHEMA_UNSCOPED`; it is sent only with a scope whose `schemas` is not `["*"]`.
 - Plan, drift, runner: `plan.scoped_state` leaves out the rows of objects outside the scope, so a
   schema that leaves the scope is not planned, compared, orphaned or dropped. The unmanaged list
-  holds objects of the scope only. A plan note for each `SCHEMA_UNSCOPED` schema and one for the
-  number of external tables; notes are outside `plan_sha256`. `drift` gives the class `unscoped`,
-  which is not drift (exit 0). Under a scope, `NAME_COLLISION` of modules whose schemas record no
-  managed object, and the table `BASELINE_REQUIRED` of such schemas, name
-  `azsqlcd baseline --schema`.
+  holds objects of the scope only; a DML trigger follows its table (`catalog.capture_in_scope`). A
+  plan note for each `SCHEMA_UNSCOPED` schema and one for the number of external tables; notes are
+  outside `plan_sha256`. `drift` gives the class `unscoped`, which is not drift (exit 0). The table
+  hooks take a module outside the scope as unmanaged (blockers, `[ack]`, no refresh, no unbind).
+- Rows of objects that leave the scope (review M2): `plan.left_scope` lists the managed rows that
+  the scope of the release does not manage. The plan adds a tx unit of `unscope:<key>` steps (in
+  `plan_sha256`, so the approved plan holds it); the runner sends no statement for such a step and
+  writes `state.mark_dropped` for the key in the transaction of the unit. No new column and no new
+  status: `dropped` already means "no longer managed". An object that comes back has no managed
+  row: `BASELINE_REQUIRED` names `baseline --schema`, which reads it back and records it again.
+- Under a scope, `NAME_COLLISION` of modules that the database has with the kind of their file,
+  and the table `BASELINE_REQUIRED`, are `BASELINE_REQUIRED` that names `azsqlcd baseline --schema`.
 - Export and baseline of one schema: `onboard.export(..., schema)` and `onboard.baseline(...,
   schema)`, `--schema` on the command line. The export reads that schema with the patterns of the
   config; a need of a file in another schema that the scope manages counts as managed. The command
   line merges the captures into `onboarding/<env>/snapshot.json` of `--root`
   (`tables.merge_snapshot`) and prints what to add to `[scope] schemas`; it does not edit
-  `azsqlcd.toml`. The baseline of a schema compares and records that schema only, with a baseline
-  step of its own, and is refused when the state holds a managed object of the schema.
+  `azsqlcd.toml`. `export --schema` of a schema that the database does not have is
+  `SCHEMA_NOT_FOUND`. The baseline of a schema compares and records the objects of that schema that
+  have no managed row (review M1: also an object that enters the scope in a recorded schema), with
+  a baseline step of its own, and is refused (`ALREADY_BASELINED`) when nothing is left to record.
+  `resolve --adopt-module` of a module outside the scope is `OUT_OF_SCOPE`.
 - Lint and proof: `OUT_OF_SCOPE` (error) for an object file outside the scope; `TMB001` is not
   given for a module that leaves the scope; `RAW001` is not given for a raw batch for an object
-  outside it. `gen` and the proof start from the base model as the head scope sees it: objects
-  that leave the scope are left out, objects that enter it are taken as their files say (`PRF000`
-  names `baseline --schema`).
-- New reason code `OUT_OF_SCOPE` (22). New finding codes `OUT_OF_SCOPE` (lint) and
-  `SCHEMA_UNSCOPED` (plan note, drift class `unscoped`).
-- Not done: `onboard.yml` passes no `--schema`. Proven against fakes only.
+  outside it; a trigger file on a table outside the scope is `OUT_OF_SCOPE`. `gen` and the proof
+  start from a model that the head scope filters, the base model and the model from the history
+  of a withdrawal alike (review C1): objects outside it are left out, objects that enter it are
+  taken as their files say (`PRF000` names `baseline --schema`). `gen` refuses (`GEN_INVALID`) a
+  statement on an object outside the head scope, and unbinds no module outside it.
+- `onboard.yml` (reusable, template, example) takes the input `schema` and passes `--schema` to
+  `export` and to both baselines; an empty input passes nothing.
+- New reason codes `OUT_OF_SCOPE` and `SCHEMA_NOT_FOUND` (22). New finding codes `OUT_OF_SCOPE`
+  (lint) and `SCHEMA_UNSCOPED` (plan note, drift class `unscoped`). New plan step kind `unscope`.
+- Proven against fakes only. `docs/known-gaps.md`, section 15, has the limits.
 
 ---
 

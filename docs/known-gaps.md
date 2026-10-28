@@ -1798,3 +1798,69 @@ uv run --extra db python scripts/live_tables.py --server S --database D --confir
   the migration is right (reproduced in memory). The proof refuses too much; it does not pass a
   wrong migration. The fix is in `replay.py`, `_set_system_versioning`: give `compression` to
   both tables that it builds, with one test.
+
+## 15. Schema scope (2026-10-26)
+
+`[scope]` of `azsqlcd.toml` and the onboarding of one schema at a time (`docs/setup.md`, section 7,
+"One schema at a time"; `docs/design.md`, "Schema scope"). An independent review on the fakes
+found one critical, two major and nine minor defects; all are fixed (C1: a withdrawal after a
+schema left the scope made `gen` drop an excluded table; M1: an object that entered the scope in a
+recorded schema could never be recorded; M2: a schema that came back was never compared with its
+files). Each has a test in `tests/unit/` that failed before its fix. Minor 5 (an empty baseline
+step for each run of `baseline --schema` with nothing to record) was closed by the fix of M1; its
+test came after, and fails when the refusal `ALREADY_BASELINED` is taken out. Minor 8: a pattern
+`a.b.*` matched `[a.b].[c]` too; a pattern is now split at its first dot. Minor 9 is the wanted
+behaviour, now documented (`docs/setup.md`, section 7) and kept by a test: `verify` refuses to take
+a table out of the scope while a managed table has a foreign key to it (`MDL001`).
+
+### Not proven on a database
+
+Nothing of this section ran against a database. Not measured: the condition
+`[schema_id] IN | NOT IN (SELECT sx.[schema_id] FROM sys.schemas AS sx WHERE sx.[name] IN (...))`
+in the reads of every object; `t.[is_external] = 0` in the reads of the columns, constraints and
+indexes; the type `ET` of an external table in `sys.objects`; which schemas `sys.schemas` shows to
+the plan identity (a schema that it cannot see is never `SCHEMA_UNSCOPED`, and `export --schema`
+of it is `SCHEMA_NOT_FOUND`); the read of the captures of unmanaged triggers that finds their
+tables.
+
+### Limits
+
+- External tables are skipped by their type only under `[scope]`. Without it they stay
+  `UNSUPPORTED` in the export, as before.
+- A pattern of `exclude_objects` is applied in Python: in a managed schema the columns,
+  constraints and indexes of an excluded table are still read. Only the schemas outside the scope
+  are kept from the read by the engine.
+- A pattern is split at its first dot, so it cannot name a schema that holds a dot: `a.b.x` is
+  the schema `a` and the name `b.x`, and does not match `[a.b].[x]`. List such an object in
+  `[unmanaged] objects`.
+- Names are compared with `model.fold` (Python casefold). For ASCII letters that is the rule of a
+  case-insensitive collation; for some other letters (for example `ß` and `ss`) the engine can
+  compare otherwise.
+- A schema with no object, `dbo` among them, is `SCHEMA_UNSCOPED` when no list names it.
+- `resolve --accept-drift` and `drift --export` do not check the scope (`--adopt-module` does).
+- A table that leaves `[unmanaged] objects` has no path, with or without `[scope]` (noted by the
+  review, older than `[scope]`). Exact case (reproduced on the fakes): `table_model = true`, a
+  baseline with `TABLE:[dbo].[temp_Load]` in `[unmanaged] objects`; a pull request removes the
+  entry and adds the file of the table as the database has it. `verify` fails with `PRF002` and
+  asks for a migration that creates the table, which exists. A table that a pattern of
+  `[scope] exclude_objects` leaves out has the path (review M1): remove the pattern, then
+  `baseline --schema <schema>`.
+- The rows of objects that leave the scope are marked `dropped` by the deploy of a release whose
+  scope leaves them out. A target that never deploys such a release keeps them managed. Exact case
+  (reproduced on the fakes): r3 takes `dbo` out of the scope and holds no migration; promotion skips
+  r3 on a target, which goes from r2 to r5, and r5 takes `dbo` back with a table file that changed.
+  On that target the old rows of `dbo` count as managed, so r5 is planned with no
+  `BASELINE_REQUIRED` and the changed file is not compared until a release changes the table
+  (`READBACK_MISMATCH`). `baseline` and `resolve` runs do not mark rows either.
+- The model of a withdrawal comes from the history (`gen._model_without`). It is filtered by the
+  scope of the head revision, but it does not know that an object left the scope and came back
+  between the withdrawn migration and the base: such an object is replayed from the history, not
+  taken from its file. Exact case (not reproduced): `dbo.Rates` is created by `0001`, `dbo` leaves
+  the scope in r3 and comes back in r5 with a file that differs from what the chain made; a later
+  pull request withdraws `0002` alone. `verify` can then give `WDR004` for `dbo.Rates` although
+  the file is right.
+- The templates call the reusable workflows of the tag in `pyproject.toml` (v0.2.0), whose
+  `onboard.yml` has no input `schema`. The template `onboard.yml` of this branch passes `schema`:
+  until a release tag holds this change, a repository that copies the template from `main` gets a
+  workflow error ("schema is not defined") at the dispatch. The version bump of the next release
+  closes it.

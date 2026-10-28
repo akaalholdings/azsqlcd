@@ -6,6 +6,34 @@ number and date. Version numbers follow semantic versioning.
 
 ## Unreleased
 
+### Added
+
+- Optional table `[scope]` in `azsqlcd.toml` (`schemas`, `exclude`, `exclude_objects`): the tool
+  manages only the schemas that it lists, so a database is onboarded one schema at a time. Without
+  the table nothing changes. How to use it: `docs/setup.md`, section 7, "One schema at a time".
+- `export --schema NAME` exports one schema, adds its captures to `onboarding/<env>/snapshot.json`
+  of the repository, and prints what to add to `[scope] schemas`. `baseline --schema NAME` compares
+  and records the objects of one schema that have no managed row; the other rows stay as they are.
+  The workflow `onboard.yml` takes the input `schema` for both.
+- Reason codes 22 `OUT_OF_SCOPE` (`export --schema`, `baseline --schema` and
+  `resolve --adopt-module` outside the scope) and 22 `SCHEMA_NOT_FOUND` (`export --schema` of a
+  schema that the database does not have). Lint and verify finding `OUT_OF_SCOPE`: an object file,
+  or a trigger file on a table, outside `[scope]`.
+- Finding `SCHEMA_UNSCOPED`: a plan note and a drift line (class `unscoped`) for a schema in
+  neither list of `[scope]`. It never changes an exit code.
+
+### Changed
+
+- With `[scope]`, `export`, `plan` and `drift` do not read the schemas outside it and list nothing
+  of them as unmanaged; a trigger follows its table. External tables are skipped by their type and
+  counted. A module outside the scope is a dependant as an unmanaged module is (`[ack]`, no
+  refresh, no unbind). `verify` and `gen` take the files of objects that enter the scope as they are
+  (`PRF000`), and start from a model without the objects that left it, also for a withdrawal;
+  `gen` writes no statement on an object outside the scope. A schema that leaves needs no
+  migration and no tombstone: the deploy marks the rows of its objects `dropped` (plan steps
+  `unscope:<key>`, no statement on the objects), and when the schema comes back,
+  `baseline --schema` compares the objects with their files again.
+
 ## 0.2.0 - 2026-10-26
 
 ### Added

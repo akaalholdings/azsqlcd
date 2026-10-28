@@ -533,24 +533,34 @@ Without `[scope]` every schema is managed, as before. With it:
 
 - The tool manages every object of a schema in `schemas`, except an object whose `schema.name`
   matches a pattern of `exclude_objects` (`*` is any text, `?` one character, every other
-  character is itself: `_` and `[` are no wildcards), an object of `[unmanaged] objects`, a history
-  table of a temporal table (as before) and an external table. External tables are skipped by
-  their type everywhere; a report gives their number, never one line for each.
+  character is itself: `_` is no wildcard), an object of `[unmanaged] objects`, a history table of
+  a temporal table (as before) and an external table. External tables are skipped by their type
+  everywhere; a report gives their number, never one line for each. A DML trigger follows its
+  table: the trigger of a table outside the scope is outside too.
+- A pattern is read as `schema.name` split at the first dot, and each part matches its own name:
+  `a.b.c*` is the schema `a` and the name `b.c*`. It matches `[a].[b.c1]`, never `[a.b].[c1]`. A
+  pattern cannot name a schema that holds a dot: list such objects in `[unmanaged] objects`.
 - What the scope does not manage is invisible: `export`, `plan` and `drift` do not read the
-  schemas outside it, list no object of them as unmanaged and compare nothing there. A row of the
-  state for an object that left the scope is left as it is and is not compared.
+  schemas outside it, list no object of them as unmanaged and compare nothing there.
 - A schema of the database in neither `schemas` nor `exclude` (`schemas` is not `["*"]`) is the
   finding `SCHEMA_UNSCOPED`: a note of the plan (output, `plan.json`, job summary) and a line of
   `drift` with the class `unscoped`. It never fails a command and does not change an exit code.
 - A file of the repository for an object outside the scope is `OUT_OF_SCOPE` in `lint`, `build`
-  and `verify`: the config and the files contradict each other.
+  and `verify`: the config and the files contradict each other. A trigger file on a table outside
+  the scope too.
 - A managed table with a foreign key to a table outside the scope stays unmanaged at export
   (`DEPENDS_ON_UNMANAGED`), as with a key to an unmanaged table. A managed module may reference an
   object outside the scope, as it may reference an unmanaged one.
+- A module outside the scope is, for a release that changes a table, what an unmanaged module is:
+  a dependant that blocks the release (`TABLE_BLOCKER`) unless `[ack] unmanaged_dependants` lists
+  it, never unbound and never refreshed. A schema-bound one blocks the change of its column until
+  a DBA changes it. `resolve --adopt-module` refuses it (`OUT_OF_SCOPE`).
 - Rules of the table (`CONFIG_INVALID`, the message names the key path): `schemas` is required and
   not empty; `"*"` stands alone in `schemas`; no schema is in both lists; no entry is listed twice;
-  a pattern holds a dot; no list names `azsqlcd`, the schema of the tool. Names are compared without
-  letter case, as the catalog compares them.
+  a pattern is `schema.name` with both parts written, and its schema part (when it has no
+  wildcard) is a managed schema, else it could never match; no list names `azsqlcd`, the schema of
+  the tool. A name is written as the catalog holds it: no brackets, no space at either end, no
+  control character. Names are compared without letter case, as the catalog compares them.
 
 Onboarding, first schema: list it in `[scope] schemas` (and `exclude` what was reviewed), then
 follow "Existing database" above. The export writes files for the managed objects only, and
@@ -559,35 +569,56 @@ follow "Existing database" above. The export writes files for the managed object
 Each further schema, here `billing` (the order dev, sandbox, test, preprod, prod holds as above):
 
 1. Export the schema alone from the reference environment:
-   `azsqlcd export --root . --env prod --target <target> --out ../export --schema billing`.
+   `gh workflow run onboard.yml --ref main -f environment=prod -f target=<target> -f action=export -f release=r<n> -f schema=billing`
+   (on a workstation: `azsqlcd export --root . --env prod --target <target> --out ../export --schema billing`).
    It writes the files of `billing` only. `onboarding/prod/snapshot.json` is the snapshot of the
    repository with the captures of `billing` added; the captures of the other schemas stay as they
    are. A key of `billing` to a table of a schema that the scope manages already is kept. The
    command prints what to add: `Add "billing" to [scope] schemas of azsqlcd.toml`. The tool never
-   edits `azsqlcd.toml`. A schema in `exclude` or the schema `azsqlcd` is refused (`OUT_OF_SCOPE`).
+   edits `azsqlcd.toml`. A schema in `exclude` or the schema `azsqlcd` is refused (`OUT_OF_SCOPE`),
+   a schema that the database does not have too (`SCHEMA_NOT_FOUND`).
 2. One pull request: `schema/**` of `billing` and `onboarding/prod/` of the export, the
    `[unmanaged] objects` list of `export.md`, and `"billing"` in `[scope] schemas`. No change to
    the files of the other schemas. `verify` gives the warning `PRF000`: the objects that enter the
    scope are taken as their files say, and the message names `azsqlcd baseline --schema billing`.
    `gen` writes no `CREATE` for them. Merge; the merge creates release r<b>.
-3. For each environment: `azsqlcd baseline --report-only --schema billing ...`, then
-   `azsqlcd baseline --schema billing --bundle <dir> --digest <digest> --env <env> --target <target> --confirm-database <database>`.
-   It compares and records the modules and the table-class objects of `billing` only, with a
-   baseline step whose note starts with `schema [billing]:`. No row of another schema is read or
-   written. Until it ran, the plan of r<b> stops with `BASELINE_REQUIRED` and names the command. A
-   second run is `ALREADY_BASELINED`; a schema that `[scope]` of the release does not manage is
-   `OUT_OF_SCOPE`.
+3. For each environment, the report, then the record (behind the approval of the environment):
+   `gh workflow run onboard.yml --ref main -f environment=<env> -f target=<target> -f action=baseline-report -f release=r<b> -f confirm_database=<database> -f schema=billing`
+   `gh workflow run onboard.yml --ref main -f environment=<env> -f target=<target> -f action=baseline -f release=r<b> -f confirm_database=<database> -f schema=billing`
+   The baseline of a schema compares and records the objects of `billing` that have no managed
+   row in this database, with a baseline step whose note starts with `schema [billing]:`. A row
+   with the status managed is not read or written, of this schema or of another. Until it ran, the
+   plan of r<b> stops with `BASELINE_REQUIRED` and names the command. When nothing is left to
+   record it is `ALREADY_BASELINED`; a schema that `[scope]` of the release does not manage is
+   `OUT_OF_SCOPE`. A table that differs from its file refuses the baseline (`READBACK_MISMATCH`):
+   align the database by hand, or correct the file by pull request, then run it again.
 4. Deploy r<b> as usual.
 
 Repeat until the plan has no `SCHEMA_UNSCOPED` note: every schema is in `schemas` or in `exclude`.
 
+The same baseline takes an object that enters the scope in a schema that is recorded already: a
+pattern of `exclude_objects` that goes, with the file of the object. `verify` gives `PRF000`, the
+plan stops with `BASELINE_REQUIRED` and names `azsqlcd baseline --schema <schema>`, which records
+that object and nothing else.
+
 To stop managing a schema, move it from `schemas` to `exclude` and delete its files in one pull
 request: no migration and no tombstone are needed, and the tool drops nothing (`PRF000`, no
-`TMB001`). Its rows stay in the state and are no longer compared.
+`TMB001`). The first deploy of that release marks the managed rows of its objects with the status
+`dropped` (a unit of work with one `unscope:<key>` step for each, state writes only): the rows say
+"no longer managed", the objects stay as they are. When the schema comes back into the scope, its
+objects have no managed row: `verify` gives `PRF000`, the plan stops with `BASELINE_REQUIRED`, and
+`azsqlcd baseline --schema <schema>` compares each object with its file again and records it,
+which replaces the old row; an object that differs from its file refuses the baseline.
 
-Limit: the workflow `onboard.yml` does not pass `--schema` in this version. Run the export and the
-two baselines of a schema from a workstation (section 2, "Three ways to sign in"), with the plan
-identity for `export` and `--report-only` and the deploy identity for the baseline that writes.
+A managed table with a foreign key to a table that leaves the scope fails `verify` (`MDL001`: the
+referenced table has no file) until the pull request drops the foreign key or keeps the table in
+the scope.
+
+The workflow `onboard.yml` takes the input `schema` from the release that holds this change on:
+a database repository whose workflows call the reusable workflows of an older tag runs the export
+and the baselines of one schema from a workstation (section 2, "Three ways to sign in"), with the
+plan identity for `export` and `--report-only` and the deploy identity for the baseline that
+writes.
 
 ### Withdraw and replace a merged migration
 
