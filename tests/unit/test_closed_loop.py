@@ -1382,6 +1382,47 @@ def test_a_replacement_after_a_schema_left_the_scope_proves_and_sends_nothing_fo
     assert project.deploy(replaced, dev).code == 0
 
 
+PING = (
+    "schema/procedures/dbo.usp_Ping.sql",
+    "CREATE OR ALTER PROCEDURE [dbo].[usp_Ping] AS\nSELECT 1 AS [One];\n",
+)
+PING_KEY = names.object_key("PROCEDURE", "dbo", "usp_Ping")
+
+
+def test_a_tombstone_outside_the_scope_is_refused_and_one_of_an_object_with_no_managed_row_is_a_note(project):
+    """Review V4: both tombstones were accepted, and the deploy left the procedure in place with no
+    message, so the repository said that it was dropped."""
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write(*PING)
+    db = deployed(project, release_1(project))
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales"]\nexclude = ["dbo"]'))
+    (project.repo / PING[0]).unlink()
+    tombstone = f'[[drop]]\nobject = "{PING_KEY}"\nreason = "not needed"\n'
+    project.write("schema/_tombstones.toml", tombstone)
+    lint = project.tool("lint", "--root", str(project.repo))
+    assert lint.code == 22
+    assert f"schema/_tombstones.toml:2: error OUT_OF_SCOPE: {PING_KEY} is outside [scope]" in lint.out
+    (project.repo / "schema/_tombstones.toml").unlink()
+    assert project.deploy(project.release("dbo leaves"), db).code == 0
+    assert status_of(db, PING_KEY) == "dropped" and db.module(PING_KEY) is not None
+
+    # dbo comes back with a tombstone for the procedure, which has no managed row
+    project.write("azsqlcd.toml", scoped_toml('schemas = ["sales", "dbo"]'))
+    project.write("schema/_tombstones.toml", tombstone)
+    back = project.release("dbo comes back, usp_Ping is not needed")
+    out = project.out("plan")
+    planned = project.tool("plan", *back.where, "--out", str(out), db=db)
+    assert planned.code == 0, planned.err
+    note = (
+        f"TOMBSTONE_UNMANAGED {PING_KEY}: the release has a tombstone for it, the database has it, and "
+        "this database records no managed row for it"
+    )
+    assert note in planned.out and note in "".join(json.loads((out / "plan.json").read_text())["notes"])
+    sent = len(db.ddl)
+    assert project.deploy(back, db).code == 0
+    assert db.ddl[sent:] == [] and db.module(PING_KEY) is not None  # the tool drops no unmanaged object
+
+
 REPORTING = ("schema/schemas/reporting.sql", "CREATE SCHEMA [reporting];\n")
 REPORT_REFS = (
     "schema/views/reporting.vw_Refs.sql",

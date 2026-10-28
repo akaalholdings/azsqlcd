@@ -344,6 +344,7 @@ Reported, never a failure: the exit code of `plan`, `deploy` and `drift` does no
 | Finding | Where | Meaning | What to do |
 |---|---|---|---|
 | `SCHEMA_UNSCOPED` | `plan`: a note in the output (`note: SCHEMA_UNSCOPED [<schema>]: ...`), in `plan.json` and in the job summary. `drift`: the line `unscoped SCHEMA:[<schema>] SCHEMA_UNSCOPED - -` | `azsqlcd.toml` has `[scope]`, `schemas` is not `["*"]`, and the database has a schema that is in neither `schemas` nor `exclude`. The tool does not read, list or compare its objects | Review the schema. Onboard it (`docs/setup.md`, section 7, "One schema at a time"), or add it to `[scope] exclude` by pull request |
+| `TOMBSTONE_UNMANAGED` | `plan`: a note in the output (`note: TOMBSTONE_UNMANAGED <object key>: ...`), in `plan.json` and in the job summary. Only with `[scope]` | The release has a `[[drop]]` for a module of `[scope]` that the database has and that has no managed row. Usually the object left `[scope]` (its row was marked `dropped`) and came back. The tool never drops an object that it does not manage, so the deploy keeps it | Drop the object by hand. Or let the tool manage it first: its file without the `[[drop]]`, then `azsqlcd baseline --schema <schema>`; drop it with the tombstone in a later release |
 
 External tables under `[scope]` are skipped by their type: `plan` gives one note with their number,
 `export` one line in `export.md`; no external table is listed one by one.
@@ -433,7 +434,7 @@ Files of one revision.
 | `DIR002` | warning | `-- azsqlcd:after` or `-- azsqlcd:ignore-dep` names no module file of the repository | Correct the name, or remove the line |
 | `TMB002` | error | A tombstone for a module that still has its file | Remove the file or the tombstone |
 | `MODULE_CASE` | warning | A module file is renamed and the new name differs in letter case only. The database compares names without case, so it is the same object | Nothing. Do not add a tombstone for the old name: that is `TMB002` |
-| `OUT_OF_SCOPE` | error | An object file for an object that `[scope]` of `azsqlcd.toml` does not manage: its schema is in `exclude`, is not in `schemas`, or its `schema.name` matches a pattern of `exclude_objects`; or a trigger file whose table is outside `[scope]` (a DML trigger follows its table). Plan, drift and export do not see such an object, so the file would never be deployed or compared. `lint`, `build` and `verify` | Remove the file, or change `[scope]` in the same pull request (to onboard the schema: `docs/setup.md`, section 7, "One schema at a time") |
+| `OUT_OF_SCOPE` | error | An object file for an object that `[scope]` of `azsqlcd.toml` does not manage: its schema is in `exclude`, is not in `schemas`, or its `schema.name` matches a pattern of `exclude_objects`; or a trigger file whose table is outside `[scope]` (a DML trigger follows its table); or a `[[drop]]` of `schema/_tombstones.toml` for an object outside `[scope]` (the tool never drops it). Plan, drift and export do not see such an object, so the file would never be deployed or compared. `lint`, `build` and `verify` | Remove the file (or the `[[drop]]`), or change `[scope]` in the same pull request (to onboard the schema: `docs/setup.md`, section 7, "One schema at a time") |
 
 A change against the base revision (`verify` only).
 

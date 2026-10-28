@@ -1908,6 +1908,18 @@ def _scope_findings(files: Mapping[str, bytes], parsed: _Parsed, scope: config.S
                 "it, so the repository holds no file for it. Remove the file, or change [scope]"
             )
             out.append(_finding("OUT_OF_SCOPE", path, 1, message))
+    text = files.get(chain.TOMBSTONES_PATH, b"").decode("utf-8", "replace")
+    for t in parsed.tombstones or () if scope is not None else ():
+        reason = config.out_of_scope(scope, t.object_key)
+        if reason is not None:  # the plan never drops it, so the tombstone would say what is not done
+            at = text.find(t.object_key)
+            message = (
+                f"{t.object_key} is outside [scope] of {_CONFIG_PATH}: {reason}. The tool does not manage it "
+                "and never drops it. Remove the [[drop]], or change [scope]"
+            )
+            out.append(
+                _finding("OUT_OF_SCOPE", chain.TOMBSTONES_PATH, 1 + text.count("\n", 0, max(at, 0)), message)
+            )
     return out
 
 

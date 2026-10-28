@@ -763,6 +763,9 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
 - The proof of a replacement (`replaces=`) compares the two models for the objects of the head
   scope only, and refuses a statement of the replacement on an object outside it (`WDR002`, review
   V3).
+- `lint` refuses a `[[drop]]` for an object outside the scope (`OUT_OF_SCOPE`). The plan notes a
+  tombstone for an object of the scope that the database has with no managed row
+  (`TOMBSTONE_UNMANAGED`, review V4): the tool does not drop it.
 - Under a scope, `NAME_COLLISION` of modules that the database has with the kind of their file,
   and the table `BASELINE_REQUIRED`, are `BASELINE_REQUIRED` that names `azsqlcd baseline --schema`.
 - Export and baseline of one schema: `onboard.export(..., schema)` and `onboard.baseline(...,

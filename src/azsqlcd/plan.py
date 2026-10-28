@@ -465,6 +465,25 @@ def unscoped_note(schema: str) -> str:
     )
 
 
+def _unmanaged_tombstone_notes(files: Mapping[str, bytes], unmanaged: Collection[str]) -> list[str]:
+    """TOMBSTONE_UNMANAGED: a tombstone of the release for an object of the scope that the database
+    has with no managed row (review V4). Under [scope] that is an object that left the scope and came
+    back: the tool never drops an object that it does not manage, so the release and the database
+    say two things."""
+    if chain.TOMBSTONES_PATH not in files:
+        return []
+    live = {fold(key) for key in unmanaged}
+    tombstones = chain.parse_tombstones(_utf8(files, chain.TOMBSTONES_PATH, "TOMBSTONE_INVALID"))
+    return [
+        f"TOMBSTONE_UNMANAGED {t.object_key}: the release has a tombstone for it, the database has it, and "
+        "this database records no managed row for it, so the deploy does not drop it. Drop it by hand. Or "
+        "let the tool manage it first (its file without the [[drop]], then azsqlcd baseline --schema), "
+        "and drop it with the tombstone in a later release"
+        for t in sorted(tombstones, key=lambda t: t.object_key)
+        if fold(t.object_key) in live
+    ]
+
+
 def _managed_modules(recorded: State) -> dict[str, ObjectRow]:
     """An object is managed if and only if it has a row with the status managed (E5)."""
     return {key: row for key, row in recorded.objects.items() if row.status == "managed" and _is_module(key)}
@@ -1741,6 +1760,7 @@ def compute_plan(
     unmanaged = [key for key in unmanaged if names.parse_object_key(key)[0] != "TRIGGER" or key in kept]
     notes += _temporal_notes(work.destructive, history)
     if scope is not None:
+        notes += _unmanaged_tombstone_notes(bundle.files, unmanaged)
         external = sum(
             found.type == EXTERNAL_TABLE_TYPE and scope.has_schema(found.schema) for found in user_objects
         )

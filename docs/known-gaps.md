@@ -1813,6 +1813,14 @@ test came after, and fails when the refusal `ALREADY_BASELINED` is taken out. Mi
 behaviour, now documented (`docs/setup.md`, section 7) and kept by a test: `verify` refuses to take
 a table out of the scope while a managed table has a foreign key to it (`MDL001`).
 
+A second review on the fakes (2026-10-28) found two major and two minor defects; all are fixed,
+each with a test in `tests/unit/test_closed_loop.py` that failed before its fix. V1: a managed DML
+trigger whose table left the scope by a pattern needed a tombstone, and the tombstone dropped it;
+the trigger now leaves with its table. V2: see "Limits" below (`STALE_MANAGED_ROW`). V3: the proof
+of a replacement compared an object that had left the scope. V4: a tombstone outside the scope, or
+for an object with no managed row, was accepted and did nothing (`OUT_OF_SCOPE`,
+`TOMBSTONE_UNMANAGED`).
+
 ### Not proven on a database
 
 Nothing of this section ran against a database. Not measured: the condition
@@ -1855,6 +1863,12 @@ tables.
   (`STALE_MANAGED_ROW`, exit 22, before any statement). Still open: an object with drift is not in
   that check (the drift is reported); the check costs one more read of the managed tables of the
   scope in each plan (not measured on a database); `baseline` and `resolve` runs do not mark rows.
+- A `[[drop]]` for a DML trigger whose table is outside the scope is not refused by `lint` (with
+  no trigger file, `lint` cannot read the table of the trigger) and gets no `TOMBSTONE_UNMANAGED`
+  note (the plan leaves such a trigger out of the unmanaged list). Exact case (reproduced on the
+  fakes, review V1): after `dbo.tr_Load` left the scope with its table `dbo.temp_Load`, a pull
+  request adds `[[drop]] object = "TRIGGER:[dbo].[tr_Load]"`. `lint`, `verify`, `plan` and
+  `deploy` end with exit 0, and the trigger stays. Nothing is dropped wrongly.
 - The model of a withdrawal comes from the history (`gen._model_without`). It is filtered by the
   scope of the head revision, but it does not know that an object left the scope and came back
   between the withdrawn migration and the base: such an object is replayed from the history, not
