@@ -361,6 +361,7 @@ def test_the_pairs_hold_every_change_of_a_partitioned_table_that_is_written_and_
         "partitioned_add_aligned_index",
         "partitioned_add_column",
         "partitioned_alter_other_column",
+        "partitioned_clustered_compression_change_is_one_rebuild",
         "partitioned_clustered_index_dropped_to_heap",
         "partitioned_clustered_key_replaced_in_place",
         "partitioned_drop_index",

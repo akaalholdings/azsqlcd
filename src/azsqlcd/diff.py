@@ -35,6 +35,11 @@ Rules:
     written as on any table, each key and index with the ON clause of the head revision: a
     nonclustered key or index that changes its place is dropped and created like any other that
     differs, and a compression change of a partitioned heap is REBUILD PARTITION = ALL.
+  * A change of only DATA_COMPRESSION of a clustered rowstore key or index is one ALTER TABLE ...
+    REBUILD [PARTITION = ALL] WITH (DATA_COMPRESSION = ...), not a drop and a create (two writes of
+    every row and a heap between them). A head file that states no compression means NONE. A head
+    file that states DATA_COMPRESSION = NONE, a columnstore index, a key on a column that ALTER
+    COLUMN changes and any other change of options stay a drop and a create.
   * The generator refuses what the replay would block. The dependants of an ALTER COLUMN are
     found with replay.column_dependants on the model as it is when ALTER COLUMN runs; a longer
     varchar, nvarchar or varbinary passes under UNIQUE, CHECK and an index (replay.only_widens). Before
@@ -340,6 +345,8 @@ class _TableChange:
     dropped_indexes: list[Index]
     added_indexes: list[Index]
     kept_indexes: list[Index]
+    # the clustered key or index of the head revision when one ALTER TABLE ... REBUILD changes it
+    rebuilt: PrimaryKey | Unique | Index | None = None
 
     def middle(self) -> Table:
         """The table when ALTER COLUMN runs: every drop is done, no constraint or index is added yet."""
@@ -534,9 +541,38 @@ def _change(old: ModelObject, new: ModelObject, out: _Out) -> None:
 
 
 # ------------------------------------------------------------------ tables
+def _without_compression[T: PrimaryKey | Unique | Index](item: T) -> T:
+    return replace(item, options=tuple(o for o in item.options if o[0] != "DATA_COMPRESSION"))
+
+
+def _rebuilt(base: Table, head: Table) -> PrimaryKey | Unique | Index | None:
+    """The clustered rowstore key or index of the head revision when only its DATA_COMPRESSION
+    differs from the base revision: one ALTER TABLE ... REBUILD changes it in place. The replay of
+    REBUILD WITH (DATA_COMPRESSION = NONE) states no compression, so a head that states NONE is
+    not one: it keeps the drop and the create. So does a key or index on a column that ALTER
+    COLUMN changes: the key would block it."""
+    old, new = base.clustered_item(), head.clustered_item()
+    if old is None or new is None or old == new or type(old) is not type(new):
+        return None
+    if (isinstance(new, Index) and new.columnstore) or dict(new.options).get("DATA_COMPRESSION") == "NONE":
+        return None
+    if any(base.column(key.name) != head.column(key.name) for key in new.columns):
+        return None
+    return new if _without_compression(old) == _without_compression(new) else None
+
+
 def _table_change(base: Table, head: Table) -> _TableChange:
     old, new = set(base.constraints), set(head.constraints)
     old_indexes, new_indexes = set(base.indexes), set(head.indexes)
+    rebuilt, was = _rebuilt(base, head), base.clustered_item()
+    # one ALTER TABLE ... REBUILD changes it in place: it counts as kept, so neither it nor a foreign
+    # key on it is dropped
+    if isinstance(rebuilt, Index) and isinstance(was, Index):
+        old_indexes.add(rebuilt)
+        new_indexes.add(was)
+    elif isinstance(rebuilt, PrimaryKey | Unique) and isinstance(was, PrimaryKey | Unique):
+        old.add(rebuilt)
+        new.add(was)
     return _TableChange(
         base,
         head,
@@ -546,6 +582,7 @@ def _table_change(base: Table, head: Table) -> _TableChange:
         dropped_indexes=[i for i in base.indexes if i not in new_indexes],
         added_indexes=[i for i in head.indexes if i not in old_indexes],
         kept_indexes=[i for i in head.indexes if i in old_indexes],
+        rebuilt=rebuilt,
     )
 
 
@@ -619,19 +656,22 @@ def _heap_before(change: _TableChange) -> str | None:
 
 
 def _heap_compression(change: _TableChange, out: _Out) -> RebuildTable | None:
-    """What the DATA_COMPRESSION of the heap asks for: ALTER TABLE ... REBUILD when the table is a
-    heap at the head revision and the heap after the drops has another compression; a refusal when
-    a new clustered key or index would inherit a compression that the file does not state."""
+    """What the DATA_COMPRESSION of the table asks for: ALTER TABLE ... REBUILD when the table is a
+    heap at the head revision and the heap after the drops has another compression, or when only
+    the compression of its clustered key or index changes (_rebuilt); a refusal when a new
+    clustered key or index would inherit a compression that the file does not state."""
     head = change.head
+    # PARTITION = ALL: the form of the statement for a partitioned table
+    every = head.on is not None
+    if change.rebuilt is not None:
+        compression = dict(change.rebuilt.options).get("DATA_COMPRESSION", "NONE")
+        return RebuildTable(head.schema, head.name, compression, all_partitions=every)
     clustered = head.clustered_item()
     if clustered is None:
         before = _heap_before(change)
         if before == head.compression:
             return None
-        # PARTITION = ALL: the form of the statement for a partitioned table
-        return RebuildTable(
-            head.schema, head.name, head.compression or "NONE", all_partitions=head.on is not None
-        )
+        return RebuildTable(head.schema, head.name, head.compression or "NONE", all_partitions=every)
     new = any(clustered is item for item in (*change.added, *change.added_indexes))
     columnstore = isinstance(clustered, Index) and clustered.columnstore
     if new and not columnstore and "DATA_COMPRESSION" not in dict(clustered.options):

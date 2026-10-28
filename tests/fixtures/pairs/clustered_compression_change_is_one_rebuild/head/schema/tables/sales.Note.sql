@@ -1,0 +1,4 @@
+CREATE TABLE [sales].[Note] (
+    [NoteId] int NOT NULL,
+    CONSTRAINT [PK_Note] PRIMARY KEY CLUSTERED ([NoteId]) WITH (DATA_COMPRESSION = NONE)
+);

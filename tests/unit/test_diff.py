@@ -1827,6 +1827,59 @@ def test_a_compression_change_of_a_partitioned_heap_is_one_rebuild_of_all_partit
     assert touched_objects([rebuild]) == ["TABLE:[s].[Line]"]
 
 
+def compressed(text: str, option: str) -> str:
+    """KEYED or PLAIN with the clustered key stating `option` (", DATA_COMPRESSION = PAGE")."""
+    return text.replace(f"{PK_LINE}", f"{PK_LINE} WITH (FILLFACTOR = 90{option})")
+
+
+def test_a_change_of_only_the_compression_of_the_clustered_key_is_one_rebuild_of_the_table():
+    """Not a drop and a create: those write every row twice, rebuild every nonclustered index twice
+    and leave a heap between them. A head file that states no DATA_COMPRESSION means NONE."""
+    for text, form in ((KEYED, " PARTITION = ALL"), (PLAIN, "")):
+        base, page = (
+            model_of(SCHEMA, compressed(text, "")),
+            model_of(SCHEMA, compressed(text, ", DATA_COMPRESSION = PAGE")),
+        )
+        assert written(base, page) == [
+            f"ALTER TABLE [s].[Line] REBUILD{form} WITH (DATA_COMPRESSION = PAGE);"
+        ]
+        assert written(page, base) == [
+            f"ALTER TABLE [s].[Line] REBUILD{form} WITH (DATA_COMPRESSION = NONE);"
+        ]
+        row = model_of(SCHEMA, compressed(text, ", DATA_COMPRESSION = ROW"))
+        (rebuild,) = diff(page, row)
+        assert emit_operation(rebuild).endswith(" WITH (DATA_COMPRESSION = ROW);")
+        assert classify(rebuild, page) == ["LONG_LOCK"]
+        assert touched_objects([rebuild]) == ["TABLE:[s].[Line]"]
+
+
+def test_a_compression_change_of_a_clustered_key_whose_column_is_altered_stays_a_drop_and_a_create():
+    """The key does not stay on the column while ALTER COLUMN runs: a rebuild would block it."""
+    base = model_of(SCHEMA, compressed(PLAIN, ""))
+    head = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = PAGE").replace("[Id] bigint", "[Id] int"))
+    assert written(base, head) == [
+        "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line];",
+        "ALTER TABLE [s].[Line] ALTER COLUMN [Id] int NOT NULL;",
+        "ALTER TABLE [s].[Line] ADD CONSTRAINT [PK_Line] PRIMARY KEY CLUSTERED ([OrderDate], [Id])"
+        " WITH (DATA_COMPRESSION = PAGE, FILLFACTOR = 90);",
+    ]
+
+
+def test_any_other_change_of_the_clustered_key_and_a_head_that_states_none_are_still_a_drop_and_a_create():
+    base = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = PAGE"))
+    drop = "ALTER TABLE [s].[Line] DROP CONSTRAINT [PK_Line];"
+    # another option changes with the compression
+    other = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = ROW").replace("= 90", "= 80"))
+    assert written(base, other)[0] == drop
+    # the replay of REBUILD ... NONE states no compression: a file that states NONE is the create
+    stated = model_of(SCHEMA, compressed(PLAIN, ", DATA_COMPRESSION = NONE"))
+    assert written(base, stated) == [
+        drop,
+        "ALTER TABLE [s].[Line] ADD CONSTRAINT [PK_Line] PRIMARY KEY CLUSTERED ([OrderDate], [Id])"
+        " WITH (DATA_COMPRESSION = NONE, FILLFACTOR = 90);",
+    ]
+
+
 def test_a_new_partitioned_table_is_created_on_its_scheme_and_its_clustered_index_is_built_in_place():
     statements = written(model_of(SCHEMA), model_of(SCHEMA, KEYED.replace(PK_LINE + ON_YEAR + ", ", "")))
     assert statements[0].endswith("\n)\nON [PS_OrderYear]([OrderDate]);")

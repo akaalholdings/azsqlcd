@@ -1202,8 +1202,14 @@ def test_a_heap_keeps_the_compression_of_the_clustered_index_that_is_dropped():
 def test_rebuild_sets_the_compression_of_the_heap_or_of_the_clustered_key():
     assert table(run(WORLD, REBUILD.format("Wide", "ROW")), "Wide").compression == "ROW"
     assert table(run(WORLD, REBUILD.format("Wide", "NONE")), "Wide").compression is None
+    # NONE: the clustered key states no compression, as the catalog reads it and as a file that
+    # states none says it (a file that states DATA_COMPRESSION = NONE is a drop and a create in gen)
     key = table(run(WORLD, REBUILD.format("P", "NONE")), "P").constraint("PK_P")
-    assert isinstance(key, PrimaryKey) and key.options == (("DATA_COMPRESSION", "NONE"),)
+    assert isinstance(key, PrimaryKey) and key.options == ()
+    packed = run(WORLD, REBUILD.format("P", "PAGE"))
+    key = table(packed, "P").constraint("PK_P")
+    assert isinstance(key, PrimaryKey) and key.options == (("DATA_COMPRESSION", "PAGE"),)
+    assert run(packed, REBUILD.format("P", "NONE")) == WORLD
 
 
 def test_a_column_property_changes_that_property_and_nothing_else():

@@ -764,8 +764,12 @@ def _rebuild_table(model: Model, op: RebuildTable) -> Model:
             f"the table has the clustered columnstore index {shown}: its DATA_COMPRESSION is COLUMNSTORE "
             "or COLUMNSTORE_ARCHIVE and is stated on the index",
         )
-    # the engine rebuilds the clustered index with this compression; the option is then stated
-    options = tuple(sorted({**dict(item.options), "DATA_COMPRESSION": op.compression}.items()))
+    # the engine rebuilds the clustered index with this compression. NONE is stated by no option, as
+    # the catalog reads it back and as a table file that states no compression says it
+    found = {**dict(item.options), "DATA_COMPRESSION": op.compression}
+    if op.compression == "NONE":
+        del found["DATA_COMPRESSION"]
+    options = tuple(sorted(found.items()))
     rebuilt = replace(item, options=options)
     if isinstance(rebuilt, Index):
         return model.replace(
