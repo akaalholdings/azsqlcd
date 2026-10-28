@@ -312,8 +312,8 @@ def _name_drift(
 
     The rename gives the recorded name, in the recorded letters: Hooks.read_back records the name
     of the file. file_names (fixed name -> name of the file, from _aligned) is for a record of
-    v0.1.0, which holds such a constraint under its fixed name: when no file has that name, the
-    rename gives the name of the file. table_drift leaves out a name that a pending migration drops
+    v0.1.0 or v0.2.0, which holds such a constraint under its fixed name: when no file has that
+    name, the rename gives the name of the file. table_drift leaves out a name that a pending migration drops
     or renames: that name was the name of a file of the recorded release.
     """
     by_label = {
@@ -346,7 +346,7 @@ def _name_drift(
         name = twin.removeprefix("constraint ")[1:-1].replace("]]", "]")  # twin holds names.quote(name)
         in_file = file_names.get(by_label[label].fixed_name, name)
         if fold(name) == fold(by_label[label].fixed_name) and fold(in_file) != fold(name):
-            name = in_file  # a record of v0.1.0
+            name = in_file  # a record of v0.1.0 or v0.2.0
         item = replace(by_label[label], fixed_name=name)
         stored, now = ({catalog_tables.NAME_DRIFT: text} for text in (item.fixed_name, item.live_name))
         found.append(

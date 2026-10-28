@@ -1915,6 +1915,12 @@ Sections 2, 7 and 11 (row T4) have the details.
   `plan`. It gives the recorded fixed name when the database applied a migration that this
   release does not hold (`drift` with an older bundle). Use the bundle of the recorded release or
   a newer one.
+- For such a record, the rename is not the last step. After the rename, `drift` reports
+  `constraint [<fixed name>]` (for example `constraint [CK_Order_1]`) with no live hash, and only
+  `resolve --accept-drift <table key>` ends it. The report with the rename line says "run the
+  statement of each rename line, then drift again", and does not name this second step. The
+  runbook has it ("A constraint with a name that the engine made", special cases). Test:
+  `test_a_record_of_v0_2_0_of_a_check_under_its_fixed_name_ends_with_the_name_of_the_file`.
 - `docs/design.md` has no separate amendment for the rename to the name of the file: it is part
   of the A35 bullet of "As built".
 - Proven against fakes only (`FakeDatabase`). Nothing of this section ran on a database.

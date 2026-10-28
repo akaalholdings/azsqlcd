@@ -731,9 +731,11 @@ Special cases:
   pending migration drops or renames the constraint by the recorded name. Do not run
   `mark-applied` after the rename.
 - After the rename, `drift` reports `constraint [<other name>]` with no live hash for the same
-  table. Version 0.1.0 recorded an engine-named constraint under a name that no file has
-  (`resolve` with `mark-applied` or `accept-drift`). The database has the name of the file now:
-  `-f action=accept-drift -f subject=<object key>` records it.
+  table, for example `constraint [CK_Order_1]`. Versions 0.1.0 and 0.2.0 recorded an engine-named
+  constraint under the fixed name of the reader, which no file has (the read-back of a deploy,
+  `resolve` with `mark-applied` or `accept-drift`). The database has the name of the file now:
+  `-f action=accept-drift -f subject=<object key>` records it. Then `drift` is clean. Step 1 does
+  not apply to this second step.
 - The difference of the table is `unsupported`, and the table has a constraint with a name that
   the engine made. The reader gives such a constraint a fixed name (`PK_<table>`,
   `DF_<table>_<column>`, `UQ_<table>_<columns>`, `CK_<table>_<n>`, `FK_<table>_<reftable>_<n>`).

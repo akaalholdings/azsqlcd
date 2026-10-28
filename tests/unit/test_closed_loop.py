@@ -621,6 +621,39 @@ def test_a_record_of_v0_1_0_under_a_fixed_name_ends_with_the_name_of_the_file(pr
     assert db.model == third.model
 
 
+def test_a_record_of_v0_2_0_of_a_check_under_its_fixed_name_ends_with_the_name_of_the_file(project):
+    """Review UPG-1. v0.2.0 also recorded an engine-named constraint under the fixed name of the
+    reader (the read-back of a deploy, accept-drift): a CHECK under CK_<table>_<n>. The rename gives
+    the name of the file; the old label stays until accept-drift, as the runbook says."""
+    status = Check("CK_Order_Status", Expression.from_sql("([Status]<(9))"))
+    order = dataclasses.replace(ORDER, constraints=(*ORDER.constraints, status))
+    project.write_objects(SALES, CUSTOMER, order)
+    for path, text in MODULES.values():
+        project.write(path, text)
+    first = project.release("sales schema", "create_sales")
+    db = deployed(project, first)
+    db.out_of_band(
+        "ALTER TABLE [sales].[Order] DROP CONSTRAINT [CK_Order_Status];",
+        "ALTER TABLE [sales].[Order] ADD CHECK ([Status]<(9));",
+    )
+    assert db.tables is not None
+    row = next(row for row in db.tables["object"] if row["object_key"] == ORDER.key)
+    capture = json.loads(row["catalog_capture"])
+    capture["constraint [CK_Order_1]"] = capture.pop("constraint [CK_Order_Status]")
+    row |= {"catalog_capture": state.capture_json(capture), "catalog_sha256": state.capture_sha256(capture)}
+
+    (statement,) = rename_statements(project.tool("drift", *first.where, db=db), ORDER.key)
+
+    assert statement.endswith(", N'CK_Order_Status', N'OBJECT';")
+    db.out_of_band(statement)
+    left = project.tool("drift", *first.where, db=db)
+    assert left.code == 30 and left.out.startswith(f"managed {ORDER.key} constraint [CK_Order_1] ")
+    accept = project.tool("resolve", *first.where, *RESOLVE, "--accept-drift", ORDER.key, db=db)
+    assert accept.code == 0, accept.err
+    assert project.tool("drift", *first.where, db=db).out.strip() == "no drift"
+    assert db.model == first.model
+
+
 DROP_DEFAULT = "ALTER TABLE [sales].[Order] DROP CONSTRAINT [DF_Order_Status];"
 DEFAULT_WITHOUT_A_NAME = "ALTER TABLE [sales].[Order] ADD DEFAULT ((0)) FOR [Status];"
 
