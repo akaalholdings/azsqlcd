@@ -48,13 +48,14 @@ from azsqlcd import (
     lint,
     onboard,
     plan,
+    products,
     release,
     runner,
     state,
     tables,
     trace,
 )
-from azsqlcd.config import Config, load_config, resolve_target, targets_matrix
+from azsqlcd.config import ENVIRONMENTS, Config, load_config, resolve_target, targets_matrix
 from azsqlcd.errors import Exit, ToolError, refused, retry_safe, unknown
 from azsqlcd.session import (
     AUTH_SQL,
@@ -592,6 +593,51 @@ def _cmd_targets(call: _Call) -> None:
         _table(("Target", "Server", "Database"), [(r["id"], r["server"], r["database"]) for r in matrix])
     )
     call.summary.append(f"Job timeout: {timeout} min\n")
+
+
+def _cmd_products(call: _Call) -> None:
+    """The products of azsqlcd.toml in the working tree. Offline: with --env it says what the files
+    hold back from that environment, not what a database has applied or parked."""
+    files = gen.read_working_tree(call.args.root)
+    config = _config_of(files, f"the directory {Path(call.args.root).resolve()}")
+    if call.args.codeowners:
+        for line in products.codeowners(config, files):
+            call.say(line)
+        return
+    if not config.products:
+        call.say(f"{release.CONFIG_PATH} has no [products]")
+        return
+    env = call.args.env
+    if env is not None and env not in ENVIRONMENTS:
+        raise refused(
+            "ENV_NOT_CONFIGURED", f"--env {env}: an environment name is one of: {', '.join(ENVIRONMENTS)}"
+        )
+    counts = products.object_files(config, files)
+    hold = products.hold(config, env, files) if env is not None else None
+    in_release = plan.module_files(files) if env is not None else {}
+    for product in config.products:
+        owners = " ".join(product.owners) or "none"
+        reach = (
+            f'promote_to = "{product.promote_to}"'
+            if product.promote_to is not None
+            else "promote_to: none (every environment)"
+        )
+        call.say(f"{product.name}: {len(counts[product.name])} object file(s); owners {owners}; {reach}")
+        if hold is None:
+            continue
+        if product.name not in hold.held:
+            call.say(f"  not held in {env}")
+            continue
+        held = [file for file, name in hold.migration_product.items() if name == product.name]
+        mods = [key for key in sorted(in_release) if getattr(hold.holds(key), "name", None) == product.name]
+        call.say(
+            f"  held in {env}: migrations {', '.join(held) or 'none'}; modules {', '.join(mods) or 'none'}"
+        )
+    if env is not None:
+        call.say(
+            "offline: no database is read. Which of these a target has applied, and which migrations are "
+            f"parked there, azsqlcd plan --env {env} shows"
+        )
 
 
 def _cmd_setup_sql(call: _Call) -> None:
@@ -1369,6 +1415,11 @@ def parsers() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParse
     )
 
     add("targets", _cmd_targets, bundle, help="the targets of an environment, for the workflow matrix")
+    listed = add("products", _cmd_products, root, help="the products of azsqlcd.toml (offline)")
+    listed.add_argument("--env", metavar="E", help="also what the files hold back from this environment")
+    listed.add_argument(
+        "--codeowners", action="store_true", help="print CODEOWNERS lines for the products with owners"
+    )
     setup = add("setup-sql", _cmd_setup_sql, root, help="print the script that an administrator runs once")
     setup.add_argument("--env", required=True, metavar="E", help="environment of azsqlcd.toml")
     setup.add_argument("--target", required=True, metavar="T", help="target id of azsqlcd.toml")

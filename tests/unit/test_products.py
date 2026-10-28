@@ -3,7 +3,7 @@ a hold does to the set-aside facts and to the notes of a plan."""
 
 import pytest
 
-from azsqlcd import chain, products, set_aside
+from azsqlcd import chain, cli, products, set_aside
 from azsqlcd.config import load_config
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.modules import read_module
@@ -184,3 +184,67 @@ def test_codeowners_gives_one_glob_where_a_folder_holds_only_files_of_the_produc
         "/schema/tables/dbo.old_*.sql @sales/legacy-team",
         "/schema/tables/DBO.OLD_B.sql @sales/legacy-team",
     ]
+
+
+# ------------------------------------------------------------------ the command `products`
+VIEW_TEXT = "CREATE OR ALTER VIEW [sales].[vw_Balance]\nAS\nSELECT 1 AS [One];\n"
+
+
+def repository(folder, config_text: str) -> str:
+    files = {
+        "azsqlcd.toml": config_text,
+        "schema/tables/sales.Balance.sql": "CREATE TABLE [sales].[Balance] (\n    [Id] int NOT NULL\n);\n",
+        "schema/tables/sales.Order.sql": "CREATE TABLE [sales].[Order] (\n    [Id] int NOT NULL\n);\n",
+        "schema/views/sales.vw_Balance.sql": VIEW_TEXT,
+        "migrations/" + BALANCE.file: TEXTS[BALANCE.file],
+        "migrations/" + SHARED.file: TEXTS[SHARED.file],
+        chain.SUM_PATH: files_of(BALANCE, SHARED)[chain.SUM_PATH].decode(),
+    }
+    for path, text in files.items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(text)
+    return str(folder)
+
+
+def run(capsys, *argv: str) -> tuple[int, str]:
+    capsys.readouterr()
+    code = cli.main(list(argv))
+    return code, capsys.readouterr().out
+
+
+def test_products_lists_each_product_with_its_owners_promote_to_and_object_count(tmp_path, capsys):
+    root = repository(tmp_path, HEAD + PRODUCTS)
+    code, out = run(capsys, "products", "--root", root)
+    assert code == 0
+    assert out.splitlines() == [
+        'balance: 2 object file(s); owners @bal-owner; promote_to = "dev"',
+        "legacy: 0 object file(s); owners @sales/legacy-team; promote_to: none (every environment)",
+    ]
+
+
+def test_products_with_env_says_what_is_held_there_from_the_files_only(tmp_path, capsys):
+    root = repository(tmp_path, HEAD + PRODUCTS)
+    code, out = run(capsys, "products", "--root", root, "--env", "sandbox")
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0] == 'balance: 2 object file(s); owners @bal-owner; promote_to = "dev"'
+    assert lines[1] == f"  held in sandbox: migrations {BALANCE.file}; modules VIEW:[sales].[vw_Balance]"
+    assert lines[2].startswith("legacy:") and lines[3] == "  not held in sandbox"
+    assert lines[-1].startswith("offline: no database is read")
+    code, out = run(capsys, "products", "--root", root, "--env", "dev")
+    assert "  not held in dev" in out.splitlines()
+
+
+def test_products_codeowners_prints_the_lines_of_the_products_with_owners(tmp_path, capsys):
+    root = repository(tmp_path, HEAD + PRODUCTS)
+    code, out = run(capsys, "products", "--root", root, "--codeowners")
+    assert code == 0
+    assert out.splitlines() == [
+        "/schema/tables/sales.Balance*.sql @bal-owner",
+        "/schema/views/sales.vw_Balance.sql @bal-owner",
+    ]
+
+
+def test_products_without_a_products_table_says_so(tmp_path, capsys):
+    code, out = run(capsys, "products", "--root", repository(tmp_path, HEAD))
+    assert (code, out) == (0, "azsqlcd.toml has no [products]\n")
