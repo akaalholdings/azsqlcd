@@ -298,7 +298,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
-| `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines, the pull-request rules of holds (A37, A38) | chain, config, errors, modules, names, set_aside, state |
+| `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines, the pull-request rules of holds (A42, A43) | chain, config, errors, modules, names, set_aside, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -940,14 +940,14 @@ Owner problem: the objects of one product (for example `Balance`) need a tag, an
 stay in dev, never promoted, without a pull request that stays open. `docs/setup.md`, section 7,
 "Products and holds", is the procedure.
 
-- A37. Products. `azsqlcd.toml` takes the optional tables `[products.<name>]`: `objects`
+- A42. Products. `azsqlcd.toml` takes the optional tables `[products.<name>]`: `objects`
   (required; patterns `schema.name` with the syntax, the match and the checks of `[scope]
   exclude_objects`, so `config._check_pattern` serves both), `owners` (`@user` or `@org/team`),
   `promote_to` (a name of `ENVIRONMENTS`). `config.Product`, `Config.products` (empty without the
   tables). An object belongs to at most one product: lint error `PRODUCT_OVERLAP`.
 - Holds. In an environment after `promote_to` the product is held (`products.is_held`). A held
   migration is a set-aside migration with the reason `held` (`set_aside.HELD`, `set_aside.WAY_OUT`)
-  and uses A35 as built: no run, catch-up past it, the independence check. `set_aside.read` is not
+  and uses A40 as built: no run, catch-up past it, the independence check. `set_aside.read` is not
   changed: the hold needs the environment and the files of the release, so `products.hold(config,
   env, files)` returns a `Hold`, and `plan.pending_work(..., hold)` merges it into the `Aside`
   (`Hold.merge`). A migration of a product that is not held in the environment (any more) counts
@@ -972,7 +972,7 @@ stay in dev, never promoted, without a pull request that stays open. `docs/setup
   (verify), `held` and `products` (plan notes).
 - Not done: `drift` lists no pending or held migrations. `azsqlcd products --env` reads no
   database. Proven against fakes only.
-- A38. Review of A37 (2026-10-28). (a) `Hold.merge` releases (`Aside.released`) only a migration
+- A43. Review of A42 (2026-10-28). (a) `Hold.merge` releases (`Aside.released`) only a migration
   of a product that the database could have held: not applied, and added by a release that the
   database holds (`chain_added_in <= at_seq`). Any other pending migration keeps A6 and A7, so a
   product with no `promote_to` changes nothing. (b) An unbind of a held module whose file text is
