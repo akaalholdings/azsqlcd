@@ -802,6 +802,14 @@ def test_the_products_tables_are_read_in_name_order_with_their_three_keys():
     assert not balance.matches("sales", "vw_Balance2") and not balance.matches("dbo", "Balance")
 
 
+def test_a_product_pattern_is_split_at_its_first_dot_as_a_pattern_of_scope():
+    """[products.<name>] objects has the syntax of [scope] exclude_objects: 'a.b.*' is the schema
+    'a' and the name 'b.*', so [a.b].[c] is not an object of the product."""
+    product = Product("p", ("a.b.*",))
+    assert product.matches("a", "b.c") and not product.matches("a.b", "c")
+    assert not Product("q", ("*.tmp?",)).matches("sales", "x.tmp1")  # the schema part takes no dot of a name
+
+
 @pytest.mark.parametrize(
     ("table", "key"),
     [

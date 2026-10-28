@@ -88,6 +88,12 @@ def _pattern(text: str) -> re.Pattern[str]:
     return re.compile("".join({"*": ".*", "?": "."}.get(c, re.escape(c)) for c in fold(text)), re.DOTALL)
 
 
+def _matches(pattern: str, schema: str, name: str) -> bool:
+    """A pattern 'schema.name' is split at its first dot, and each part matches its own name."""
+    owner, _, rest = pattern.partition(".")
+    return bool(_pattern(owner).fullmatch(fold(schema)) and _pattern(rest).fullmatch(fold(name)))
+
+
 @dataclass(frozen=True)
 class Scope:
     """[scope] of azsqlcd.toml: the schemas that the tool manages, so a database is onboarded one
@@ -119,14 +125,8 @@ class Scope:
         return self.every_schema or fold(schema) in {fold(name) for name in (*self.schemas, *self.exclude)}
 
     def pattern_of(self, schema: str, name: str) -> str | None:
-        """The first pattern of exclude_objects that 'schema.name' matches; None when none does. A
-        pattern is split at its first dot, and each part matches its own name."""
-
-        def matches(pattern: str) -> bool:
-            owner, _, rest = pattern.partition(".")
-            return bool(_pattern(owner).fullmatch(fold(schema)) and _pattern(rest).fullmatch(fold(name)))
-
-        return next((p for p in self.exclude_objects if matches(p)), None)
+        """The first pattern of exclude_objects that 'schema.name' matches; None when none does."""
+        return next((p for p in self.exclude_objects if _matches(p, schema, name)), None)
 
     def only(self, schema: str) -> Scope:
         """This scope cut to one schema: the read of `export --schema` and `baseline --schema`."""
@@ -148,8 +148,7 @@ class Product:
     promote_to: str | None = None
 
     def matches(self, schema: str, name: str) -> bool:
-        text = fold(f"{schema}.{name}")
-        return any(_pattern(p).fullmatch(text) for p in self.objects)
+        return any(_matches(p, schema, name) for p in self.objects)
 
 
 def out_of_scope(scope: Scope | None, key: str) -> str | None:
