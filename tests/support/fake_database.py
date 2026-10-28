@@ -79,7 +79,9 @@ What the fake engine checks, beyond replay.apply
     table obeys the columns, NOT NULL, lengths, keys and CHECK lists that the setup script declares.
 Limits. A module body is not parsed: a reference is a two-part name whose first part is a schema,
 or a one-part name after FROM or JOIN that names an object of dbo; a used column is an identifier
-of the text that is a column of a referenced table when the module is bound. Rows of user tables
+of the text that is a column of a referenced table when the module is bound. The columns of a view
+or an inline function are the columns that it uses (columns_of), so a view on a view breaks when
+the view under it no longer uses a column that it selects. Rows of user tables
 do not exist: a data batch is unknown unless a respond rule answers it. Under SET PARSEONLY ON
 only the lexer and the canary shape (SELECT FROM) decide: the fake does not judge T-SQL syntax.
 The catalog rows of a table come from unit.test_catalog_tables.rows_from_model, so a capture holds
@@ -503,6 +505,17 @@ class FakeDatabase:
         keys = [c.name for c in table.constraints if isinstance(c, PrimaryKey | Unique)]
         return any(fold(found) == fold(name) for found in (*keys, *(i.name for i in table.indexes)) if found)
 
+    def columns_of(self, name: Name) -> list[str] | None:
+        """Folded column names of a table, or of a view or an inline function: the columns that it
+        uses of the objects it names (a select list is not parsed). None for other objects."""
+        table = self.table(name)
+        if table is not None:
+            return [fold(column.name) for column in table.columns]
+        module = self.modules.get(name)
+        if module is None or module.type not in ("V", "IF"):
+            return None
+        return sorted({column for columns in module.references.values() for column in columns or ()})
+
     def users_of(self, name: Name, column: str | None = None, *, bound_only: bool = False) -> list[Module]:
         """The modules that name the object (and, with a column, use that column), in key order."""
         found = [
@@ -520,9 +533,9 @@ class FakeDatabase:
         missing = sorted(name for name in module.references if name not in existing)
         gone: list[str] = []
         for name, columns in module.references.items():
-            table = self.table(name)
-            if table is not None and columns:
-                gone += sorted(columns - {fold(column.name) for column in table.columns})
+            present = self.columns_of(name)
+            if present is not None and columns:
+                gone += sorted(columns - set(present))
         return missing, gone
 
     # -------------------------------------------------------------- modules
@@ -557,8 +570,7 @@ class FakeDatabase:
         named.discard(own)
         references: dict[Name, frozenset[str] | None] = {}
         for name in sorted(named):
-            table = self.table(name)
-            columns = [fold(c.name) for c in table.columns] if table is not None else []
+            columns = self.columns_of(name) or []
             references[name] = frozenset(set(columns) & idents) if name in existing else None
         missing = [name for name, columns in references.items() if columns is None]
         if missing and module.type in ("V", "IF"):  # no late name resolution for these
@@ -920,6 +932,16 @@ class FakeDatabase:
             (module.schema, module.name, module.type, int(module.is_schema_bound))
             for name in _object_names(toks)
             if name in existing  # OBJECT_ID of a name that is gone is NULL
+            for module in self.users_of(name)
+        }
+        return sorted(found)
+
+    def _q_dependant_chain(self, toks: list[Tok]) -> Rows:
+        existing = self.objects()
+        found = {
+            (module.schema, module.name, module.type, int(module.is_schema_bound), *existing[name][:2])
+            for name in _object_names(toks)
+            if name in existing
             for module in self.users_of(name)
         }
         return sorted(found)

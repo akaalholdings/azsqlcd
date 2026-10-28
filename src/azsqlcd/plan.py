@@ -149,6 +149,7 @@ class TableFindings:
     blockers: tuple[str, ...] = ()  # each one refuses the plan; text for the operator, names only
     # not read by the plan: Plan.pre_broken is the dependants with a finding in dependant_findings
     pre_broken: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()  # A35: the path of each transitive dependant to check; the depth limit
 
 
 class TableHooks(Protocol):
@@ -1708,10 +1709,14 @@ def compute_plan(
     pre_broken: tuple[str, ...] = ()
     dependants: tuple[str, ...] = ()
     dependant_findings: dict[str, tuple[str, ...]] = {}
-    if table_hooks is not None and work.pending:
+    # A35: a release that changes modules only refreshes and checks the dependants of those modules
+    if table_hooks is not None and (work.pending or (work.module_changes and units)):
         # A partition scheme is a prerequisite that a DBA owns: no model statement creates one.
         # Without it the unit would fail at the statement that names it, after the batches before it
-        missing = [names.quote(name) for name in table_hooks.missing_partition_schemes(session, work)]
+        missing = [
+            names.quote(name)
+            for name in (table_hooks.missing_partition_schemes(session, work) if work.pending else [])
+        ]
         if missing:
             raise refused(
                 "PARTITION_SCHEME_MISSING",
@@ -1731,6 +1736,7 @@ def compute_plan(
                 f"{findings.blockers[0]} ({len(findings.blockers)} blocker(s) in all)",
                 blockers=list(findings.blockers),
             )
+        notes += findings.notes
         # A12: what the engine says of each dependant now. The runner fails one only for a finding
         # that is not here. A key with no answer is a defect of the hooks: it is never read as sound
         before = {
@@ -1738,7 +1744,7 @@ def compute_plan(
         }
         dependant_findings = {key: tuple(sorted(before[fold(key)])) for key in dependants}
         pre_broken = tuple(key for key in dependants if dependant_findings[key])
-        collisions = table_hooks.sub_object_collisions(session, work, recorded)
+        collisions = table_hooks.sub_object_collisions(session, work, recorded) if work.pending else []
         if collisions:
             raise refused(
                 "NAME_COLLISION",

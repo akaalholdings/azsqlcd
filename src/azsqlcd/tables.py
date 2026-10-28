@@ -386,6 +386,19 @@ def _problem(
     }
 
 
+def _bound_chain(session: Session, module: str) -> str:
+    """' (schema-bound chain: a -> b -> module; ...)' for the schema-bound modules on a schema-bound
+    blocker, through schema-bound modules only (A35); '' when there is none."""
+    closure = catalog.dependant_closure(session, [], [module])
+    bound = {fold(d.key) for d in closure.dependants if d.schema_bound} | {fold(module)}
+    chains = [
+        " -> ".join((d.key, *d.via))
+        for d in closure.dependants
+        if d.schema_bound and all(fold(key) in bound for key in d.via)
+    ]
+    return f" (schema-bound chain: {'; '.join(chains)})" if chains else ""
+
+
 # ------------------------------------------------------------------ hooks
 class Hooks:
     """plan.TableHooks and runner.TableHooks for one release with table_model = true.
@@ -610,19 +623,25 @@ class Hooks:
                         )
                 elif fold(module) not in managed:
                     found.append(f"{module} is schema-bound to {target.text} and is not managed")
+                    found[-1] += _bound_chain(session, module)
                 elif fold(module) not in unbound:
                     found.append(
                         f"{module} is schema-bound to {target.text}: the migration needs the line "
                         f"'-- azsqlcd:unbind {module.split(':', 1)[1]}'"
                     )
-            for dependant in catalog.dependants_of(session, [target.table_key]):
+                    found[-1] += _bound_chain(session, module)
+            # A35: an unmanaged module at any depth, also through managed modules
+            closure = catalog.dependant_closure(session, [target.table_key])
+            for dependant in closure.dependants:
                 if fold(dependant.key) in managed:
                     continue
                 name = dependant.key.split(":", 1)[1]
                 if {(fold(name), fold(target.text)), (fold(name), fold(target.table))} & acknowledged:
                     continue
+                through = [key for key in dependant.via if fold(key) != fold(target.table_key)]
+                path = f" through {' -> '.join(through)}" if through else ""
                 found.append(
-                    f"{dependant.key} uses {target.table} and is not managed. If the change of "
+                    f"{dependant.key} uses {target.table}{path} and is not managed. If the change of "
                     f'{target.text} is safe for it, add "{name} -> {target.text}" to [ack] '
                     "unmanaged_dependants in azsqlcd.toml"
                 )
@@ -659,13 +678,15 @@ class Hooks:
         return None
 
     def _dependants(self, session: Session, work: Work, recorded: State) -> tuple[list[str], list[str]]:
-        """(pre-broken, refresh set): the managed, unchanged dependants of the touched tables."""
+        """(pre-broken, refresh set): the managed, unchanged dependants of the touched tables and of
+        the changed modules, at any depth (A35). The refresh set is in dependency order."""
         managed = {fold(key): row for key, row in self._managed(recorded).items()}
         changed = {fold(key) for key in (*(c.key for c in work.module_changes), *work.drops, *work.unbinds)}
         tables = [key for key in self.touched_table_objects(work) if key.startswith("TABLE:")]
         broken: list[str] = []
         refresh: list[str] = []
-        for dependant in catalog.dependants_of(session, tables):
+        closure = catalog.dependant_closure(session, tables, [change.key for change in work.module_changes])
+        for dependant in closure.dependants:
             row = managed.get(fold(dependant.key))
             if row is None or fold(dependant.key) in changed:
                 continue
@@ -686,34 +707,49 @@ class Hooks:
         """
         recorded = state.read_state(session)
         blockers = self._blockers(session, work, config, recorded)
-        return TableFindings(tuple(blockers), tuple(self._dependants(session, work, recorded)[0]))
+        notes = self._to_check(session, work, recorded)[1]
+        return TableFindings(tuple(blockers), tuple(self._dependants(session, work, recorded)[0]), notes)
 
     def refresh_set(self, session: Session, work: Work) -> list[str]:
         """Managed, unchanged, not schema-bound views and table-valued functions on a touched
-        table that bind now, in key order (A12)."""
+        table or on a changed module, at any depth, that bind now, in dependency order (A12, A35)."""
         return self._dependants(session, work, state.read_state(session))[1]
+
+    def _to_check(self, session: Session, work: Work, recorded: State) -> tuple[list[str], tuple[str, ...]]:
+        """(keys of the dependants to check in key order, plan notes of their paths and of the depth)."""
+        tables = {fold(key): key for key in self.touched_table_objects(work) if key.startswith("TABLE:")}
+        for target in self._targets(work):  # the name before a rename, whatever the model holds
+            tables.setdefault(fold(target.table_key), target.table_key)
+        changed = [change.key for change in work.module_changes]
+        if not tables and not changed:
+            return [], ()
+        managed = {fold(key): key for key in self._managed(recorded)}
+        dropped = {fold(key) for key in work.drops}
+        closure = catalog.dependant_closure(session, list(tables.values()), changed)
+        found = sorted(
+            (managed[fold(dependant.key)], dependant.via)
+            for dependant in closure.dependants
+            if fold(dependant.key) in managed and fold(dependant.key) not in dropped
+        )
+        notes = [f"dependant through other modules: {' -> '.join((key, *via))}" for key, via in found if via]
+        if closure.capped:
+            notes.append(
+                f"the search for dependants stopped after {catalog.DEPENDANT_DEPTH} levels: modules that "
+                "are further away are not refreshed and not checked"
+            )
+        return [key for key, _ in found], tuple(notes)
 
     def dependants_to_check(self, session: Session, work: Work) -> list[str]:
         """Keys of the managed modules that the runner must check after the change (A12), in key order.
 
         Every managed module of any kind, schema-bound or not, that references a table which a
-        pending statement creates, alters, drops or renames, as sys.sql_expression_dependencies
-        holds it now. The set is read before the change: after DROP TABLE or sp_rename the old
-        name resolves to no object, and the catalog no longer tells who used it. A module that
-        the release drops is left out; one that the release changes stays in.
+        pending statement creates, alters, drops or renames, or a module that the release changes,
+        at any depth (A35), as sys.sql_expression_dependencies holds it now. The set is read
+        before the change: after DROP TABLE or sp_rename the old name resolves to no object, and
+        the catalog no longer tells who used it. A module that the release drops is left out; one
+        that the release changes stays in.
         """
-        tables = {fold(key): key for key in self.touched_table_objects(work) if key.startswith("TABLE:")}
-        for target in self._targets(work):  # the name before a rename, whatever the model holds
-            tables.setdefault(fold(target.table_key), target.table_key)
-        if not tables:
-            return []
-        managed = {fold(key): key for key in self._managed(state.read_state(session))}
-        dropped = {fold(key) for key in work.drops}
-        return sorted(
-            managed[fold(dependant.key)]
-            for dependant in catalog.dependants_of(session, list(tables.values()))
-            if fold(dependant.key) in managed and fold(dependant.key) not in dropped
-        )
+        return self._to_check(session, work, state.read_state(session))[0]
 
     def dependant_findings(self, session: Session, keys: Collection[str]) -> dict[str, list[str]]:
         """key -> what catalog.broken_references reports for the module now, sorted. Read-only.

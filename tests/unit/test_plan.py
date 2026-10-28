@@ -2528,10 +2528,14 @@ def test_the_dependants_to_check_are_read_at_plan_time_and_sealed_in_the_plan():
     assert Plan.from_json(result.to_json()) == result
     fewer = planned(b, st, table_release()[2], table_hooks=Hooks(dependants=[dependant]))
     assert fewer.plan_sha256 != result.plan_sha256
-    # without a table model, and for a release with no migration, nothing is swept
+    # without a table model, and for a release with no migration and no changed module, nothing is swept
     assert planned(b, st, table_release()[2]).dependants == ()
+    no_change = bundle(seq=7)
+    assert planned(no_change, recorded(seq=6), table_hooks=Hooks(dependants=[reader])).dependants == ()
+    # A35: a release with no migration that changes a module checks the dependants of that module
     no_migration = bundle(modules=[proc("usp_new")], seq=7)
-    assert planned(no_migration, recorded(seq=6), table_hooks=Hooks(dependants=[reader])).dependants == ()
+    found = planned(no_migration, recorded(seq=6), table_hooks=Hooks(dependants=[reader]))
+    assert found.dependants == (reader,)
 
 
 # ------------------------------------------------------------------ indexed views
