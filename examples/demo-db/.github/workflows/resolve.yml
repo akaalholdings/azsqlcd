@@ -67,4 +67,6 @@ jobs:
       confirm_database: ${{ inputs.confirm_database }}
       reason: ${{ inputs.reason }}
       force_no_readback: ${{ inputs.force_no_readback }}
+      # Managed identity: remove the `# ` below. The job then runs on the runners of the deploy identity.
       runs-on: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod"}' || '{"group":"azsql-nonprod"}' }}
+      # runs-on-deploy: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod-deploy"}' || '{"group":"azsql-nonprod-deploy"}' }}

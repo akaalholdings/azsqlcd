@@ -43,6 +43,8 @@ jobs:
   # contents write = attach plan.json and report.json to the release; id-token = plan and deploy
   # jobs, each bound to an environment; actions read = approvers of the run; issues = incident issue.
   # `gated` must equal `gated` of the environment in azsqlcd.toml.
+  # Managed identity (`auth` in azsqlcd.toml): remove the `# ` of `runs-on-deploy`. The deploy job
+  # then runs on its own runner group, and only those runners hold the deploy identity.
   dev:
     needs: release
     uses: akaalholdings/azsqlcd/.github/workflows/stage.yml@v0.2.0
@@ -57,6 +59,7 @@ jobs:
       digest: ${{ needs.release.outputs.digest }}
       gated: false
       runs-on: '{"group":"azsql-nonprod"}'
+      # runs-on-deploy: '{"group":"azsql-nonprod-deploy"}'
       check-only: ${{ contains(fromJSON('["sandbox","test","preprod","prod"]'), inputs.from_stage) }}
 
   sandbox:
@@ -73,6 +76,7 @@ jobs:
       digest: ${{ needs.release.outputs.digest }}
       gated: false
       runs-on: '{"group":"azsql-nonprod"}'
+      # runs-on-deploy: '{"group":"azsql-nonprod-deploy"}'
       check-only: ${{ contains(fromJSON('["test","preprod","prod"]'), inputs.from_stage) }}
 
   test:
@@ -89,6 +93,7 @@ jobs:
       digest: ${{ needs.release.outputs.digest }}
       gated: true
       runs-on: '{"group":"azsql-nonprod"}'
+      # runs-on-deploy: '{"group":"azsql-nonprod-deploy"}'
       check-only: ${{ contains(fromJSON('["preprod","prod"]'), inputs.from_stage) }}
 
   preprod:
@@ -105,6 +110,7 @@ jobs:
       digest: ${{ needs.release.outputs.digest }}
       gated: true
       runs-on: '{"group":"azsql-nonprod"}'
+      # runs-on-deploy: '{"group":"azsql-nonprod-deploy"}'
       check-only: ${{ inputs.from_stage == 'prod' }}
 
   prod:
@@ -121,6 +127,7 @@ jobs:
       digest: ${{ needs.release.outputs.digest }}
       gated: true
       runs-on: '{"group":"azsql-prod"}'
+      # runs-on-deploy: '{"group":"azsql-prod-deploy"}'
 
   drift:
     if: ${{ github.event_name == 'schedule' }}
