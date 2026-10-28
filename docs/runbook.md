@@ -877,8 +877,8 @@ as `differs` or `missing_here`. Refresh the environment from prod, or run
 `azsqlcd align --root . --env <env> --target <target>` in the repository (read-only). A DBA
 reviews `onboarding/<env>/align.sql` and runs it in a maintenance window; the tool never runs it.
 `align.md` lists what has no statement ("Hand-write", with the refusal code of `gen`), the
-statements that can lose data (commented out after `-- REVIEW: loses data`), and the objects that
-only the database has (never dropped). Then run `baseline` again. `docs/setup.md`, section 7, "A
+statements that can lose data or unmask a column (commented out after `-- REVIEW:`), and the
+objects that only the database has (never dropped). Then run `baseline` again. `docs/setup.md`, section 7, "A
 database that differs from the files", has the steps.
 
 ### Baseline acknowledgement file

@@ -860,6 +860,13 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   `ALTER_COLUMN_LOSSY`, and the drops) is written commented out after `-- REVIEW: loses data:`.
   No new reason code; a file that cannot be written is `EXPORT_INCOMPLETE`. The state tables are
   not read or written. Proven against fakes only (`tests/unit/test_align.py`).
+- A36. Review of align (2026-10-28). A table with no file keeps the engine names of its
+  constraints (no `sp_rename`). Section 4 has every `ALTER INDEX ... REBUILD` first (smallest
+  table first, the clustered index first in its table), then every `WITH CHECK CHECK CONSTRAINT`.
+  `ALTER COLUMN ... DROP MASKED` (`UNMASK`) is commented out after `-- REVIEW: unmasks column`.
+  A file for the name of an external table or a history table goes to "Hand-write". When only
+  "Hand-write" items differ, `align.sql` is `-- no statement: see Hand-write in align.md`, not
+  `-- nothing to align`. No new reason code.
 
 ---
 

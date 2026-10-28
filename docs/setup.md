@@ -529,19 +529,25 @@ files. It only reads the database. It never runs the script.
    It writes `onboarding/<env>/align.sql` and `onboarding/<env>/align.md` under `--out` (default:
    `--root`). Do not commit them.
 2. Read `align.md`. It gives the count of each section and each object with what differs.
-   - "To review: loses data": a dropped column, or a type that may not hold every value. The
-     statement is in `align.sql`, commented out, after a line `-- REVIEW: loses data: <why>`.
-     Remove the comment marks only when the loss is accepted.
+   - "To review": a dropped column, or a type that may not hold every value. The statement is in
+     `align.sql`, commented out, after a line `-- REVIEW: loses data: <why>`. Also a mask that
+     only the database has: after `-- REVIEW: unmasks column ...`, every reader sees the real
+     values. Remove the comment marks only when the loss or the unmask is accepted.
    - "Hand-write": a change that `gen` refuses (for example `PARTITION_CHANGE`,
      `TEMPORAL_CHANGE`, `IDENTITY_CHANGE`, `COLLATION_CHANGE`), an object that the tool cannot
-     read (`UNSUPPORTED`), or a module whose name another kind of object holds. `align.sql` has no
-     statement for it. Write it by hand, or refresh the environment from prod.
-   - "Only in the database": an object with no file. It is never dropped. Add its file, exclude
-     it in `[scope]` of `azsqlcd.toml`, or drop it by hand.
+     read (`UNSUPPORTED`), a file for the name of an external table or a history table, or a
+     module whose name another kind of object holds. `align.sql` has no statement for it. Write
+     it by hand, or refresh the environment from prod. When only these items differ, `align.sql`
+     holds `-- no statement: see Hand-write in align.md`.
+   - "Only in the database": an object with no file, and a count for each kind and schema. It is
+     never dropped, and the engine names of its constraints stay. Add its file, exclude it in
+     `[scope]` of `azsqlcd.toml`, or drop it by hand.
 3. `align.sql` runs in this order: constraint names (`sp_rename`), table-class objects, modules,
-   constraint state. The constraint state statements check every row of their table
-   (`WITH CHECK CHECK CONSTRAINT`) or build an index again (`ALTER INDEX ... REBUILD`). Each has
-   the row count of its table in a comment, smallest table first.
+   constraint state. The constraint state statements build an index again
+   (`ALTER INDEX ... REBUILD`) or check every row of their table (`WITH CHECK CHECK CONSTRAINT`).
+   Every rebuild comes first, the clustered index first in its table: a foreign key cannot be
+   enabled while the index of its key is disabled. Each statement has the row count of its table
+   in a comment, smallest table first.
 4. A DBA runs `align.sql` in a maintenance window, batch by batch.
 5. Run `baseline --report-only`, then `baseline` (or `baseline --schema <schema>`). It must pass.
    Run `align` again: on a database that equals the files it writes "nothing to align".
