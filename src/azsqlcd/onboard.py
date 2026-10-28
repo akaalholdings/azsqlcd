@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import tomllib
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -670,7 +670,7 @@ def _not_as_deployed(capture: dict[str, Any]) -> str:
 
 def _compare(
     session: Session,
-    bundle: Bundle,
+    release_files: Mapping[str, bytes],
     env: str,
     scope: Scope | None = None,
     recorded: Collection[str] = frozenset(),
@@ -684,7 +684,7 @@ def _compare(
     """
     files = {
         key: file
-        for key, file in plan.module_files(bundle.files).items()
+        for key, file in plan.module_files(release_files).items()
         if in_scope(scope, key) and fold(key) not in recorded
     }
     asked = catalog.capture_modules(session, list(files))
@@ -739,6 +739,14 @@ def _compare(
         items.append(BaselineItem(key, DIFFERS, note=note))
     items += [BaselineItem(key, ONLY_HERE) for key in every if key not in named]
     return _Compared(tuple(sorted(items, key=lambda item: item.object_key)), live_files, captures)
+
+
+def compare_modules(
+    session: Session, files: Mapping[str, bytes], env: str, scope: Scope | None
+) -> tuple[BaselineItem, ...]:
+    """The module files (path -> bytes) against the live modules, as `baseline --report-only`
+    compares them: equal, differs, only here, missing here. Read-only."""
+    return _compare(session, files, env, scope).items
 
 
 @dataclass(frozen=True)
@@ -850,7 +858,7 @@ def _table_part(found: _Tables) -> list[str]:
         f"This database against {_snapshot_path()} of the release, catalog against catalog. A baseline "
         "that writes reads each object of the table model back against the model of the release and "
         "refuses when one differs or is missing. Fix: refresh this database from the reference "
-        "database, or align it by hand; the tool writes no alignment DDL.\n",
+        "database, or let `azsqlcd align` write the script that a DBA reviews and runs.\n",
         _table(
             ("Status", "Objects", "Meaning"),
             [
@@ -1035,7 +1043,7 @@ def baseline(
         recorded = _bound_state(session, config, env)
         baselined = schema is None and any(step.kind == "baseline" for step in recorded.steps)
         held = _held(recorded) if schema is not None else frozenset()
-        compared = _compare(session, bundle, env, scope, held)
+        compared = _compare(session, bundle.files, env, scope, held)
         return result(compared, baselined, None, _compare_tables(session, bundle, table_hooks, scope, held))
 
     done: list[tuple[_Compared, bool, _Tables]] = []
@@ -1069,7 +1077,7 @@ def baseline(
                 "since is drift (azsqlcd drift, azsqlcd resolve --accept-drift); a module that the tool "
                 "does not manage is adopted with azsqlcd resolve --adopt-module",
             )
-        compared = _Compared((), {}, {}) if tables_only else _compare(session, bundle, env, scope, held)
+        compared = _Compared((), {}, {}) if tables_only else _compare(session, bundle.files, env, scope, held)
         differing = [item.object_key for item in compared.items if item.status == DIFFERS]
         unacknowledged = [key for key in differing if key not in acknowledged]
         if unacknowledged:

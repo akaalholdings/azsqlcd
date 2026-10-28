@@ -41,6 +41,7 @@ from urllib.parse import quote
 
 from azsqlcd import (
     __version__,
+    align,
     catalog,
     chain,
     gen,
@@ -84,7 +85,7 @@ _REASON_CODE = re.compile(r"[A-Z][A-Z0-9_]*")
 _MARKUP = re.compile(r"([\\`*\[\]~|])")
 _URL_SAFE = "/:?#@!$&'*+,;=%"  # not ( ) < > [ ] and space: they would end the address
 # The commands that open a session: each call of one writes a triage log.
-_DATABASE_COMMANDS = frozenset({"plan", "deploy", "drift", "export", "baseline", "resolve"})
+_DATABASE_COMMANDS = frozenset({"plan", "deploy", "drift", "export", "baseline", "resolve", "align"})
 # Their --out holds plan.json and report.json, so the log goes to <out>/logs beside them. The --out
 # of export and of drift is a directory of repository files: no log goes there.
 _OUT_OF_THE_RUN = frozenset({"plan", "deploy", "baseline", "resolve"})
@@ -962,6 +963,31 @@ def _cmd_export(call: _Call) -> None:
         call.summary.append(_md(advice) + "\n")
 
 
+def _cmd_align(call: _Call) -> None:
+    args = call.args
+    config = _root_config(args.root)
+    _, target = resolve_target(config, args.env, args.target)
+    onboard.export_scope(config, args.schema)  # a schema that cannot be read is refused before a session
+    files = gen.read_working_tree(args.root)
+    with _read_session(call, config) as db:
+        plan.check_fence(catalog.fence_facts(db), target.database)
+        found = align.align(db, config, files, args.env, args.target, args.schema)
+    reports = Path(args.out if args.out is not None else args.root) / "onboarding" / args.env
+    for file, data in ((reports / "align.sql", found.sql), (reports / "align.md", found.md)):
+        try:
+            _write(file, data)
+        except OSError as error:
+            raise refused(
+                "EXPORT_INCOMPLETE",
+                f"{file} could not be written ({type(error).__name__}: {error}). The database was only read",
+                path=str(file),
+            ) from None
+    call.say(f"{found.counts}. Nothing was run in the database")
+    call.say(f"script: {reports / 'align.sql'}")
+    call.say(f"report: {reports / 'align.md'}")
+    call.summary.append(found.counts + "\n")
+
+
 def _snapshot_of(root: Path, env: str) -> dict[str, Any] | None:
     """onboarding/<env>/snapshot.json of the repository; None when there is none. The export of one
     schema adds its captures to it. ToolError SNAPSHOT_INVALID for a file that is not JSON."""
@@ -1372,6 +1398,21 @@ def parsers() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParse
     export.add_argument("--env", required=True, metavar="E", help="environment of azsqlcd.toml")
     export.add_argument("--out", required=True, metavar="DIR", help="schema/ and onboarding/<env>/ go here")
     export.add_argument("--schema", metavar="NAME", help="export this one schema: onboard schema by schema")
+
+    aligned = add(
+        "align",
+        _cmd_align,
+        root,
+        target,
+        help="read-only: write the script that makes a database equal to the files",
+    )
+    aligned.add_argument("--env", required=True, metavar="E", help="environment of azsqlcd.toml")
+    aligned.add_argument(
+        "--out", metavar="DIR", help="onboarding/<env>/align.sql and align.md go here (default: --root)"
+    )
+    aligned.add_argument(
+        "--schema", metavar="NAME", help="align this one schema, as export --schema reads it"
+    )
 
     baseline = add("baseline", _cmd_baseline, bundle, target, help="record an existing database")
     baseline.add_argument(

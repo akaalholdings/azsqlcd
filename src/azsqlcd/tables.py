@@ -365,6 +365,16 @@ def _name_drift(
     return seen, sorted(found, key=lambda difference: difference.property)
 
 
+def declared_names(
+    live: ModelObject, declared: ModelObject, engine_named: Iterable[SystemNamed]
+) -> list[tuple[SystemNamed, str]]:
+    """Each engine-named constraint of the live object (as read_model gives it) that the declared
+    object holds in the same shape, with the name that the declared object gives it."""
+    items = list(engine_named)
+    wanted = _aligned(live, declared, [item.fixed_name for item in items], lambda: None)[2]
+    return [(item, wanted[item.fixed_name]) for item in items if item.fixed_name in wanted]
+
+
 def rename_script(engine_named: Iterable[SystemNamed]) -> str:
     """rename-constraints.sql for these constraints: EXEC sys.sp_rename only. '' when there is none."""
     return catalog_tables.rename_constraints_sql(engine_named)
@@ -967,12 +977,8 @@ class Hooks:
             declared, live, items = self.model.get(key), found.model.get(key), by_table.get(fold(key))
             if declared is None or live is None or not items:
                 continue
-            wanted = _aligned(live, declared, [item.fixed_name for item in items], lambda: None)[2]
-            renames += [
-                replace(item, fixed_name=wanted[item.fixed_name])
-                for item in items
-                if item.fixed_name in wanted
-            ]
+            found_names = declared_names(live, declared, items)
+            renames += [replace(item, fixed_name=name) for item, name in found_names]
         return tuple(renames)
 
 
