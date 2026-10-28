@@ -1,0 +1,2 @@
+# each name holds the name of the other product, and a view that no pattern matches: no object is in two products
+# near-miss: PRODUCT_OVERLAP

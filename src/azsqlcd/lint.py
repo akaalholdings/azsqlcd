@@ -109,6 +109,7 @@ CODES: dict[str, str] = {
     "EXA001": WARNING,
     "MODULE_DUPLICATE": ERROR,
     "OUT_OF_SCOPE": ERROR,  # an object file for an object that [scope] of azsqlcd.toml does not manage
+    "PRODUCT_OVERLAP": ERROR,  # an object file that the patterns of two [products.<name>] match
     "DIR001": ERROR,
     "DIR002": WARNING,
     "TMB002": ERROR,
@@ -1923,6 +1924,28 @@ def _scope_findings(files: Mapping[str, bytes], parsed: _Parsed, scope: config.S
     return out
 
 
+def _product_findings(
+    files: Mapping[str, bytes], parsed: _Parsed, cfg: config.Config | None
+) -> list[Finding]:
+    """PRODUCT_OVERLAP: an object file whose object two products match. An object belongs to at
+    most one product: its changes are held or sent by that product only."""
+    out: list[Finding] = []
+    module_keys = {m.path: m.key for m in parsed.modules}
+    found = () if cfg is None else cfg.products
+    for path in sorted(files) if found else ():
+        for key in _file_keys(path, module_keys):
+            _, schema, name = names.parse_object_key(key)
+            both = [p.name for p in found if schema is not None and p.matches(schema, name)]
+            if len(both) > 1:
+                message = (
+                    f"{key} matches the objects of the products {' and '.join(both)} in {_CONFIG_PATH}. "
+                    "An object belongs to one product at most: change the patterns of one of them"
+                )
+                out.append(_finding("PRODUCT_OVERLAP", path, 1, message))
+                break
+    return out
+
+
 def lint_repo(
     files: Mapping[str, bytes],
     *,
@@ -1948,6 +1971,7 @@ def lint_repo(
         out.append(_finding("CONFIG_INVALID", _CONFIG_PATH, 1, problem))
     data_batches = found is not None and found.project.data_batches
     out += _scope_findings(files, parsed, None if found is None else found.scope)
+    out += _product_findings(files, parsed, found)
     for path in files:
         out += secret_findings(path, files[path])
     out += _path_findings(files, table_file_check)

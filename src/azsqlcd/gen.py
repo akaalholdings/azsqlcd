@@ -19,7 +19,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from azsqlcd import chain, config, diff, emit, lex, lint, modules, names, release, replay
+from azsqlcd import chain, config, diff, emit, lex, lint, modules, names, products, release, replay
 from azsqlcd.errors import ToolError, refused
 from azsqlcd.lint import ERROR, WARNING, Finding
 from azsqlcd.model import (
@@ -443,6 +443,28 @@ def _new_entries(base: chain.Chain, head: chain.Chain) -> list[chain.ChainEntry]
     """The chain lines that head adds, in effective order."""
     merged = {entry.file for entry in base.entries}
     return [entry for entry in chain.effective_order(head) if entry.file not in merged]
+
+
+def _mixed_holds(
+    base_files: Mapping[str, bytes], head_files: Mapping[str, bytes], cfg: config.Config
+) -> list[Finding]:
+    """MIXED_HOLD: a new migration that touches objects of a product with promote_to and other
+    objects. A held migration is held as a whole. A chain or a file that does not read is
+    reported by lint."""
+    try:
+        new = _new_entries(_chain(base_files), _chain(head_files))
+    except ToolError:
+        return []
+    out: list[Finding] = []
+    for entry in new:
+        try:
+            migration = _read_migration(head_files, entry.file)
+        except ToolError:
+            continue
+        why = products.mixed_hold(cfg, migration)
+        if why is not None:
+            out.append(Finding("MIXED_HOLD", ERROR, f"migrations/{entry.file}", 1, why))
+    return out
 
 
 def _changes_model(entry: chain.ChainEntry) -> bool:
@@ -1278,7 +1300,11 @@ def generate(root: release.StrPath, base_ref: str, name: str, renames: Sequence[
     stem = f"{max(map(_number, [*on_disk, *listed]), default=0) + 1:04d}__{name}"
     text = f"{lex.DIRECTIVE_PREFIX}migration {stem}\n{lex.DIRECTIVE_PREFIX}mode tx\n{body}"
     file = f"{stem}.sql"
-    chain.parse_migration(text, file)  # the generator reads its own output before it returns it
+    written = chain.parse_migration(text, file)  # the generator reads its own output before it returns it
+    cfg = _config(head_files)
+    mixed = products.mixed_hold(cfg, written) if cfg.products else None
+    if mixed is not None:
+        raise refused("MIXED_HOLD", f"gen writes no migration: {mixed}", file=file)
     entry = chain.ChainEntry(file, chain.file_sha256(text.encode("utf-8")), "tx")
     sum_text = chain.format_sum(replace(head_chain, entries=(*head_chain.entries, entry)))
     hints = tuple(
@@ -1901,6 +1927,8 @@ def verify(root: release.StrPath, base_sha: str) -> list[Finding]:
     except ToolError as e:
         out.append(_error_finding(e))
         return done()
+    if cfg is not None and cfg.products:
+        out += _mixed_holds(base_files, head_files, cfg)
     if cfg is not None and not table_model:
         out.append(_no_proof())
     elif cfg is not None:

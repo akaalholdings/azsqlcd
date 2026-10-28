@@ -1,0 +1,2 @@
+# a table that the patterns of two products match; the other objects are in one product each
+PRODUCT_OVERLAP schema/tables/sales.BalanceLine.sql:1

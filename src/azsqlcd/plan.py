@@ -25,13 +25,14 @@ from itertools import batched
 from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
 from urllib.parse import quote
 
-from azsqlcd import catalog, catalog_tables, chain, lex, modules, names, release, set_aside, state
+from azsqlcd import catalog, catalog_tables, chain, lex, modules, names, products, release, set_aside, state
 from azsqlcd.catalog import Difference, FenceFacts
 from azsqlcd.chain import Chain, ChainEntry, Migration
 from azsqlcd.config import Config, Scope, in_scope, resolve_target
 from azsqlcd.errors import ToolError, locked, refused
 from azsqlcd.model import Model, fold
 from azsqlcd.modules import ModuleFile
+from azsqlcd.products import Hold
 from azsqlcd.release import Bundle, Manifest
 from azsqlcd.session import Session
 from azsqlcd.set_aside import Aside
@@ -1005,6 +1006,7 @@ def pending_work(
     module_chunk: int,
     aside: Aside = set_aside.NOTHING,
     model: Model | None = None,
+    hold: Hold | None = None,
 ) -> Work:
     """What a deploy of this release does to a database with this recorded state. Pure.
 
@@ -1021,8 +1023,12 @@ def pending_work(
     planned; what runs must be independent of it (SET_ASIDE_DEPENDENCY), and the pending migrations
     of earlier releases run with this one in place of CATCHUP_REQUIRED. set_aside.NOTHING: as before.
     model: the head model, when tables are modelled; the independence check follows a rename with it.
+    hold: the holds of the environment ([products], products.hold). The migrations of a held product
+    are set aside (reason held); its module changes and drops are not sent. None: as before.
     """
     _refuse_unresolved(recorded)
+    if hold is not None:
+        aside = hold.merge(aside)
     files, manifest = bundle.files, bundle.manifest
     seq, recorded_seq = manifest.release_seq, recorded.recorded_release_seq
     ch = (
@@ -1105,6 +1111,11 @@ def pending_work(
             objects=orphans,
         )
     need = _module_changes(in_release, managed)
+    held_modules: list[str] = []
+    if hold is not None:
+        held_modules = [key for key in need if hold.holds(key)]
+        held_modules += [key for key in tombstones if key in managed and hold.holds(key)]
+        need = {key: change for key, change in need.items() if key not in held_modules}
     aside_notes: list[str] = []
     held_migrations = tuple(_read_migration(files, entry) for entry in held)
     if held:
@@ -1115,7 +1126,12 @@ def pending_work(
             [in_release[key] for key in need],
             model,
         )
-    drops = [key for key in tombstones if key in managed]  # E5: recorded as managed and tombstoned
+    # E5: recorded as managed and tombstoned
+    drops = [key for key in tombstones if key in managed and key not in held_modules]
+    if hold is not None:
+        absent = [key for key in held_modules if key not in managed]
+        products.check_held_modules(hold, pending, [in_release[key] for key in need], absent)
+        aside_notes += hold.notes(pending, [entry.file for entry in held], [*need, *drops], held_modules)
 
     nontx = next((migration for migration in pending if migration.mode == "nontx"), None)
     first_converge = (
@@ -1594,8 +1610,10 @@ def compute_plan(
         ]
 
     aside = set_aside.read(session, config, recorded)
-    model = table_hooks.model if table_hooks is not None and aside.active else None
-    work = pending_work(bundle, recorded, config.project.module_chunk, aside, model)
+    hold = products.hold(config, env, bundle.files) if config.products else None
+    held_here = aside.active or (hold is not None and hold.held_migrations)
+    model = table_hooks.model if table_hooks is not None and held_here else None
+    work = pending_work(bundle, recorded, config.project.module_chunk, aside, model, hold)
     manifest = bundle.manifest
     recorded_sha = recorded.recorded_git_sha
     repo = repo_url.rstrip("/") if repo_url else None
@@ -1702,6 +1720,12 @@ def compute_plan(
             notes.append("azsqlcd.toml has table_model = true, and this run has no table model")
     else:
         unrecorded = table_hooks.unrecorded_objects(work, recorded)
+        if hold is not None:
+            # an object of a held product is not expected here: its migrations are held, and a
+            # held migration creates what it creates when it runs
+            held_work = replace(work, pending=(*work.pending, *hold.held_migrations.values()))
+            created_later = set(unrecorded) - set(table_hooks.unrecorded_objects(held_work, recorded))
+            unrecorded = [key for key in unrecorded if key not in created_later and hold.holds(key) is None]
         if unrecorded:  # Part 2 (c) 8
             # under [scope] the object enters the scope: the baseline of its schema records it
             run = (

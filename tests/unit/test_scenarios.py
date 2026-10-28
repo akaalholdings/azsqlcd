@@ -2253,3 +2253,161 @@ def test_a_parked_replacement_has_no_note_that_it_runs_late(pipe):
     planned, notes = plan_notes(pipe, fixed, "test")
     assert planned.code == 0 and any(note.startswith(f"parked: {fixed.file}") for note in notes)
     assert not any(note.startswith("late replacement:") for note in notes)
+
+
+# ------------------------------------------------------------------ products and holds ([products])
+BALANCE = Table(
+    "sales",
+    "Balance",
+    (Column("BalanceId", INT, False), Column("Amount", INT, True)),
+    (PrimaryKey("PK_Balance", True, (KeyColumn("BalanceId"),)),),
+)
+BALANCE_VIEW = (
+    "schema/views/sales.vw_Balance.sql",
+    "CREATE OR ALTER VIEW [sales].[vw_Balance] AS\nSELECT [BalanceId], [Amount] FROM [sales].[Balance];\n",
+)
+BALANCE_VIEW_KEY = names.object_key("VIEW", "sales", "vw_Balance")
+PRODUCT = """
+[products.balance]
+objects = ["sales.Balance*", "sales.vw_Balance*"]
+owners = ["@bal-owner"]
+promote_to = "{promote_to}"
+"""
+
+
+def product(pipe: Pipeline, promote_to: str) -> None:
+    """azsqlcd.toml with the product balance, which reaches the environments up to promote_to."""
+    pipe.write("azsqlcd.toml", toml() + PRODUCT.format(promote_to=promote_to))
+
+
+def balance_release(pipe: Pipeline) -> tuple[Built, str, str]:
+    """One pull request: the product balance (its table and its view, held after dev) and a shared
+    change (a note of an order), each in a migration of its own."""
+    product(pipe, "dev")
+    pipe.write_objects(BALANCE)
+    pipe.write(*BALANCE_VIEW)
+    balance = pipe.gen("balance").name
+    pipe.write_objects(ORDER_NOTE)
+    shared = pipe.gen("order_note").name
+    return pipe.merge("the product balance and a note", pipe.repo / "migrations" / shared), balance, shared
+
+
+def test_a_product_held_after_dev_reaches_sandbox_when_a_later_release_raises_its_promote_to(pipe):
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    dev, sandbox = pipe.dbs["dev"], pipe.dbs["sandbox"]
+    r1, balance, shared = balance_release(pipe)
+
+    done = pipe.promote(r1, "dev")
+    assert done.code == 0, done.err
+    assert migrations(dev)[-2:] == [(balance, "ok"), (shared, "ok")] and dev.model == r1.model
+    assert BALANCE_VIEW_KEY in texts(dev)
+
+    # sandbox comes after promote_to: the migration and the view of the product are held there
+    done = pipe.promote(r1, "sandbox")
+    assert done.code == 0, done.err
+    assert migrations(sandbox)[-1] == (shared, "ok") and balance not in dict(migrations(sandbox))
+    assert BALANCE_VIEW_KEY not in texts(sandbox) and "[sales].[Balance]" not in str(sandbox.ddl)
+    warnings = done.report["warnings"]
+    assert f'held: {balance} (product balance, promote_to = "dev")' in warnings
+    assert "products: balance (1 migration, 1 module)" in warnings
+    assert f'held in sandbox: balance (promote_to = "dev"): {balance}, {BALANCE_VIEW_KEY}' in warnings
+    assert pipe.drift(r1, "sandbox").code == 0
+
+    # r2 changes a shared table only: it deploys to sandbox past the held migration
+    pipe.write_objects(ORDER_PRIORITY)
+    r2 = pipe.release("a priority of an order", "order_priority")
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "sandbox")
+    assert done.code == 0, done.err
+    assert migrations(sandbox)[-1] == (r2.file, "ok") and balance not in dict(migrations(sandbox))
+
+    # r3 raises promote_to to test: the held migration of r1 runs first, then the view is sent
+    product(pipe, "test")
+    r3 = pipe.merge("balance reaches test")
+    assert pipe.promote(r3, "dev").code == 0
+    sent = len(sandbox.ddl)
+    done = pipe.promote(r3, "sandbox")
+    assert done.code == 0, done.err
+    assert migrations(sandbox)[-1] == (balance, "ok")
+    assert sandbox.ddl[sent:][-1] == BALANCE_VIEW[1] and "[sales].[Balance]" in sandbox.ddl[sent]
+    assert any(
+        note.startswith(f"catch-up past set-aside: {balance} came") for note in done.report["warnings"]
+    )
+    assert sandbox.model == r3.model == dev.model and texts(sandbox) == texts(dev)
+    assert pipe.drift(r3, "sandbox").code == 0
+
+
+def test_a_migration_that_mixes_a_held_product_and_shared_objects_fails_verify_and_gen(pipe):
+    first = release_1(pipe)
+    pipe.write_objects(BALANCE, ORDER_NOTE)
+    pipe.gen("balance_and_note")  # no product yet: one migration for both
+    product(pipe, "dev")
+    lint, verify = pipe.checks()
+    assert lint.code == 0, lint.out + lint.err
+    assert verify.code == 22 and "MIXED_HOLD" in verify.out and "product balance" in verify.out
+    assert first.seq >= 1
+
+    # gen refuses to write such a migration
+    pipe.delete(*[f"migrations/{p.name}" for p in (pipe.repo / "migrations").glob("*__balance_and_note.sql")])
+    pipe.write(chain.SUM_PATH, pipe.read(chain.SUM_PATH).rsplit("\n", 2)[0] + "\n")
+    generated = pipe.offline("gen", "--base", pipe.main, "--name", "balance_and_note")
+    assert (generated.code, generated.reason) == (22, "MIXED_HOLD"), generated.err
+    assert not list((pipe.repo / "migrations").glob("*__balance_and_note.sql"))
+
+
+def test_a_shared_change_that_names_a_held_object_is_refused_where_the_product_is_held(pipe):
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    r1, _, _ = balance_release(pipe)
+    assert pipe.promote(r1, "dev").code == 0 and pipe.promote(r1, "sandbox").code == 0
+    report = (
+        "schema/views/sales.vw_Report.sql",
+        "CREATE OR ALTER VIEW [sales].[vw_Report] AS\nSELECT [BalanceId] FROM [sales].[Balance];\n",
+    )
+    pipe.write(*report)
+    r2 = pipe.release("a report on balances")
+    assert pipe.promote(r2, "dev").code == 0
+    before = frozen(pipe.dbs["sandbox"])
+    refused = pipe.promote(r2, "sandbox")
+    assert (refused.code, refused.reason) == (22, "SET_ASIDE_DEPENDENCY"), refused.err
+    assert "VIEW:[sales].[vw_Report]" in refused.err and "promote_to" in refused.err
+    assert frozen(pipe.dbs["sandbox"]) == before
+
+
+def test_without_products_the_plan_and_the_state_writes_are_those_of_the_code_without_products(
+    pipe, monkeypatch
+):
+    """Strict default: the same story with the products code paths cut out (products.hold fails
+    when called) gives the same batches, plan.json files and state rows."""
+    first = release_1(pipe)
+    pipe.write_objects(ORDER_NOTE)
+    pipe.write(*FIND_NOTE)
+    second = pipe.release("order notes", "order_note")
+
+    def story() -> tuple:
+        everywhere(pipe, first, envs=("test",))
+        test = pipe.dbs["test"]
+        planned, file = pipe.plan(second, "test")
+        assert planned.code == 0, planned.err
+        assert pipe.deploy(second, "test", file).code == 0
+        return (
+            test.batches,
+            file.read_text(),
+            planned.out,
+            test.rows("run"),
+            test.rows("step"),
+            test.rows("object"),
+        )
+
+    with_feature = story()
+
+    def cut(*args, **kwargs):
+        raise AssertionError("a products code path ran without [products]")
+
+    from azsqlcd import products
+
+    monkeypatch.setattr(products, "hold", cut)
+    without = story()
+    assert with_feature == without
+    assert "products:" not in with_feature[2] and "held" not in with_feature[1]
