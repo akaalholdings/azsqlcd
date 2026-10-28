@@ -771,14 +771,16 @@ writes the rows again and holds a long lock for each build: plan the time.
 
 With `table_model = true` the plan reads the modules that depend on the release, at any depth: the
 modules that use a table that a migration changes, the modules that use a module that the release
-changes, and the modules that use those modules. A view on a view on a changed table is one of
-them.
+changes or drops, and the modules that use those modules. A view on a view on a changed table is
+one of them.
 
 - The deploy refreshes the managed, unchanged views and table-valued functions of that set after
   the changes, in dependency order: a view before the views that use it. It does not refresh a
   schema-bound module.
 - After the refresh the deploy checks every managed module of the set (21 `DEPENDANT_BROKEN`).
-- A release that changes modules only does the same for the modules that use the changed modules.
+- A release that changes or drops modules only does the same for the modules that use the changed
+  or dropped modules. A view on a dropped view fails the deploy (21 `DEPENDANT_BROKEN`, failed step
+  `refresh:<key>`).
 - The plan gives a note for each dependant that it found through other modules, with the path:
   `note: dependant through other modules: VIEW:[bal].[vw_b] -> VIEW:[bal].[vw_a] -> TABLE:[bal].[Orders]`.
 - An unmanaged module at any depth is a `TABLE_BLOCKER`. The detail line names the path. Accept it
@@ -787,7 +789,8 @@ them.
 - The search stops after 32 levels. The plan then gives a note: modules that are further away are
   not refreshed and not checked.
 
-When a view on a changed view breaks, change that view in the same pull request.
+When a module on a changed or dropped module breaks, change that module (or tombstone it) in the
+same pull request. The message of a release with no migration says so.
 
 ## 9. Upgrading the tool across repositories
 

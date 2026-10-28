@@ -374,7 +374,7 @@ session can show. The detail, the reason and the place in the source of each row
 | A6 | An equal recorded release with no extra migration is planned normally; it is not `ALREADY_PAST` | section 3 |
 | A7 | Exemption for a catch-up over a withdrawn migration that the database never applied | sections 3 and 4 |
 | A9 | First converge also needs: no drop pending, and a managed row with no source for every module to deploy | section 3 |
-| A12 | The sweep and the refresh exist only with `table_model = true`; direct dependants only | section 3 |
+| A12 | The sweep and the refresh exist only with `table_model = true`; dependants at any depth since A35 | section 3 |
 | A13 | Beyond the amendment: `IDENTITY NOT FOR REPLICATION` quarantines a table at export. A disabled trigger is exported as a normal file | section 3 |
 | A14 | A fixed table of accepted differences; names are compared case-folded first, then by their exact letters | section 3 |
 | A16 | `mark-applied` of a non-transactional step has no read-back. `mark-not-applied` proves an index only. `--rebind-environment` must equal `--env` | sections 3 and 4 |
@@ -823,8 +823,19 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   unmanaged_dependants` and `TABLE_BLOCKER` use that set. A release with no migration and a
   changed module also refreshes and checks the dependants of that module. A plan note gives the
   path of each dependant found through another module; a schema-bound blocker names the
-  schema-bound modules on it. A release whose dependants are all direct gives the plan and the SQL
-  of before. No reason code and no state column was added. Proven against fakes only.
+  schema-bound modules on it. A release whose dependants are all direct gives the plan output and
+  the statements of before; the plan sends more catalog reads. No reason code and no state column
+  was added. Proven against fakes only.
+- A36. Close of the review of A35. A module that the release drops is a root of the search too, as
+  a changed module is: the plan reads before the drop, so its name still resolves. A release that
+  only drops modules also refreshes and checks their dependants; a view on a dropped view fails
+  with 21 `DEPENDANT_BROKEN` at `refresh:<key>` (`ERROR_208`). In a cycle, the first member of the
+  cycle by key goes first; a module that only uses the cycle comes after it. When the release has
+  no migration, the `DEPENDANT_BROKEN` text says "the change of a module it uses" and tells the
+  operator to change the dependant in the same pull request; the text with a migration is
+  unchanged. `tables.Hooks` keeps the closure and the `broken_references` answer of each module
+  for one plan (the same session and the same `Work`), so a plan reads each dependant once. No
+  reason code, no state value and no state column was added.
 
 ---
 
