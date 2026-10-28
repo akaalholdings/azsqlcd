@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from azsqlcd import catalog, chain, lex, lint, modules, names, plan, release, state
+from azsqlcd import catalog, chain, lex, lint, modules, names, plan, release, set_aside, state
 from azsqlcd.catalog import Difference
 from azsqlcd.config import Config, out_of_scope, resolve_target
 from azsqlcd.errors import Exit, ToolError, failed, locked, refused, retry_safe, unknown
@@ -1674,8 +1674,9 @@ def _resolve(
 
         def with_step(run_id: int) -> list[str]:
             # The planner takes an unknown run for cleared when a later resolve step has exactly
-            # the note plan.clear_run_note(run_id) (A5). Only clear_run gives step_note. The note
-            # of every other action starts with the name of the action, so no reason text that an
+            # the note plan.clear_run_note(run_id) (A5), and a park for ended when it has exactly
+            # set_aside.unpark_note(file). Only clear_run and unpark give step_note. The note of
+            # every other action starts with the name of the action, so no reason text that an
             # operator types can be that note.
             note = step_note if step_note is not None else f"{action}: {reason}"
             step = state.insert_step(run_id=run_id, kind="resolve", status="ok", note=note)
@@ -2138,6 +2139,69 @@ def clear_run(
         reason,
         prepare,
         step_note=plan.clear_run_note(run_id),
+    )
+
+
+def unpark(
+    bundle: Bundle,
+    config: Config,
+    env: str,
+    target_id: str,
+    migration: str,
+    *,
+    confirm_database: str,
+    reason: str,
+    session_factory: SessionFactory,
+    token_provider: Credential,
+    audit: Audit,
+    tool_version: str,
+    tool_digest: str,
+    now: Callable[[], float] = time.time,
+) -> Report:
+    """resolve --unpark: end the park of a migration; the next deploy runs it at its place among the
+    pending ones. The resolve step carries set_aside.unpark_note(migration); the reason is in the
+    note of the resolve run. RESOLVE_NOT_APPLICABLE: [project] park_failed is not true, or the
+    migration is not parked in this database (never parked, unparked, applied or withdrawn).
+    """
+    job = _Job(
+        "resolve",
+        bundle,
+        config,
+        env,
+        target_id,
+        session_factory,
+        token_provider,
+        audit,
+        tool_version,
+        tool_digest,
+        now,
+    )
+
+    def prepare(session: Session, recorded: State) -> Callable[[int], list[str]]:
+        if not config.project.park_failed:
+            raise _not_applicable("[project] park_failed of azsqlcd.toml is not true: no migration is parked")
+        parked = set_aside.parked(state.read_failed_runs(session), recorded.steps).active
+        sums = bundle.files.get(chain.SUM_PATH)
+        withdrawn = sums is not None and any(
+            entry.file == migration and entry.withdrawn
+            for entry in chain.parse_sum(sums.decode("utf-8")).entries
+        )
+        applied = any(step.migration_id == migration and step.status == "ok" for step in recorded.steps)
+        if migration not in parked or withdrawn or applied:
+            raise _not_applicable(
+                f"{migration} is not parked in this database. Parked: {', '.join(sorted(parked)) or 'none'}",
+                migration=migration,
+            )
+        return lambda _: []
+
+    return _resolve(
+        job,
+        "unpark",
+        migration,
+        confirm_database,
+        reason,
+        prepare,
+        step_note=set_aside.unpark_note(migration),
     )
 
 

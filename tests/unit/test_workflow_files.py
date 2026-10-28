@@ -662,6 +662,7 @@ def test_template_dispatch_forms_offer_only_the_closed_action_lists():
         "adopt-module",
         "clear-run",
         "rebind-environment",
+        "unpark",
     ]
     onboard = triggers(load(TEMPLATE / ".github" / "workflows" / "onboard.yml"))["workflow_dispatch"][
         "inputs"

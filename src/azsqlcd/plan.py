@@ -25,7 +25,7 @@ from itertools import batched
 from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
 from urllib.parse import quote
 
-from azsqlcd import catalog, catalog_tables, chain, lex, modules, names, release, state
+from azsqlcd import catalog, catalog_tables, chain, lex, modules, names, release, set_aside, state
 from azsqlcd.catalog import Difference, FenceFacts
 from azsqlcd.chain import Chain, ChainEntry, Migration
 from azsqlcd.config import Config, Scope, in_scope, resolve_target
@@ -34,6 +34,7 @@ from azsqlcd.model import fold
 from azsqlcd.modules import ModuleFile
 from azsqlcd.release import Bundle, Manifest
 from azsqlcd.session import Session
+from azsqlcd.set_aside import Aside
 from azsqlcd.sqlerrors import ErrorClass, SqlError
 from azsqlcd.state import ObjectRow, State
 
@@ -503,7 +504,12 @@ def _diverged(problem: str, recorded_seq: int, seq: int, migration: str) -> Tool
 
 
 def _pending_entries(
-    ch: Chain, ok: dict[str, AppliedMigration], seq: int, recorded_seq: int, at_seq: int
+    ch: Chain,
+    ok: dict[str, AppliedMigration],
+    seq: int,
+    recorded_seq: int,
+    at_seq: int,
+    set_aside_here: Collection[str] = (),
 ) -> tuple[list[ChainEntry], list[str]] | None:
     """(the chain entries to apply, in effective order; notes). None: the database is past this
     release (A6).
@@ -511,6 +517,8 @@ def _pending_entries(
     ok holds the applied migrations in the order they were applied. recorded_seq is the release
     of the last ok run. at_seq is the release that the database holds: recorded_seq, or the
     higher release of a deploy that committed a unit of work and whose run did not end ok.
+    set_aside_here: the migrations that are set aside here now or were before (set_aside.Aside.known).
+    Later migrations of the chain ran past them, so such a pending one is no hole.
     """
     by_file = {entry.file: entry for entry in ch.entries}
     for entry in ch.entries:
@@ -535,9 +543,10 @@ def _pending_entries(
     # not end ok: its module text is in the database, and older text is never deployed over it);
     # or it holds this release and migrations that this release does not have
     if at_seq > seq or (other and at_seq == seq):
-        if pending:
-            problem = f"{pending[0].file} is not applied, and the database is past this release"
-            raise _diverged(problem, recorded_seq, seq, pending[0].file)
+        missing = [entry for entry in pending if entry.file not in set_aside_here]
+        if missing:
+            problem = f"{missing[0].file} is not applied, and the database is past this release"
+            raise _diverged(problem, recorded_seq, seq, missing[0].file)
         # the chain of this release is a prefix of the applied list: what it does not hold came later
         if set(list(ok)[: len(known)]) != set(known):
             problem = f"{other[0]} is not in this release and was applied before a migration that is"
@@ -558,7 +567,14 @@ def _pending_entries(
     # `replaces` line is applied.)
     late = [entry for entry in pending if entry.replaces is not None and position[entry.file] < last_applied]
     hole = next(
-        (entry for entry in pending if entry.replaces is None and position[entry.file] < last_applied), None
+        (
+            entry
+            for entry in pending
+            if entry.replaces is None
+            and entry.file not in set_aside_here
+            and position[entry.file] < last_applied
+        ),
+        None,
     )
     if hole is not None:
         problem = f"{hole.file} is not applied, and a later migration of the chain is"
@@ -572,6 +588,33 @@ def _pending_entries(
         for entry in late
     ]
     return pending, notes
+
+
+def _added_in(entry: ChainEntry, manifest: Manifest) -> int:
+    release_seq = manifest.chain_added_in.get(entry.file)
+    if release_seq is None or not 1 <= release_seq <= manifest.release_seq:
+        raise refused(
+            "BUNDLE_INVALID",
+            f"the manifest does not name the release that added {entry.file} to the chain",
+            migration=entry.file,
+        )
+    return release_seq
+
+
+def _catch_up_past(
+    pending: Sequence[ChainEntry], held: Sequence[ChainEntry], manifest: Manifest
+) -> list[str]:
+    """In place of A7 where migrations are set aside: the pending migrations of earlier releases
+    run with this release, in chain order. Returns the note for the approver."""
+    carried = [entry.file for entry in pending if _added_in(entry, manifest) != manifest.release_seq]
+    if not carried:
+        return []
+    past = ", ".join(entry.file for entry in held) or "none now"
+    return [
+        f"catch-up past set-aside: {', '.join(carried)} came with earlier releases and run with "
+        f"r{manifest.release_seq}, in chain order, because this environment sets migrations aside or "
+        f"did (set aside now: {past})"
+    ]
 
 
 def _refuse_catch_up(
@@ -598,14 +641,7 @@ def _refuse_catch_up(
     """
 
     def added_in(entry: ChainEntry) -> int:
-        release_seq = manifest.chain_added_in.get(entry.file)
-        if release_seq is None or not 1 <= release_seq <= manifest.release_seq:
-            raise refused(
-                "BUNDLE_INVALID",
-                f"the manifest does not name the release that added {entry.file} to the chain",
-                migration=entry.file,
-            )
-        return release_seq
+        return _added_in(entry, manifest)
 
     added = {entry.file: added_in(entry) for entry in pending}
     carried = sorted(file for file, release_seq in added.items() if release_seq != manifest.release_seq)
@@ -951,7 +987,9 @@ def _readback(keys: Collection[str], all_managed: bool = False) -> Step:
     return Step(id="readback", kind="readback", keys=tuple(sorted(keys)), all_managed=all_managed)
 
 
-def pending_work(bundle: Bundle, recorded: State, module_chunk: int) -> Work:
+def pending_work(
+    bundle: Bundle, recorded: State, module_chunk: int, aside: Aside = set_aside.NOTHING
+) -> Work:
     """What a deploy of this release does to a database with this recorded state. Pure.
 
     Refused (nothing is planned): STEP_UNRESOLVED, RUN_UNKNOWN (A5), BASELINE_REQUIRED,
@@ -962,6 +1000,10 @@ def pending_work(bundle: Bundle, recorded: State, module_chunk: int) -> Work:
     Two cases are planned with a note in Work.warnings and are not refusals: the first deploy to a
     database with no record (the whole chain in one unit, A7), and a replacement of a withdrawn
     migration that is merged after later migrations (it runs after them).
+
+    aside: the set-aside migrations of the database (set_aside.read). A set-aside one is not
+    planned; what runs must be independent of it (SET_ASIDE_DEPENDENCY), and the pending migrations
+    of earlier releases run with this one in place of CATCHUP_REQUIRED. set_aside.NOTHING: as before.
     """
     _refuse_unresolved(recorded)
     files, manifest = bundle.files, bundle.manifest
@@ -984,10 +1026,12 @@ def pending_work(bundle: Bundle, recorded: State, module_chunk: int) -> Work:
     # the release that the database holds: a deploy that committed a unit of work and whose run
     # did not end ok (RUN_NOT_CLOSED, a session lost at COMMIT) left its release here (A6)
     at_seq = max(recorded_seq, recorded.committed_release_seq)
-    position = _pending_entries(ch, applied_ok, seq, recorded_seq, at_seq)
+    position = _pending_entries(ch, applied_ok, seq, recorded_seq, at_seq, aside.known)
     if position is None:
         return Work(outcome=ALREADY_PAST, applied=applied)
     entries, order_notes = position
+    held = [entry for entry in entries if entry.file in aside.active]
+    entries = [entry for entry in entries if entry.file not in aside.active]
     withdrawn_unapplied = [entry for entry in ch.entries if entry.withdrawn and entry.file not in applied_ok]
     # A7, the first deploy. "Release by release" needs a release to start from. A database with no
     # recorded release, no deploy that committed, no migration step of any status and no baseline
@@ -1008,7 +1052,10 @@ def pending_work(bundle: Bundle, recorded: State, module_chunk: int) -> Work:
         and not deployed
         and not any(step.kind == "baseline" for step in recorded.steps)
     )
-    catch_up_notes = _refuse_catch_up(entries, withdrawn_unapplied, recorded_seq, manifest, first_deploy)
+    if not first_deploy and (held or any(entry.file in aside.released for entry in entries)):
+        catch_up_notes = _catch_up_past(entries, held, manifest)
+    else:
+        catch_up_notes = _refuse_catch_up(entries, withdrawn_unapplied, recorded_seq, manifest, first_deploy)
     pending = tuple(_read_migration(files, entry) for entry in entries)
 
     in_release = module_files(files)
@@ -1041,6 +1088,14 @@ def pending_work(bundle: Bundle, recorded: State, module_chunk: int) -> Work:
             objects=orphans,
         )
     need = _module_changes(in_release, managed)
+    aside_notes: list[str] = []
+    if held:
+        aside_notes = [aside.active[entry.file].note for entry in held]
+        aside_notes += set_aside.check(
+            pending,
+            [(aside.active[entry.file], _read_migration(files, entry)) for entry in held],
+            [in_release[key] for key in need],
+        )
     drops = [key for key in tombstones if key in managed]  # E5: recorded as managed and tombstoned
 
     nontx = next((migration for migration in pending if migration.mode == "nontx"), None)
@@ -1125,7 +1180,7 @@ def pending_work(bundle: Bundle, recorded: State, module_chunk: int) -> Work:
         first_converge=first_converge,
         units=units,
         destructive=tuple(destructive),
-        warnings=(*catch_up_notes, *order_notes, *warnings),
+        warnings=(*catch_up_notes, *order_notes, *aside_notes, *warnings),
     )
 
 
@@ -1514,7 +1569,9 @@ def compute_plan(
             if run.status == "running"
         ]
 
-    work = pending_work(bundle, recorded, config.project.module_chunk)
+    work = pending_work(
+        bundle, recorded, config.project.module_chunk, set_aside.read(session, config, recorded)
+    )
     manifest = bundle.manifest
     recorded_sha = recorded.recorded_git_sha
     repo = repo_url.rstrip("/") if repo_url else None

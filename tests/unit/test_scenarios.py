@@ -1838,3 +1838,200 @@ def test_a_merged_migration_that_no_engine_takes_is_withdrawn_and_the_repository
     assert (lint.code, verify.code) == (0, 0), lint.out + lint.err + verify.out + verify.err
     pipe.push("a later pull request")
     pipe.build()
+
+
+# ------------------------------------------------------------------ parking ([project] park_failed)
+ORDER_RANK = with_columns(ORDER, Column("Rank", TINY, False))
+CUSTOMER_EMAIL = with_columns(CUSTOMER, Column("Email", TypeRef("nvarchar", length=200), True))
+CUSTOMER_PHONE = with_columns(CUSTOMER_EMAIL, Column("Phone", TypeRef("nvarchar", length=30), True))
+NO_RANK = NOT_EMPTY.replace("'Region'", "'Rank'").replace("'Customer'", "'Order'")
+
+
+def parking(pipe: Pipeline, on: bool | None) -> None:
+    """azsqlcd.toml with park_failed = on; None: without the key, as the pipeline wrote it."""
+    if on is None:
+        return
+    pipe.write(
+        "azsqlcd.toml",
+        toml().replace("table_model = true", f"table_model = true\npark_failed = {str(on).lower()}"),
+    )
+    pipe.push("parking of failed migrations")
+
+
+def two_migrations(pipe: Pipeline) -> tuple[Built, str, str]:
+    """One pull request with two migrations: M1 (an email of a customer, fine everywhere) and M2 (a
+    NOT NULL rank of an order, with no default: it fails on a table with rows)."""
+    pipe.write_objects(CUSTOMER_EMAIL)
+    m1 = pipe.gen("customer_email").name
+    pipe.write_objects(ORDER_RANK)
+    m2 = pipe.gen("order_rank").name
+    return pipe.merge("an email and a rank", pipe.repo / "migrations" / m2), m1, m2
+
+
+def plan_notes(pipe: Pipeline, built: Built, env: str) -> tuple[Outcome, list[str]]:
+    planned, file = pipe.plan(built, env)
+    return planned, json.loads(file.read_text())["notes"] if planned.code == 0 else []
+
+
+def test_a_parked_migration_lets_the_releases_after_it_deploy_until_it_is_unparked(pipe):
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, m1, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+
+    # the first deploy to test fails as it does today: same exit, same reason, nothing committed
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    failed = pipe.promote(r1, "test")
+    assert (failed.code, failed.reason) == (21, "BATCH_FAILED") and failed.report["failed_step"] == f"{m2}#1"
+    run = test.rows("run")[-1]
+    assert (run["status"], run["note"]) == ("failed", "BATCH_FAILED") and test.model == first.model
+
+    # a rerun of the same release applies M1 and parks M2
+    planned, notes = plan_notes(pipe, r1, "test")
+    parked_note = f"parked: {m2} (run {run['run_id']}, BATCH_FAILED)"
+    assert planned.code == 0 and parked_note in notes and f"note: {parked_note}" in planned.out
+    again = pipe.promote(r1, "test")
+    assert again.code == 0, again.err
+    assert migrations(test)[-1] == (m1, "ok") and m2 not in dict(migrations(test))
+    assert runs(test)[-1] == ("deploy", "ok", r1.seq)
+
+    # r2 is independent of M2: it deploys to test past the parked migration
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    assert pipe.promote(r2, "dev").code == 0
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert migrations(test)[-1] == (r2.file, "ok") and parked_note in done.report["warnings"]
+
+    # r3 changes the table of M2: refused, and nothing is sent
+    pipe.write_objects(with_columns(ORDER_RANK, NOTE))
+    r3 = pipe.release("a note of an order", "order_note")
+    assert pipe.promote(r3, "dev").code == 0
+    before = frozen(test)
+    refused = pipe.promote(r3, "test")
+    assert (refused.code, refused.reason) == (22, "SET_ASIDE_DEPENDENCY")
+    assert r3.file in refused.err and m2 in refused.err and "[sales].[order]" in refused.err
+    assert f"resolve --unpark {m2}" in refused.err and frozen(test) == before
+
+    # the owner fixed the rows; the park ends and the next deploy runs M2 at its place, then M4
+    assert pipe.resolve(r3, "test", "--unpark", m2).code == 0
+    not_parked = pipe.resolve(r3, "test", "--unpark", m2)
+    assert (not_parked.code, not_parked.reason) == (22, "RESOLVE_NOT_APPLICABLE")
+    planned, notes = plan_notes(pipe, r3, "test")
+    assert planned.code == 0 and any(note.startswith(f"catch-up past set-aside: {m2} came") for note in notes)
+    done = pipe.promote(r3, "test")
+    assert done.code == 0, done.err
+    assert migrations(test)[-2:] == [(m2, "ok"), (r3.file, "ok")] and test.model == r3.model
+    assert pipe.drift(r3, "test").code == 0
+
+
+def test_a_withdrawn_parked_migration_never_runs_and_its_replacement_does(pipe):
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, m1, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901), times=None)
+    assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+    assert pipe.promote(r1, "test").code == 0  # M1 applied, M2 parked
+
+    filled = (
+        "ALTER TABLE [sales].[Order] ADD [Rank] tinyint NOT NULL CONSTRAINT [DF_Order_Rank_fill] DEFAULT (0);"
+        "\nGO\nALTER TABLE [sales].[Order] DROP CONSTRAINT [DF_Order_Rank_fill];\nGO\n"
+    )
+    replacement = pipe.replace_migration(m2, "order_rank_filled", "the rows get rank 0", filled)
+    fixed = pipe.merge("withdraw and replace the rank", replacement)
+    assert pipe.promote(fixed, "dev").code == 0
+
+    done = pipe.promote(fixed, "test")
+    assert done.code == 0, done.err
+    assert not any(note.startswith("parked:") for note in done.report["warnings"])
+    assert migrations(test)[-1] == (fixed.file, "ok") and m2 not in dict(migrations(test))
+    assert test.model == fixed.model
+    gone = pipe.resolve(fixed, "test", "--unpark", m2)
+    assert (gone.code, gone.reason) == (22, "RESOLVE_NOT_APPLICABLE")
+
+
+def test_a_failed_nontx_migration_is_parked_after_its_step_is_resolved(pipe):
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev",))
+    dev = pipe.dbs["dev"]
+    index = index_release(pipe)
+    dev.fail_on(index.batches[0], sql_error("The fake engine could not build the index."))
+    failed = pipe.deploy(index, "dev")
+    assert (failed.code, failed.reason) == (23, "NONTX_FAILED")  # as today
+    unknown = dev.rows("run")[-1]["run_id"]
+    assert pipe.resolve(index, "dev", "--mark-not-applied", index.file).code == 0
+    assert pipe.resolve(index, "dev", "--clear-run", str(unknown)).code == 0
+
+    # the step is not applied and the run is cleared: the migration stays parked, not sent again
+    sent = len(dev.ddl)
+    done = pipe.deploy(index, "dev")
+    assert done.code == 0, done.err
+    assert (
+        dev.ddl[sent:] == []
+        and f"parked: {index.file} (run {unknown}, NONTX_FAILED)" in done.report["warnings"]
+    )
+    assert pipe.resolve(index, "dev", "--unpark", index.file).code == 0
+    assert pipe.deploy(index, "dev").code == 0 and dev.ddl[-1] == index.batches[0]
+
+
+@pytest.mark.parametrize("key", [None, False])
+def test_without_park_failed_a_failed_migration_blocks_later_releases_as_before(pipe, key):
+    parking(pipe, key)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, _, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901), times=None)
+    for _ in range(2):  # a rerun runs M2 again, and fails again
+        assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    blocked = pipe.promote(r2, "test")
+    assert (blocked.code, blocked.reason) == (
+        22,
+        "CATCHUP_REQUIRED",
+    ) and f"promote r{r1.seq} first" in blocked.err
+    assert not test.sent("azsqlcd:read_failed_runs")
+    unpark = pipe.resolve(r2, "test", "--unpark", m2)
+    assert (unpark.code, unpark.reason) == (22, "RESOLVE_NOT_APPLICABLE")
+
+
+def test_with_park_failed_off_the_plan_and_the_state_writes_are_those_of_the_code_without_parking(
+    pipe, monkeypatch
+):
+    """Strict default: the same story with the set-aside code paths cut out (set_aside.read and
+    set_aside.check fail when called) gives the same batches, plan.json files and state rows."""
+    parking(pipe, False)
+    first = release_1(pipe)
+    r1, _, _ = two_migrations(pipe)
+
+    def story() -> tuple:
+        everywhere(pipe, first, envs=("test",))
+        test = pipe.dbs["test"]
+        test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+        plans = []
+        for _ in range(2):
+            planned, file = pipe.plan(r1, "test")
+            plans.append(file.read_text())
+            pipe.deploy(r1, "test", file)
+        return test.batches, plans, test.rows("run"), test.rows("step"), test.rows("object")
+
+    with_feature = story()
+
+    def cut(*args, **kwargs):
+        raise AssertionError("a set-aside code path ran with park_failed = false")
+
+    from azsqlcd import plan, set_aside
+
+    monkeypatch.setattr(set_aside, "check", cut)
+    monkeypatch.setattr(plan.set_aside, "read", lambda *args: set_aside.NOTHING)
+    without = story()
+    assert with_feature == without
+    assert not any("read_failed_runs" in batch for batch in with_feature[0])

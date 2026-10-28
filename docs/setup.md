@@ -708,6 +708,44 @@ test, so a migration that failed in test was usually applied in dev: add the rep
 pull request of the withdrawal. The message of `CATCHUP_REQUIRED` says the same. The later migrations must not need the withdrawn one:
 `docs/known-gaps.md`, section 13.
 
+### Park a migration that fails
+
+Opt-in. Without the key, a migration that fails in an environment stays pending there, and every
+later release to that environment is refused with `CATCHUP_REQUIRED` until the migration is
+withdrawn. With the key, the later releases deploy past it:
+
+```toml
+[project]
+park_failed = true   # default false
+```
+
+What the tool does:
+
+1. A deploy fails on a batch of migration M (a transaction rolled back on M: 21 `BATCH_FAILED` or
+   21 `GOVERNANCE_LIMIT`; or a non-transactional batch of M: 23 `NONTX_FAILED`). The run ends as
+   it does without the key: the same exit code and reason code.
+2. From then on M is parked in that environment. A non-transactional M needs the two resolve
+   steps of the "Unknown run" case of `docs/runbook.md` first (`--mark-not-applied`, then
+   `--clear-run`). A lost connection, a lock timeout or a deadlock parks nothing.
+3. The next deploy, of the same release or of a later one, runs everything but M. The plan has
+   the note `parked: <file> (run <id>, <reason code>)`. The pending migrations of earlier
+   releases run with the release, in chain order (note `catch-up past set-aside: ...`), in place
+   of `CATCHUP_REQUIRED`.
+4. What runs must be independent of M. A pending migration may not touch an object that M
+   touches or names, and may not name an object that M touches. A module of the release may not
+   name an object that M touches. Else the plan stops with 22 `SET_ASIDE_DEPENDENCY`. A raw or
+   data batch is compared by the names in its text (note `independence not proven for a raw
+   batch: <file>`). Only names written with their schema (`[sales].[Order]`) count.
+5. The park ends in three ways. M is applied (for example after `resolve --mark-applied`). M is
+   withdrawn by pull request: it never runs, and its replacement runs. Or an operator runs
+   `azsqlcd resolve --unpark <file>` (RESOLVE with `-f action=unpark -f subject=<file>`) after the
+   cause is fixed: the next deploy runs M at its place among the pending migrations. If M fails
+   again, it is parked again.
+
+No column and no status was added to the state tables. A park is the run row of the failed deploy
+(status `failed` or `unknown`, `failed_step` `<file>#<n>`, the reason code in `note`); an unpark is
+a `resolve` step with the note `unpark <file>`.
+
 ### Partitioned tables
 
 Not run on a database yet: `docs/known-gaps.md`, section 14.

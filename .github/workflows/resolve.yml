@@ -23,7 +23,7 @@ on:
         type: string
         required: true
       action:
-        description: mark-applied, mark-not-applied, accept-drift, adopt-module, clear-run or rebind-environment
+        description: mark-applied, mark-not-applied, accept-drift, adopt-module, clear-run, rebind-environment or unpark
         type: string
         required: true
       subject:
@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$ACTION" in
-            mark-applied|mark-not-applied|accept-drift|adopt-module|clear-run|rebind-environment) ;;
+            mark-applied|mark-not-applied|accept-drift|adopt-module|clear-run|rebind-environment|unpark) ;;
             *) echo "::error::input action is not a resolve action"; exit 1 ;;
           esac
           name='^r[0-9]+$'

@@ -296,8 +296,9 @@ and `tables.py` are not in the map of "Build contracts".
 | `state.py` | setup script; reads and write statements of schema `azsqlcd` | config, errors, names, session, sqlerrors |
 | `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts; `schema_condition`, `list_schemas` | config, errors, names, session, sqlerrors, state |
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
-| `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, sqlerrors, state |
-| `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, sqlerrors, state |
+| `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
+| `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A35) | chain, config, diff, errors, modules, names, parse, session, state |
+| `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
@@ -341,7 +342,7 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 | `export --root DIR --env E --target T --out DIR [--schema NAME]` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
 | `baseline [--report-only] --confirm-database NAME [--out DIR] [--schema NAME]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
 | `align --root DIR [--schema NAME] [--out DIR]` | `onboarding/<env>/align.sql` and `align.md` under `--out` (default `--root`); read-only (A38). Takes `--root` in place of `--bundle` and `--digest` | 0 / 22 / 24 |
-| `resolve --confirm-database NAME --reason TEXT (--mark-applied M \| --mark-not-applied M \| --accept-drift KEY \| --adopt-module KEY \| --clear-run RUN_ID \| --rebind-environment ENV) [--force-no-readback] [--out DIR]` | With `--out`: `DIR/report.json`. `--force-no-readback` is for `--mark-applied` only. `--rebind-environment` must name the environment of `--env` | 0 / 21 / 22 / 23 / 24 / 25 |
+| `resolve --confirm-database NAME --reason TEXT (--mark-applied M \| --mark-not-applied M \| --accept-drift KEY \| --adopt-module KEY \| --clear-run RUN_ID \| --rebind-environment ENV \| --unpark M) [--force-no-readback] [--out DIR]` | With `--out`: `DIR/report.json`. `--force-no-readback` is for `--mark-applied` only. `--rebind-environment` must name the environment of `--env` | 0 / 21 / 22 / 23 / 24 / 25 |
 
 Ends and outputs:
 
@@ -867,6 +868,38 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   A file for the name of an external table or a history table goes to "Hand-write". When only
   "Hand-write" items differ, `align.sql` is `-- no statement: see Hand-write in align.md`, not
   `-- nothing to align`. No new reason code.
+
+### Set-aside migrations and parking (2026-10-28)
+
+Owner problem: one migration that fails in an environment blocks every later release there
+(`CATCHUP_REQUIRED`) until it is withdrawn. `docs/setup.md`, section 7, "Park a migration that
+fails", is the procedure.
+
+- A35. Set aside. In an environment, a pending migration can be set aside for a reason. It is not
+  applied there, is never marked applied, and is no pending migration for A7. Where migrations are
+  set aside (or were, and are still pending), a release deploys in chain order its own migrations
+  and the pending migrations of earlier releases that are not set aside (note `catch-up past
+  set-aside: ...`), in place of `CATCHUP_REQUIRED`; a pending set-aside migration before an
+  applied one is no hole (`CHAIN_DIVERGED`). What runs must be independent of each set-aside
+  migration (22 `SET_ASIDE_DEPENDENCY`). One reason is built: `parked`, opt-in with
+  `[project] park_failed = true`. Without it the planner sends no extra batch and plans as before.
+- Module `set_aside.py`. Later reasons plug in at `set_aside.REASONS`, `set_aside.WAY_OUT` and
+  `set_aside.read` (it returns an `Aside`: `active` migration id to `SetAside`, and `released`).
+  `plan.pending_work(..., aside)` and `set_aside.check` are the same for every reason.
+- Facts of a park, from rows that exist: `state.read_failed_runs` (one SELECT of the deploy runs
+  with the status `failed` or `unknown` and a `failed_step`; sent only when `park_failed` is
+  true). A run parks the migration of its failed step `<file>#<n>` when its note (the reason code)
+  is `BATCH_FAILED`, `GOVERNANCE_LIMIT` or `NONTX_FAILED`. `resolve --unpark <file>` writes a
+  resolve step with the note `unpark <file>` (`set_aside.unpark_note`), as `clear-run` does; a
+  later failure parks again.
+- Independence (`set_aside.check`): a model batch touches what `diff.touched_objects` gives for
+  its operation; a data or raw batch, and a model batch that cannot be followed without the
+  model, touch every name of their text. Names come from the token scan of modules
+  (`modules.named_objects`), names written with their schema only.
+- New reason code `SET_ASIDE_DEPENDENCY` (22). New plan finding `parked`. `resolve --unpark`
+  answers `RESOLVE_NOT_APPLICABLE` for a migration that is not parked.
+- Not done: `drift` lists no pending migrations, so it shows no parked one. Proven against fakes
+  only.
 
 ---
 

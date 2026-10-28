@@ -79,6 +79,7 @@ _RESOLVE_ACTIONS = (
     "adopt_module",
     "clear_run",
     "rebind_environment",
+    "unpark",
 )
 _SUMMARY_BYTES = 900_000  # GitHub drops a step summary above 1 MiB: the approver would see nothing
 _REASON_CODE = re.compile(r"[A-Z][A-Z0-9_]*")
@@ -1112,6 +1113,7 @@ def _cmd_resolve(call: _Call) -> None:
         "adopt_module": lambda: runner.adopt_module(*where, subject, **common),
         "clear_run": lambda: runner.clear_run(*where, subject, **common),
         "rebind_environment": lambda: runner.rebind_environment(*where, **common),
+        "unpark": lambda: runner.unpark(*where, subject, **common),
     }
     _run(call, out, bodies[action])
 
@@ -1452,6 +1454,11 @@ def parsers() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParse
         "--rebind-environment",
         metavar="ENV",
         help="bind the database to the environment of --env (after a copy from another environment)",
+    )
+    action.add_argument(
+        "--unpark",
+        metavar="MIGRATION",
+        help="end the park of a migration ([project] park_failed); the next deploy runs it again",
     )
     resolve.add_argument("--force-no-readback", action="store_true", help="--mark-applied only")
     resolve.add_argument("--out", metavar="DIR", help="directory for report.json")
