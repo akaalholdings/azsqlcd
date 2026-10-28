@@ -726,6 +726,10 @@ Special cases:
 
 - The engine refuses the statement because the name is taken. Another object of the schema has
   the name of the file. A DBA renames or drops that object first.
+- The release that stopped renames the constraint in its file. The statement gives the recorded
+  name, which is the name before the release, not the new name of the file. Run it as it is: the
+  pending migration drops or renames the constraint by the recorded name. Do not run
+  `mark-applied` after the rename.
 - After the rename, `drift` reports `constraint [<other name>]` with no live hash for the same
   table. Version 0.1.0 recorded an engine-named constraint under a name that no file has
   (`resolve` with `mark-applied` or `accept-drift`). The database has the name of the file now:

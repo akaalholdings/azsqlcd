@@ -761,7 +761,8 @@ writes the rows again and holds a long lock for each build: plan the time.
   The drift report shows the property `constraint_name [<name of the file>] (<kind>, live name
   [<name in the database>])` and one line `rename <table key> EXEC sys.sp_rename ...;`. A plan that
   stops for it prints the same line. Do not drop the constraint and do not use `accept-drift`. A
-  DBA reviews the statement and runs it, then the drift report is clean again.
+  DBA reviews the statement and runs it, then the drift report is clean again. The statement
+  gives the recorded name also when the next release renames the constraint in its file.
   `docs/runbook.md`, "A constraint with a name that the engine made", has the special cases.
 - Approvers: open the compare link in the plan summary before you approve. Reject approvals of
   older releases.

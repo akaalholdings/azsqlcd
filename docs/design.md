@@ -799,14 +799,17 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   plan and the runner have the rule from one function. An engine-named constraint is the recorded
   constraint with the same capture value (for a key on a scheme, the place is a part of it); the
   fixed name of the reader does not decide it, so two CHECK constraints do not swap. The
-  read-back records such a constraint under the name of its file. The way out is the
-  `sp_rename` statement of `catalog_tables.rename_constraints_sql`: `drift` prints it as a
-  `rename` line, and a plan refusal has the same lines in its detail `renames`, which the command
-  line prints. No message holds the statement: a message goes into the triage log. A table
-  outside `[scope]` is not read, so it gives no such difference. The state tables are unchanged:
-  the difference is a property and two hashes, as every drift item. No new reason code;
-  `docs/runbook.md`, "A constraint with a name that the engine made", has the way out. Proven
-  against fakes only.
+  read-back records such a constraint under the name of its file. The rename gives the recorded
+  name. Only for a record of v0.1.0, which holds a fixed name, it gives the name of the file of
+  the release. It does not do that when a migration that the database did not apply drops or
+  renames the recorded name, or when the database applied a migration that the release does not
+  hold. The way out is the `sp_rename` statement of `catalog_tables.rename_constraints_sql`:
+  `drift` prints it as a `rename` line, and a plan refusal has the same lines in its detail
+  `renames`, which the command line prints. No message holds the statement: a message goes into
+  the triage log. A table outside `[scope]` is not read, so it gives no such difference. The state
+  tables are unchanged: the difference is a property and two hashes, as every drift item. No new
+  reason code; `docs/runbook.md`, "A constraint with a name that the engine made", has the way
+  out. Proven against fakes only.
 
 ---
 
