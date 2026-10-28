@@ -9,6 +9,7 @@ from azsqlcd.config import (
     DEFAULT_MODULE_CHUNK,
     DEFAULT_SERVER_SUFFIXES,
     ENVIRONMENTS,
+    Product,
     Scope,
     Target,
     in_scope,
@@ -770,3 +771,66 @@ def test_park_failed_is_off_unless_the_project_switches_it_on():
     for value in ('"true"', "1", '"yes"'):
         bad = VALID.replace("table_model = false", f"table_model = false\npark_failed = {value}")
         assert refused_key(bad) == "project.park_failed"
+
+
+# ------------------------------------------------------------------ [products]
+PRODUCTS = """
+[products.balance]
+objects = ["sales.Balance*", "sales.vw_Balance"]
+owners = ["@bal-owner", "@sales/balance-team"]
+promote_to = "dev"
+
+[products.legacy]
+objects = ["dbo.old_*"]
+"""
+
+
+def test_without_a_products_table_the_config_has_no_product():
+    assert load_config(VALID).products == ()
+
+
+def test_the_products_tables_are_read_in_name_order_with_their_three_keys():
+    found = load_config(VALID + PRODUCTS).products
+    assert found == (
+        Product(
+            "balance", ("sales.Balance*", "sales.vw_Balance"), ("@bal-owner", "@sales/balance-team"), "dev"
+        ),
+        Product("legacy", ("dbo.old_*",), (), None),
+    )
+    balance = found[0]
+    assert balance.matches("SALES", "balance_line") and balance.matches("sales", "VW_BALANCE")
+    assert not balance.matches("sales", "vw_Balance2") and not balance.matches("dbo", "Balance")
+
+
+@pytest.mark.parametrize(
+    ("table", "key"),
+    [
+        ('[products.balance]\nobjects = ["sales.x"]\ncolour = "red"', "products.balance.colour"),
+        ("[products.balance]\nobjects = []", "products.balance.objects"),
+        ('[products.balance]\nowners = ["@x"]', "products.balance.objects"),
+        ('[products.balance]\nobjects = ["sales.x"]\nowners = []', "products.balance.owners"),
+        ('[products.balance]\nobjects = ["sales.x"]\nowners = ["bal-owner"]', "products.balance.owners[0]"),
+        ('[products.balance]\nobjects = ["sales.x"]\nowners = ["@a/b/c"]', "products.balance.owners[0]"),
+        ('[products.balance]\nobjects = ["sales.x"]\npromote_to = "staging"', "products.balance.promote_to"),
+        ('[products.balance]\nobjects = ["sales.x"]\npromote_to = ""', "products.balance.promote_to"),
+        ('[products.balance]\nobjects = ["salesx"]', "products.balance.objects[0]"),
+        ('[products.balance]\nobjects = ["*"]', "products.balance.objects[0]"),
+        ('[products.balance]\nobjects = ["[sales].[x]"]', "products.balance.objects[0]"),
+        ('[products.balance]\nobjects = ["azsqlcd.x"]', "products.balance.objects[0]"),
+        ('[products.balance]\nobjects = ["sales.x", "SALES.X"]', "products.balance.objects[1]"),
+        ('[products.Balance]\nobjects = ["sales.x"]', "products.Balance"),
+        ('[products."bal ance"]\nobjects = ["sales.x"]', "products.bal ance"),
+        ('[products]\nbalance = "sales.x"', "products.balance"),
+    ],
+)
+def test_a_product_that_the_tool_cannot_use_is_refused_by_its_key_path(table, key):
+    assert refused_key(VALID + f"\n{table}\n") == key
+
+
+def test_a_product_pattern_for_a_schema_outside_the_scope_is_refused_and_one_inside_is_kept():
+    scope = '\n[scope]\nschemas = ["sales"]\n'
+    with pytest.raises(ToolError) as e:
+        load_config(VALID + scope + '\n[products.legacy]\nobjects = ["dbo.old_*"]\n')
+    assert e.value.detail["key"] == "products.legacy.objects[0]" and "never match" in e.value.message
+    kept = load_config(VALID + scope + '\n[products.balance]\nobjects = ["sales.Balance*", "*.bal_*"]\n')
+    assert kept.products[0].objects == ("sales.Balance*", "*.bal_*")

@@ -1,0 +1,186 @@
+"""Products (products.py): which product an object belongs to, where a product is held, and what
+a hold does to the set-aside facts and to the notes of a plan."""
+
+import pytest
+
+from azsqlcd import chain, products, set_aside
+from azsqlcd.config import load_config
+from azsqlcd.errors import Exit, ToolError
+from azsqlcd.modules import read_module
+
+HEAD = """
+[project]
+name = "sales"
+tenant_id = "11111111-1111-1111-1111-111111111111"
+table_model = true
+min_token_minutes = 20
+
+[identities]
+plan = "22222222-2222-2222-2222-222222222222"
+
+[env.dev]
+plan_identity = "plan"
+deploy_identity = "plan"
+drift = "report"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+targets = [{ id = "sales-dev", server = "sql-sales-dev.database.windows.net", database = "sales" }]
+"""
+PRODUCTS = """
+[products.balance]
+objects = ["sales.Balance*", "sales.vw_Balance"]
+owners = ["@bal-owner"]
+promote_to = "dev"
+
+[products.legacy]
+objects = ["dbo.old_*"]
+owners = ["@sales/legacy-team"]
+"""
+CONFIG = load_config(HEAD + PRODUCTS)
+
+
+TEXTS: dict[str, str] = {}
+
+
+def migration(file: str, *batches: str) -> chain.Migration:
+    header = f"-- azsqlcd:migration {file.removesuffix('.sql')}\n-- azsqlcd:mode tx\n"
+    TEXTS[file] = header + "\nGO\n".join(batches) + "\n"
+    return chain.parse_migration(TEXTS[file], file)
+
+
+BALANCE = migration("0002__balance.sql", "CREATE TABLE [sales].[Balance] ([BalanceId] int NOT NULL);")
+SHARED = migration("0003__order_note.sql", "ALTER TABLE [sales].[Order] ADD [Note] nvarchar(200) NULL;")
+MIXED = migration(
+    "0004__mixed.sql",
+    "ALTER TABLE [sales].[Balance] ADD [Amount] int NULL;",
+    "ALTER TABLE [sales].[Order] ADD [Rank] tinyint NULL;",
+)
+
+
+def files_of(*migrations: chain.Migration) -> dict[str, bytes]:
+    found = {f"migrations/{m.file}": TEXTS[m.file].encode() for m in migrations}
+    lines = [f"{m.file} sha256:{chain.file_sha256(found['migrations/' + m.file])} tx" for m in migrations]
+    found[chain.SUM_PATH] = ("azsqlcd-sum 1\n" + "\n".join(lines) + "\n").encode()
+    return found
+
+
+def test_an_object_belongs_to_the_first_product_that_matches_it_and_else_is_shared():
+    assert products.product_of(CONFIG, "SALES", "balance_line").name == "balance"
+    assert products.product_of_key(CONFIG, "VIEW:[sales].[vw_Balance]").name == "balance"
+    assert products.product_of(CONFIG, "sales", "Order") is None
+    assert products.product_of_key(CONFIG, "SCHEMA:[sales]") is None
+    assert products.overlapping(CONFIG, "dbo", "old_x") == ["legacy"]
+
+
+@pytest.mark.parametrize(
+    ("promote_to", "held_in"),
+    [
+        ("dev", {"sandbox", "test", "preprod", "prod", "disposable"}),
+        ("test", {"preprod", "prod", "disposable"}),
+    ],
+)
+def test_a_product_is_held_in_every_environment_after_its_promote_to(promote_to, held_in):
+    product = load_config(
+        HEAD + PRODUCTS.replace('promote_to = "dev"', f'promote_to = "{promote_to}"')
+    ).products[0]
+    for env in ("dev", "sandbox", "test", "preprod", "prod", "disposable"):
+        assert products.is_held(product, env) is (env in held_in), env
+    assert not any(products.is_held(CONFIG.products[1], env) for env in ("dev", "prod"))  # no promote_to
+
+
+def test_a_migration_that_mixes_a_held_product_with_shared_objects_is_named_and_one_that_does_not_is_not():
+    assert products.mixed_hold(CONFIG, BALANCE) is None and products.mixed_hold(CONFIG, SHARED) is None
+    why = products.mixed_hold(CONFIG, MIXED)
+    assert why is not None and "product balance" in why and "[sales].[order]" in why
+    # a product with no promote_to is never held, so a mix with it holds nothing back
+    both = migration(
+        "0005__legacy.sql",
+        "ALTER TABLE [dbo].[old_x] ADD [y] int NULL;",
+        "ALTER TABLE [sales].[Order] ADD [z] int NULL;",
+    )
+    assert products.mixed_hold(CONFIG, both) is None
+
+
+def test_without_products_there_is_no_hold():
+    assert products.hold(load_config(HEAD), "sandbox", files_of(BALANCE)) is None
+
+
+def test_a_hold_sets_aside_the_migrations_of_a_held_product_and_releases_them_where_it_is_not_held():
+    files = files_of(BALANCE, SHARED)
+    sandbox = products.hold(CONFIG, "sandbox", files)
+    assert sandbox is not None and set(sandbox.held_migrations) == {BALANCE.file}
+    merged = sandbox.merge(set_aside.NOTHING)
+    assert merged.active == {
+        BALANCE.file: set_aside.SetAside(BALANCE.file, set_aside.HELD, 'product balance, promote_to = "dev"')
+    }
+    assert merged.active[BALANCE.file].note == f'held: {BALANCE.file} (product balance, promote_to = "dev")'
+    assert (
+        sandbox.holds("VIEW:[sales].[vw_Balance]").name == "balance"
+        and sandbox.holds("TABLE:[sales].[Order]") is None
+    )
+
+    raised = load_config(HEAD + PRODUCTS.replace('promote_to = "dev"', 'promote_to = "test"'))
+    later = products.hold(raised, "sandbox", files)
+    assert later is not None and later.held_migrations == {}
+    assert later.merge(set_aside.NOTHING) == set_aside.Aside({}, frozenset({BALANCE.file}))
+    # nothing is held in the first environment, so nothing there was set aside before
+    assert products.hold(CONFIG, "dev", files).merge(set_aside.NOTHING) == set_aside.NOTHING
+
+
+def test_a_park_stays_a_park_when_the_migration_is_also_held():
+    parked = set_aside.SetAside(BALANCE.file, set_aside.PARKED, "run 4, BATCH_FAILED")
+    merged = products.hold(CONFIG, "sandbox", files_of(BALANCE)).merge(
+        set_aside.Aside({BALANCE.file: parked})
+    )
+    assert merged.active == {BALANCE.file: parked}
+
+
+def test_the_notes_count_each_product_and_list_what_is_held_here():
+    sandbox = products.hold(CONFIG, "sandbox", files_of(BALANCE, SHARED))
+    notes = sandbox.notes([SHARED], [BALANCE.file], [], ["VIEW:[sales].[vw_Balance]"])
+    assert notes == [
+        "products: balance (1 migration, 1 module)",
+        f'held in sandbox: balance (promote_to = "dev"): {BALANCE.file}, VIEW:[sales].[vw_Balance]',
+    ]
+    assert sandbox.notes([SHARED], [], ["VIEW:[sales].[vw_OpenOrders]"], []) == []
+
+
+def test_a_module_that_names_a_held_module_that_the_database_lacks_is_refused():
+    sandbox = products.hold(CONFIG, "sandbox", files_of(BALANCE))
+    user = read_module(
+        "schema/views/sales.vw_Report.sql",
+        b"CREATE OR ALTER VIEW [sales].[vw_Report] AS\nSELECT 1 AS [x] FROM [sales].[vw_Balance];\n",
+    )
+    products.check_held_modules(sandbox, [], [user], [])  # the database holds the held view
+    with pytest.raises(ToolError) as e:
+        products.check_held_modules(sandbox, [], [user], ["VIEW:[sales].[vw_Balance]"])
+    assert (e.value.exit_code, e.value.reason_code) == (Exit.REFUSED, "SET_ASIDE_DEPENDENCY")
+    assert "VIEW:[sales].[vw_Report] names VIEW:[sales].[vw_Balance]" in e.value.message
+
+
+def test_codeowners_gives_one_glob_where_a_folder_holds_only_files_of_the_product_and_else_one_line_a_file():
+    files = {
+        "schema/tables/sales.Balance.sql": b"",
+        "schema/tables/sales.BalanceLine.sql": b"",
+        "schema/tables/sales.Order.sql": b"",
+        "schema/views/sales.vw_Balance.sql": b"",
+        "schema/views/sales.vw_BalanceOld.sql": b"",  # matches no pattern: shared
+        "schema/tables/dbo.old_a.sql": b"",
+        "schema/tables/DBO.OLD_B.sql": b"",  # its product by the rule without case, not by the glob
+        "migrations/0002__balance.sql": b"",
+    }
+    assert products.object_files(CONFIG, files) == {
+        "balance": [
+            "schema/tables/sales.Balance.sql",
+            "schema/tables/sales.BalanceLine.sql",
+            "schema/views/sales.vw_Balance.sql",
+        ],
+        "legacy": ["schema/tables/DBO.OLD_B.sql", "schema/tables/dbo.old_a.sql"],
+    }
+    assert products.codeowners(CONFIG, files) == [
+        "/schema/tables/sales.Balance*.sql @bal-owner",
+        "/schema/views/sales.vw_Balance.sql @bal-owner",
+        "/schema/tables/dbo.old_*.sql @sales/legacy-team",
+        "/schema/tables/DBO.OLD_B.sql @sales/legacy-team",
+    ]

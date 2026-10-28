@@ -10,6 +10,7 @@ project.park_failed, env.<name>.gated and env.<name>.auth. A setting that decide
 do (table_model, min_token_minutes, drift, the lock limits, the identities) has no default.
 
 [scope] is optional. Without it every schema is managed, as before the table existed.
+[products.<name>] is optional. Without it no object belongs to a product and nothing is held.
 """
 
 from __future__ import annotations
@@ -73,6 +74,7 @@ _EXAMPLES = {
     "server": _EXAMPLE_TARGETS,
     "database": _EXAMPLE_TARGETS,
     "schemas": 'schemas = ["sales"]',
+    "objects": 'objects = ["sales.Balance*"]',
 }
 # [scope] schemas = ["*"]: every schema that [scope] exclude does not name
 EVERY_SCHEMA = "*"
@@ -128,6 +130,25 @@ class Scope:
     def only(self, schema: str) -> Scope:
         """This scope cut to one schema: the read of `export --schema` and `baseline --schema`."""
         return Scope((schema,), (), self.exclude_objects)
+
+
+@dataclass(frozen=True)
+class Product:
+    """[products.<name>] of azsqlcd.toml: the objects of one product (products.py).
+
+    objects: patterns 'schema.name', as exclude_objects of [scope]. owners: GitHub owners for
+    CODEOWNERS. promote_to: the last environment, in the order of ENVIRONMENTS, that the changes of
+    the product reach; None: every environment.
+    """
+
+    name: str
+    objects: tuple[str, ...]
+    owners: tuple[str, ...] = ()
+    promote_to: str | None = None
+
+    def matches(self, schema: str, name: str) -> bool:
+        text = fold(f"{schema}.{name}")
+        return any(_pattern(p).fullmatch(text) for p in self.objects)
 
 
 def out_of_scope(scope: Scope | None, key: str) -> str | None:
@@ -199,6 +220,7 @@ class Config:
     unmanaged_objects: tuple[str, ...]  # object keys
     unmanaged_dependants: tuple[str, ...]  # [ack] unmanaged_dependants, text as written
     scope: Scope | None = None  # None: no [scope] table, every schema is managed
+    products: tuple[Product, ...] = ()  # in name order; () without [products]
 
 
 def _fail(path: str, problem: str) -> ToolError:
@@ -367,7 +389,7 @@ def load_config(text: str) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise refused("CONFIG_INVALID", f"azsqlcd.toml is not valid TOML: {e}") from None
     _reject_secret_keys(doc, "")
-    _table(doc, "", ("project", "identities", "env"), ("unmanaged", "ack", "scope"))
+    _table(doc, "", ("project", "identities", "env"), ("unmanaged", "ack", "scope", "products"))
 
     p = _table(
         doc["project"],
@@ -420,13 +442,15 @@ def load_config(text: str) -> Config:
         if key in unmanaged[:i]:
             raise _fail(f"unmanaged.objects[{i}]", "is listed more than once")
     ack = _table(doc.get("ack", {}), "ack", (), ("unmanaged_dependants",))
+    scope = _scope(doc["scope"]) if "scope" in doc else None
     return Config(
         project=project,
         identities=identities,
         env=env,
         unmanaged_objects=unmanaged,
         unmanaged_dependants=_strings(ack, "unmanaged_dependants", "ack"),
-        scope=_scope(doc["scope"]) if "scope" in doc else None,
+        scope=scope,
+        products=_products(doc["products"], scope) if "products" in doc else (),
     )
 
 
@@ -457,23 +481,14 @@ def _scope(raw: object) -> Scope:
         seen: set[str] = set()
         for i, value in enumerate(values):
             path = f"scope.{key}[{i}]"
-            pattern = key == "exclude_objects"
-            schema = value.split(".", 1)[0] if pattern else value
-            if fold(schema) == fold(TOOL_SCHEMA):
+            if key == "exclude_objects":
+                _check_pattern(value, path, "a whole schema that is not managed goes in scope.exclude")
+            elif fold(value) == fold(TOOL_SCHEMA):
                 raise _fail(path, f"names the schema of the tool ({TOOL_SCHEMA}), which is never managed")
-            if value == EVERY_SCHEMA and pattern:
-                raise _fail(
-                    path,
-                    "must be a pattern schema.name; a whole schema that is not managed goes in scope.exclude",
-                )
-            if value == EVERY_SCHEMA and (key != "schemas" or len(values) > 1):
+            elif value == EVERY_SCHEMA and (key != "schemas" or len(values) > 1):
                 raise _fail(path, f"'{EVERY_SCHEMA}' is every schema: it stands alone, in scope.schemas")
-            if pattern and "." not in value:
-                raise _fail(path, "must be a pattern schema.name, for example dbo.temp_*")
-            for part in value.split(".", 1) if pattern else (value,):
-                problem = _name_problem(part)
-                if problem is not None:
-                    raise _fail(path, problem)
+            elif (problem := _name_problem(value)) is not None:
+                raise _fail(path, problem)
             if fold(value) in seen:
                 raise _fail(path, "is listed more than once")
             seen.add(fold(value))
@@ -483,13 +498,69 @@ def _scope(raw: object) -> Scope:
             raise _fail(f"scope.exclude[{i}]", "is also in scope.schemas; a schema is in one list")
     found = Scope(lists["schemas"], lists["exclude"], lists["exclude_objects"])
     for i, value in enumerate(found.exclude_objects):
-        schema = value.split(".", 1)[0]
-        if not any(c in schema for c in "*?") and not found.has_schema(schema):
-            raise _fail(
-                f"scope.exclude_objects[{i}]",
-                "its schema part names a schema that scope does not manage, so the pattern can never match",
-            )
+        _check_pattern_schema(value, f"scope.exclude_objects[{i}]", found)
     return found
+
+
+def _check_pattern(value: str, path: str, whole_schema: str) -> None:
+    """A pattern schema.name of [scope] exclude_objects or of [products.<name>] objects."""
+    if fold(value.split(".", 1)[0]) == fold(TOOL_SCHEMA):
+        raise _fail(path, f"names the schema of the tool ({TOOL_SCHEMA}), which is never managed")
+    if value == EVERY_SCHEMA:
+        raise _fail(path, f"must be a pattern schema.name; {whole_schema}")
+    if "." not in value:
+        raise _fail(path, "must be a pattern schema.name, for example dbo.temp_*")
+    for part in value.split(".", 1):
+        problem = _name_problem(part)
+        if problem is not None:
+            raise _fail(path, problem)
+
+
+def _check_pattern_schema(value: str, path: str, scope: Scope) -> None:
+    schema = value.split(".", 1)[0]
+    if not any(c in schema for c in "*?") and not scope.has_schema(schema):
+        raise _fail(
+            path, "its schema part names a schema that scope does not manage, so the pattern can never match"
+        )
+
+
+_PRODUCT_NAME = re.compile(r"[a-z0-9_-]+")
+# a GitHub user (@name) or team (@org/team), as CODEOWNERS takes them
+_OWNER = re.compile(r"@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[A-Za-z0-9._-]+)?")
+
+
+def _products(raw: object, scope: Scope | None) -> tuple[Product, ...]:
+    """[products.<name>], in name order. A pattern of objects is checked as one of [scope]
+    exclude_objects, and under a [scope] its schema part must be a managed schema. An object of two
+    products is a finding of lint (PRODUCT_OVERLAP): only the files show it."""
+    found: list[Product] = []
+    for name, value in sorted(_dict(raw, "products").items()):
+        path = f"products.{name}"
+        if not _PRODUCT_NAME.fullmatch(name):
+            raise _fail(path, "a product name holds lower case letters, digits, '-' and '_' only")
+        table = _table(value, path, ("objects",), ("owners", "promote_to"))
+        objects = _strings(table, "objects", path)
+        if not objects:
+            raise _fail(f"{path}.objects", "must name at least one pattern schema.name")
+        seen: set[str] = set()
+        for i, pattern in enumerate(objects):
+            _check_pattern(pattern, f"{path}.objects[{i}]", "a product names its objects")
+            if scope is not None:
+                _check_pattern_schema(pattern, f"{path}.objects[{i}]", scope)
+            if fold(pattern) in seen:
+                raise _fail(f"{path}.objects[{i}]", "is listed more than once")
+            seen.add(fold(pattern))
+        owners = _strings(table, "owners", path)
+        if "owners" in table and not owners:
+            raise _fail(f"{path}.owners", "must name at least one owner, or be left out")
+        for i, owner in enumerate(owners):
+            if not _OWNER.fullmatch(owner):
+                raise _fail(f"{path}.owners[{i}]", "must be a GitHub owner: @user or @org/team")
+        promote_to = _str(table, "promote_to", path) if "promote_to" in table else None
+        if promote_to is not None and promote_to not in ENVIRONMENTS:
+            raise _fail(f"{path}.promote_to", f"an environment name is one of: {', '.join(ENVIRONMENTS)}")
+        found.append(Product(name, objects, owners, promote_to))
+    return tuple(found)
 
 
 def resolve_target(config: Config, env: str, target_id: str) -> tuple[Environment, Target]:

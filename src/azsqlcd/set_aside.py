@@ -33,11 +33,14 @@ from azsqlcd.session import Session
 from azsqlcd.state import FailedRun, State, StepRow
 
 PARKED = "parked"
-REASONS = (PARKED,)
+HELD = "held"  # products.py: a product whose promote_to comes before the environment
+REASONS = (PARKED, HELD)
 # what an operator does so that the migration runs, or never runs, here
 WAY_OUT = {
     PARKED: "end the park with azsqlcd resolve --unpark {file}, so that it runs first, or withdraw and "
     "replace it",
+    HELD: "raise or remove promote_to of the product of {file} in azsqlcd.toml by pull request, so that it "
+    "runs here first",
 }
 # the ends of a deploy that say the engine refused the batch itself. A lost session, a lock timeout
 # or a deadlock says nothing about the batch, and the batch is tried again
