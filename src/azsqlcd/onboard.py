@@ -784,7 +784,7 @@ def _model_keys(
 ) -> list[str]:
     """The keys of the table model of the release that the scope manages and that have no managed
     row (recorded: case-folded keys that have one)."""
-    return [key for key in hooks.model if in_scope(scope, key) and fold(key) not in recorded]
+    return [key for key in hooks.model if hooks.manages(key, scope) and fold(key) not in recorded]
 
 
 def _engine_named(

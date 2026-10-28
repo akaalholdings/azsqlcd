@@ -2293,6 +2293,22 @@ def test_a_table_of_the_model_that_was_never_recorded_refuses_the_plan_before_th
     assert not {word for batch in db.batches for word in batch.split()} & WRITES
 
 
+@pytest.mark.parametrize("baselined", [False, True])
+def test_the_baseline_that_the_refusal_names_is_one_that_the_database_accepts(baselined):
+    """Without [scope], BASELINE_REQUIRED names a whole baseline, as before, unless the database has
+    a baseline step and a table row: a whole baseline is then refused (ALREADY_BASELINED), and the
+    message names baseline --schema."""
+    b, st, db = table_release()
+    if baselined:
+        st = dataclasses.replace(st, steps=(StepRow(1, 1, "baseline", None, None, "ok", None),))
+        db = database(st)
+    other = names.object_key("TABLE", "sales", "Customer")
+    error = refusal(planned, b, st, db, table_hooks=Hooks(unrecorded=[other]))
+    assert error.reason_code == "BASELINE_REQUIRED"
+    run = "run azsqlcd baseline --schema sales" if baselined else "run azsqlcd baseline"
+    assert error.message.endswith(f"The database was never compared with the model: {run}")
+
+
 def test_a_statement_that_spells_a_table_in_another_letter_case_touches_the_recorded_table():
     b, st, db = table_release()
     as_written = "TABLE:[SALES].[order]"  # a dropped table keeps the spelling of its statement

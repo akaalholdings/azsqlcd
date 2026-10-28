@@ -182,3 +182,50 @@ def test_a_raw_batch_touches_every_name_of_its_text():
 def test_without_not_managed_nothing_is_read_and_nothing_is_skipped():
     assert not_managed.skips([LEGACY, BOTH], None) == {}
     assert not_managed.skips([LEGACY, BOTH], dataclasses.replace(SCOPE, not_managed=())) == {}
+
+
+# ------------------------------------------------------------------ what the names cannot prove
+DYNAMIC = migration(
+    "0005__fix_old.sql",
+    "-- azsqlcd:data\n-- azsqlcd:allow DYNAMIC_SQL batch reason: reviewed\n"
+    "EXEC (N'UPDATE [legacy].[Old] SET [Name] = N''x'';');",
+)
+
+
+def test_a_data_batch_whose_names_are_in_dynamic_sql_runs_with_a_note():
+    """The names of a data or raw batch are all that the tool compares with the patterns: a name in
+    a string is not seen. The plan says so, as for a park."""
+    assert not_managed.skips([DYNAMIC], SCOPE) == {}
+    assert not_managed.notes([DYNAMIC[1], SALES[1]], [], SCOPE) == [
+        "not_managed not proven for a data batch: 0005__fix_old.sql (only the names of its text are "
+        "compared with [env.test] not_managed)"
+    ]
+
+
+def test_the_object_of_a_raw_batch_is_touched():
+    raw = migration(
+        "0006__old.sql", "-- azsqlcd:raw TABLE:[legacy].[Old] reason: by hand\nEXEC (N'SELECT 1');"
+    )
+    assert list(not_managed.skips([raw], SCOPE)) == ["0006__old.sql"]
+
+
+def test_what_is_sent_and_names_a_not_managed_object_gets_a_note():
+    from azsqlcd.modules import read_module
+
+    view = read_module(
+        "schema/views/sales.vw_OldNote.sql",
+        b"CREATE OR ALTER VIEW [sales].[vw_OldNote] AS\nSELECT [OldId], [Note] FROM [legacy].[Old];\n",
+    )
+    fk = migration(
+        "0007__order_old.sql",
+        "ALTER TABLE [sales].[Order] ADD CONSTRAINT [FK_Order_Old] FOREIGN KEY ([OldId]) "
+        "REFERENCES [legacy].[Old] ([OldId]);",
+    )
+    assert not_managed.skips([fk], SCOPE) == {}
+    assert not_managed.notes([fk[1]], [view], SCOPE) == [
+        "not_managed: 0007__order_old.sql names [legacy].[old], which [env.test] not_managed matches: "
+        "the tool does not know that object here",
+        "not_managed: VIEW:[sales].[vw_OldNote] names [legacy].[old], which [env.test] not_managed "
+        "matches: the tool does not know that object here",
+    ]
+    assert not_managed.notes([fk[1]], [view], None) == []

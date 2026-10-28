@@ -2801,3 +2801,153 @@ def test_without_not_managed_in_test_the_plan_and_the_state_writes_are_those_of_
     monkeypatch.setattr(cli, "for_env", lambda config, env: config)
     without = story()
     assert with_feature == without
+
+
+OLD_TRIGGER = (
+    "schema/triggers/legacy.trg_Old.sql",
+    "CREATE OR ALTER TRIGGER [legacy].[trg_Old] ON [legacy].[Old] AFTER INSERT AS\n"
+    "BEGIN\n    SET NOCOUNT ON;\nEND;\n",
+)
+
+
+def test_a_trigger_follows_its_table_out_of_what_test_manages(pipe):
+    """The pattern names the table only: the trigger on it is not managed in test either, as a
+    trigger follows its table out of [scope]. Its change goes to dev and nothing goes to test."""
+    first = release_1(pipe)
+    pipe.write_objects(LEGACY_SCHEMA, OLD)
+    pipe.write(*OLD_TRIGGER)
+    legacy_built = pipe.release("the legacy schema", "create_legacy")
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    dev, test = pipe.dbs["dev"], pipe.dbs["test"]
+    not_managed_in(pipe, test='["legacy.Old"]')
+    changed = OLD_TRIGGER[1].replace("SET NOCOUNT ON;", "SET NOCOUNT ON;\n    SELECT 1 AS [x];")
+    pipe.write(OLD_TRIGGER[0], changed)
+    r1 = pipe.release("the old trigger")
+    assert pipe.promote(r1, "dev").code == 0
+    assert texts(dev)["TRIGGER:[legacy].[trg_Old]"] == stored_text(changed)
+    sent = len(test.ddl)
+    done = pipe.promote(r1, "test")
+    assert done.code == 0, done.err
+    assert not any("trg_Old" in batch for batch in test.ddl[sent:])
+    assert texts(test)["TRIGGER:[legacy].[trg_Old]"] == stored_text(OLD_TRIGGER[1])
+    assert ("TRIGGER:[legacy].[trg_Old]", "dropped") in rows(test, "TRIGGER")
+    assert pipe.drift(r1, "test").code == 0
+
+
+@pytest.mark.parametrize("key", [False, True])
+def test_a_skip_does_not_turn_off_the_catch_up_rule(pipe, key):
+    """A7 holds in test after a not_managed skip as without the key: r3 needs r2 first."""
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    if key:
+        not_managed_in(pipe, test='["legacy.*"]')
+    pipe.write_objects(OLD_NOTE)
+    r1 = pipe.release("old note", "old_note")
+    for env in ("dev", "test"):
+        assert pipe.promote(r1, env).code == 0
+    assert dict(migrations(pipe.dbs["test"]))[r1.file] == ("not_applied" if key else "ok")
+    pipe.write_objects(ORDER_NOTE)
+    r2 = pipe.release("order note", "order_note")
+    assert pipe.promote(r2, "dev").code == 0
+    pipe.write_objects(ORDER_PRIORITY)
+    r3 = pipe.release("order priority", "order_priority")
+    assert pipe.promote(r3, "dev").code == 0
+    planned, _ = pipe.plan(r3, "test")
+    assert (planned.code, planned.reason) == (22, "CATCHUP_REQUIRED")
+    assert f"promote r{r2.seq} first" in planned.err
+
+
+def test_a_new_schema_that_test_does_not_manage_from_the_start(pipe, tmp_path, monkeypatch):
+    """The schema and its table come in one migration, and test does not manage legacy.*: the
+    migration is skipped there and the schema is not asked for. When the pattern goes, the plan
+    names baseline --schema, and the skipped migration never runs."""
+    monkeypatch.chdir(tmp_path)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    not_managed_in(pipe, test='["legacy.*"]')
+    pipe.write_objects(LEGACY_SCHEMA, OLD)
+    r1 = pipe.release("the legacy schema", "create_legacy")
+    assert pipe.promote(r1, "dev").code == 0
+    sent = len(test.ddl)
+    done = pipe.promote(r1, "test")
+    assert done.code == 0, done.err
+    assert not any("[legacy]" in batch for batch in test.ddl[sent:])
+    assert dict(migrations(test))[r1.file] == "not_applied"
+    assert "SCHEMA:[legacy]" not in test.model and rows(test, "SCHEMA") == [("SCHEMA:[sales]", "managed")]
+    assert pipe.drift(r1, "test").code == 0
+
+    not_managed_in(pipe, push=False)
+    r2 = pipe.merge("test manages the legacy schema")
+    assert pipe.promote(r2, "dev").code == 0
+    back = pipe.promote(r2, "test")
+    assert (back.code, back.reason) == (22, "BASELINE_REQUIRED")
+    assert "run azsqlcd baseline --schema legacy" in back.err
+    test.out_of_band("CREATE SCHEMA [legacy];", *emit.emit_create_script(Model((OLD,)))[-1:])
+    where = (*r2.where("test"), "--confirm-database", "sales", "--schema", "legacy")
+    assert pipe.tool("baseline", *where, db=test, out=pipe.out("report")).code == 0
+    sent = len(test.ddl)
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert test.ddl[sent:] == [] and dict(migrations(test))[r1.file] == "not_applied"
+    assert test.model == r2.model
+
+
+def test_onboarding_by_baseline_without_the_schema_that_test_does_not_manage(pipe, tmp_path, monkeypatch):
+    """Test as it stands has no schema legacy: its baseline records what test manages."""
+    monkeypatch.chdir(tmp_path)
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev",))
+    not_managed_in(pipe, test='["legacy.*"]')
+    built = pipe.build()
+    test = pipe.database("test")
+    kept = Model(tuple(built.model[key] for key in built.model if "legacy" not in key))
+    test.out_of_band(*emit.emit_create_script(kept))
+    test.out_of_band(*(text for _, text in MODULES.values()))
+    done = pipe.baseline(built, "test")
+    assert done.code == 0, done.err
+    assert ("SCHEMA:[legacy]", "managed") not in rows(test, "SCHEMA")
+    assert pipe.drift(built, "test").code == 0
+
+
+def test_a_schema_that_comes_back_when_scope_goes_is_baselined_by_its_schema(pipe):
+    """No not_managed: [scope] took legacy out (the deploy marked its rows dropped), then [scope]
+    went. A whole baseline is refused on such a database, so the refusal names baseline --schema."""
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    base = pipe.read("azsqlcd.toml")
+    pipe.write("azsqlcd.toml", base + '\n[scope]\nschemas = ["sales"]\nexclude = ["legacy"]\n')
+    pipe.delete("schema/tables/legacy.Old.sql", "schema/schemas/legacy.sql")
+    pipe.push("legacy leaves")
+    r2 = pipe.build()
+    for env in ("dev", "test"):
+        assert pipe.promote(r2, env).code == 0
+    assert ("TABLE:[legacy].[Old]", "dropped") in rows(pipe.dbs["test"], "TABLE")
+    pipe.write("azsqlcd.toml", base)
+    pipe.write_objects(LEGACY_SCHEMA, OLD)
+    pipe.push("legacy comes back, no scope")
+    r3 = pipe.build()
+    back = pipe.promote(r3, "test")
+    assert (back.code, back.reason) == (22, "BASELINE_REQUIRED")
+    assert "The database was never compared with the model: run azsqlcd baseline --schema legacy" in back.err
+
+
+def test_a_managed_view_of_a_not_managed_table_is_sent_with_a_note(pipe):
+    """The view is managed in test, the table it names is not: the tool cannot know that the column
+    that the skipped migration adds is not there, so the plan says what the view names."""
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    not_managed_in(pipe, test='["legacy.*"]')
+    pipe.write_objects(OLD_NOTE)
+    pipe.write(
+        "schema/views/sales.vw_OldNote.sql",
+        "CREATE OR ALTER VIEW [sales].[vw_OldNote] AS\nSELECT [OldId], [Note] FROM [legacy].[Old];\n",
+    )
+    r1 = pipe.release("old note and a sales view of it", "old_note")
+    assert pipe.promote(r1, "dev").code == 0
+    planned, notes = plan_notes(pipe, r1, "test")
+    assert planned.code == 0, planned.err
+    assert (
+        "not_managed: VIEW:[sales].[vw_OldNote] names [legacy].[old], which [env.test] not_managed "
+        "matches: the tool does not know that object here"
+    ) in notes

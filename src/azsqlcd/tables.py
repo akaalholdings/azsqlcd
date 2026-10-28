@@ -43,7 +43,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from azsqlcd import catalog, catalog_tables, chain, diff, emit, names, state
+from azsqlcd import catalog, catalog_tables, chain, diff, emit, names, not_managed, state
 from azsqlcd.catalog import Difference
 from azsqlcd.catalog_tables import SystemNamed, Unsupported, project_options
 from azsqlcd.config import Config, Scope, in_scope
@@ -81,7 +81,7 @@ from azsqlcd.model import (
     fold,
 )
 from azsqlcd.parse import ParseError, parse_object_file, parse_statement
-from azsqlcd.plan import TableFindings, Work, scoped_state
+from azsqlcd.plan import TableFindings, Work, module_files, scoped_state
 from azsqlcd.release import Bundle
 from azsqlcd.session import Session
 from azsqlcd.state import ObjectRow, State
@@ -433,6 +433,18 @@ class Hooks:
         self._reads_of: tuple[Session, Work] | None = None
         self._closures: dict[tuple[tuple[str, ...], tuple[str, ...]], catalog.Closure] = {}
         self._broken: dict[str, list[str]] = {}
+        self._hidden = (
+            not_managed.hidden_schemas(self._scope, [*self.model, *module_files(bundle.files)])
+            if self._scope is not None and self._scope.not_managed
+            else frozenset()
+        )
+
+    def manages(self, key: str, scope: Scope | None) -> bool:
+        """The scope manages the object of this key of the model. With [env.<name>] not_managed, a
+        schema whose every object of the release the patterns match is not managed either
+        (not_managed.hidden_schemas)."""
+        kind, _, name = names.parse_object_key(key)
+        return in_scope(scope, key) and not (kind == "SCHEMA" and fold(name) in self._hidden)
 
     def _closure(
         self, session: Session, work: Work, tables: Collection[str], modules: Collection[str]
@@ -525,7 +537,7 @@ class Hooks:
             for key in self.model
             if fold(key) not in managed
             and fold(key) not in created
-            and not (outside and not in_scope(self._scope, key))
+            and not (outside and not self.manages(key, self._scope))
         ]
 
     # -------------------------------------------------------------- drift

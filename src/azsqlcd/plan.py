@@ -455,6 +455,15 @@ def scoped_state(recorded: State, scope: Scope | None) -> State:
     )
 
 
+def _row_in_scope(scope: Scope | None, key: str, row: ObjectRow) -> bool:
+    """The object of the row is in the scope. With [env.<name>] not_managed a DML trigger follows
+    its table (the recorded parent), as a capture does (catalog.capture_in_scope). Without it: the
+    key only, as before."""
+    if scope is not None and scope.not_managed:
+        return catalog.capture_in_scope(scope, key, row.capture)
+    return in_scope(scope, key)
+
+
 def left_scope(recorded: State, scope: Scope | None) -> list[str]:
     """Keys of the managed rows of objects that [scope] does not manage, in key order.
 
@@ -1089,8 +1098,11 @@ def pending_work(
         and not deployed
         and not any(step.kind == "baseline" for step in recorded.steps)
     )
-    if not first_deploy and (held or any(entry.file in aside.released for entry in entries)):
-        catch_up_notes = _catch_up_past(entries, held, manifest)
+    # a migration skipped as not managed never runs here, so its release can always be deployed: A7
+    # stays whole for it. Only a park, which can end, lets the later releases deploy past it
+    parks = [entry for entry in held if aside.active[entry.file].reason != set_aside.NOT_MANAGED]
+    if not first_deploy and (parks or any(entry.file in aside.released for entry in entries)):
+        catch_up_notes = _catch_up_past(entries, parks, manifest)
     else:
         catch_up_notes = _refuse_catch_up(entries, withdrawn_unapplied, recorded_seq, manifest, first_deploy)
     pending = tuple(_read_migration(files, entry) for entry in entries)
@@ -1576,11 +1588,17 @@ def _with_urls(units: Sequence[Unit], repo_url: str, commit: str) -> tuple[Unit,
 
 def _managed_files(bundle: Bundle, scope: Scope | None) -> Bundle:
     """The release without the module files that [env.<name>] not_managed takes out of the scope:
-    such a module is not sent. With no not_managed: the release itself."""
+    such a module is not sent. A DML trigger follows its table (the name after ON), as lint
+    OUT_OF_SCOPE says for [scope]. With no not_managed: the release itself."""
     if scope is None or not scope.not_managed:
         return bundle
-    outside = {module.path for key, module in module_files(bundle.files).items() if not in_scope(scope, key)}
-    return replace(bundle, files={path: data for path, data in bundle.files.items() if path not in outside})
+
+    def outside(key: str, module: ModuleFile) -> bool:
+        table = modules.trigger_table(module) if module.kind == "TRIGGER" else None
+        return not in_scope(scope, key) or (table is not None and not in_scope(scope, table))
+
+    gone = {module.path for key, module in module_files(bundle.files).items() if outside(key, module)}
+    return replace(bundle, files={path: data for path, data in bundle.files.items() if path not in gone})
 
 
 def _not_managed_skips(
@@ -1612,6 +1630,32 @@ def _not_managed_skips(
     recorded_skips = {file for file, item in aside.active.items() if item.reason == set_aside.NOT_MANAGED}
     skipped = [entry.file for entry in pending if entry.file in found or entry.file in recorded_skips]
     return skips, skipped
+
+
+def _skipped_schemas(bundle: Bundle, aside: Aside) -> set[str]:
+    """The case-folded schemas of the objects that the migrations skipped here as not managed touch
+    (set_aside.NOT_MANAGED). Such an object never had its migration here. None with no skip."""
+    files = [file for file, item in aside.active.items() if item.reason == set_aside.NOT_MANAGED]
+    if not files or chain.SUM_PATH not in bundle.files:
+        return set()
+    by_file = {
+        entry.file: entry
+        for entry in chain.parse_sum(_utf8(bundle.files, chain.SUM_PATH, "CHAIN_INVALID")).entries
+    }
+    return {
+        schema
+        for file in files
+        if file in by_file
+        for schema, _ in set_aside.footprint(_read_migration(bundle.files, by_file[file])).touched
+    }
+
+
+def _baselined_with_tables(recorded: State) -> bool:
+    """A whole baseline is refused here (ALREADY_BASELINED): the database has a baseline step and a
+    row of a table-class object, so it is no switch to table_model = true."""
+    return any(step.kind == "baseline" for step in recorded.steps) and any(
+        names.parse_object_key(key)[0] in names.TABLE_CLASS_KINDS for key in recorded.objects
+    )
 
 
 def compute_plan(
@@ -1796,11 +1840,19 @@ def compute_plan(
             unrecorded = [key for key in unrecorded if hold.holds(key) is None]
         if unrecorded:  # Part 2 (c) 8
             # under [scope] the object enters the scope: the baseline of its schema records it. So
-            # does an object whose row the deploy marked when it left: [env.<name>] not_managed went
+            # does an object whose row the deploy marked when it left ([scope] or [env.<name>]
+            # not_managed went), an object of a schema that a skipped migration touches, and every
+            # object where a whole baseline is refused (ALREADY_BASELINED)
             dropped = {fold(key) for key, row in recorded.objects.items() if row.status == "dropped"}
+            skipped_schemas = _skipped_schemas(bundle, aside)
             run = (
                 f"run {_baseline_schemas(_schemas_of(unrecorded))}"
-                if scope is not None or all(fold(key) in dropped for key in unrecorded)
+                if scope is not None
+                or _baselined_with_tables(recorded)
+                or all(
+                    fold(key) in dropped or fold(names.schema_of(key)) in skipped_schemas
+                    for key in unrecorded
+                )
                 else "run azsqlcd baseline"
             )
             raise refused(
@@ -1954,6 +2006,9 @@ def compute_plan(
         notes.append(
             f"not managed in {env}: {count} object(s); skipped migrations: {', '.join(skipped) or 'none'}"
         )
+        in_release = module_files(bundle.files)
+        sent_modules = [in_release[change.key] for change in work.module_changes if change.key in in_release]
+        notes += not_managed.notes(work.pending, sent_modules, scope)
     unmanaged_kinds = names.MODULE_KINDS + (() if table_hooks is None else ("TABLE", "SEQUENCE", "SYNONYM"))
     # The history table of a system-versioned table is a row of sys.objects that the engine owns:
     # it has no file and no managed row, and it is not an unmanaged object. Without a table model
