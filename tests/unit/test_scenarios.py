@@ -2318,6 +2318,10 @@ def test_a_product_held_after_dev_reaches_sandbox_when_a_later_release_raises_it
     pipe.write_objects(ORDER_PRIORITY)
     r2 = pipe.release("a priority of an order", "order_priority")
     assert pipe.promote(r2, "dev").code == 0
+    planned, notes = plan_notes(pipe, r2, "sandbox")  # the plan text and plan.json show the holds
+    held_in = f'held in sandbox: balance (promote_to = "dev"): {balance}, {BALANCE_VIEW_KEY}'
+    assert planned.code == 0 and held_in in notes and f"note: {held_in}" in planned.out
+    assert "note: products: balance (1 migration, 1 module)" in planned.out
     done = pipe.promote(r2, "sandbox")
     assert done.code == 0, done.err
     assert migrations(sandbox)[-1] == (r2.file, "ok") and balance not in dict(migrations(sandbox))
@@ -2339,14 +2343,13 @@ def test_a_product_held_after_dev_reaches_sandbox_when_a_later_release_raises_it
 
 
 def test_a_migration_that_mixes_a_held_product_and_shared_objects_fails_verify_and_gen(pipe):
-    first = release_1(pipe)
+    release_1(pipe)
     pipe.write_objects(BALANCE, ORDER_NOTE)
     pipe.gen("balance_and_note")  # no product yet: one migration for both
     product(pipe, "dev")
     lint, verify = pipe.checks()
     assert lint.code == 0, lint.out + lint.err
     assert verify.code == 22 and "MIXED_HOLD" in verify.out and "product balance" in verify.out
-    assert first.seq >= 1
 
     # gen refuses to write such a migration
     pipe.delete(*[f"migrations/{p.name}" for p in (pipe.repo / "migrations").glob("*__balance_and_note.sql")])

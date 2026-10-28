@@ -757,6 +757,66 @@ No column and no status was added to the state tables. A park is the run row of 
 (status `failed` or `unknown`, `failed_step` `<file>#<n>`, the reason code in `note`); an unpark is
 a `resolve` step with the note `unpark <file>`.
 
+### Products and holds
+
+Opt-in. A product is a named group of objects of the database, for example the tables, views and
+procedures of `Balance`. Name each product in `azsqlcd.toml`:
+
+```toml
+[products.balance]
+objects = ["sales.Balance*", "sales.vw_Balance*", "sales.usp_Balance*"]  # required
+owners = ["@bal-owner", "@example-org/balance-team"]                       # optional
+promote_to = "dev"                                                        # optional
+```
+
+- The name holds lower case letters, digits, `-` and `_`.
+- `objects` holds patterns `schema.name`, with `*` and `?`, as `[scope] exclude_objects`. Names
+  are compared without letter case. With `[scope]`, the schema part of a pattern must be a
+  managed schema.
+- An object belongs to one product at most. An object that two products match is the lint error
+  `PRODUCT_OVERLAP`. An object that no product matches is shared.
+- `owners` are GitHub owners for CODEOWNERS.
+- `promote_to` is the last environment that the changes of the product reach. The order is dev,
+  sandbox, test, preprod, prod. Without it, the changes reach every environment.
+
+What the tool does in an environment that comes after `promote_to` (the product is held there):
+
+1. A pending migration that touches an object of the product is held: it does not run there. The
+   plan has the note `held: <file> (product <name>, promote_to = "<env>")`. The later releases
+   deploy past it, as past a parked migration (the "Park a migration that fails" section above):
+   what runs must be independent of it, else 22 `SET_ASIDE_DEPENDENCY`.
+2. A change of a module of the product is not sent, and a tombstone of it is not dropped. A
+   pending migration or a module that names a held module that the database does not have is
+   refused with 22 `SET_ASIDE_DEPENDENCY`.
+3. The plan text, `plan.json` and the job summary have the notes `products: balance (2
+   migrations, 1 module)` and `held in <env>: balance (promote_to = "<env>"): <files and keys>`.
+4. An object of the product that the database does not have is not expected there. `plan` does
+   not ask for a baseline of it, and `baseline` does not compare or record it.
+
+To promote the product, raise or remove `promote_to` by pull request. The next release runs the
+held migrations of the earlier releases first, in chain order (note `catch-up past set-aside:
+...`), and sends the held module changes.
+
+One rule for pull requests: a new migration must not touch the objects of a product that has
+`promote_to` and other objects too. `verify` and `gen` give `MIXED_HOLD`. Change the files of the
+product and run `azsqlcd gen`, then the other files and `gen` again, or use two pull requests.
+
+The command `azsqlcd products` lists each product with its owners, its `promote_to` and the count
+of its object files. It reads only the working tree:
+
+```bash
+azsqlcd products                    # the products of azsqlcd.toml
+azsqlcd products --env sandbox      # also what the files hold back from sandbox
+azsqlcd products --codeowners >> .github/CODEOWNERS
+```
+
+`--env` reads no database: `azsqlcd plan` shows what a target holds and what is parked there.
+`--codeowners` prints one line for each object file of a product that has owners, or one glob
+when every file in a folder that a pattern of the product matches is a file of the product.
+
+No column and no status was added to the state tables. A hold is a fact of `azsqlcd.toml` of the
+release and of the environment. A held migration has no step row, as a pending one has none.
+
 ### Partitioned tables
 
 Not run on a database yet: `docs/known-gaps.md`, section 14.

@@ -298,6 +298,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
+| `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines (A37) | chain, config, errors, modules, names, set_aside |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -327,6 +328,7 @@ Offline commands (standard library only, no network, no database):
 | `build --commit SHA --out DIR [--root DIR]` | `DIR/bundle.tar`, `DIR/manifest.json`. Runs lint over the files of the commit first. Outputs: `release` (`r<seq>`), `digest` | 0 / 22 |
 | `targets --bundle DIR --digest D --env E` | Outputs: `matrix` (JSON rows of the targets; each row has the key `auth`, `oidc` or `managed-identity`), `timeout` (the larger of `job_timeout_minutes` and 2 x the largest `expected-minutes` + 30) | 0 / 22 |
 | `setup-sql --env E --target T [--root DIR]` | Prints the administrator script | 0 / 22 |
+| `products [--env E] [--codeowners] [--root DIR]` | Each product: the count of its object files, its owners, its `promote_to`. `--env`: what the files hold back from that environment (no database is read). `--codeowners`: CODEOWNERS lines only | 0 / 22 |
 
 Database commands (need the `db` extra). All take `--bundle DIR --digest D --env E --target T
 [--show-error-text]`; `export` takes `--root DIR` in place of `--bundle` and `--digest`. Each one
@@ -931,6 +933,45 @@ fails", is the procedure.
   migration that later migrations ran past while it was parked is no hole. A migration that is
   still parked is refused with `RESOLVE_NOT_APPLICABLE` and the advice to unpark it first. (5) A
   parked replacement gets no note `late replacement: ...`. No state-table change.
+
+### Products and holds (2026-10-28)
+
+Owner problem: the objects of one product (for example `Balance`) need a tag, and a product can
+stay in dev, never promoted, without a pull request that stays open. `docs/setup.md`, section 7,
+"Products and holds", is the procedure.
+
+- A37. Products. `azsqlcd.toml` takes the optional tables `[products.<name>]`: `objects`
+  (required; patterns `schema.name` with the syntax, the match and the checks of `[scope]
+  exclude_objects`, so `config._check_pattern` serves both), `owners` (`@user` or `@org/team`),
+  `promote_to` (a name of `ENVIRONMENTS`). `config.Product`, `Config.products` (empty without the
+  tables). An object belongs to at most one product: lint error `PRODUCT_OVERLAP`.
+- Holds. In an environment after `promote_to` the product is held (`products.is_held`). A held
+  migration is a set-aside migration with the reason `held` (`set_aside.HELD`, `set_aside.WAY_OUT`)
+  and uses A35 as built: no run, catch-up past it, the independence check. `set_aside.read` is not
+  changed: the hold needs the environment and the files of the release, so `products.hold(config,
+  env, files)` returns a `Hold`, and `plan.pending_work(..., hold)` merges it into the `Aside`
+  (`Hold.merge`). A migration of a product that is not held in the environment (any more) counts
+  as set aside before (`Aside.released`), so it runs at its place in the chain after `promote_to`
+  is raised; in dev, where nothing is held, not so. A module change or a drop of a module of a held
+  product is not sent. A pending migration or a module to send that names a held module that the
+  database lacks is 22 `SET_ASIDE_DEPENDENCY` (`products.check_held_modules`).
+- What a migration touches is `set_aside.footprint`, the rule of the independence check.
+- Not expected: in `compute_plan` an object of a held product, or one that a held migration
+  creates, is not `BASELINE_REQUIRED`. `onboard.baseline` leaves out the objects of a held
+  product that the database lacks (one read of `catalog.list_user_objects`, sent only with
+  `[products]`). `drift` and the read-back compare managed rows only, so a held object that was
+  never recorded is not in them.
+- Pull requests: `verify` and `gen` give `MIXED_HOLD` for a new migration that touches objects of
+  a product with `promote_to` and other objects.
+- Reports: plan notes `held: <file> (...)`, `products: <name> (<n> migrations, <m> modules)` and
+  `held in <env>: ...`; notes are in the plan text, `plan.json`, `report.json` and the job summary,
+  and outside `plan_sha256`. Command `azsqlcd products [--env E] [--codeowners]`, offline.
+- State: nothing is written for a hold. No column, status or constraint was added.
+- Imports: `plan.py`, `gen.py`, `onboard.py` and `cli.py` import `products`.
+- New reason code `MIXED_HOLD` (22, gen). New finding codes `PRODUCT_OVERLAP` (lint), `MIXED_HOLD`
+  (verify), `held` and `products` (plan notes).
+- Not done: `drift` lists no pending or held migrations. `azsqlcd products --env` reads no
+  database. Proven against fakes only.
 
 ---
 
