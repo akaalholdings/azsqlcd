@@ -578,6 +578,11 @@ files. It only reads the database. It never runs the script.
    - "Only in the database": an object with no file, and a count for each kind and schema. It is
      never dropped, and the engine names of its constraints stay. Add its file, exclude it in
      `[scope]` of `azsqlcd.toml`, or drop it by hand.
+   - "Held in <env>": each object of a product that is held in this environment
+     (`[products.<name>] promote_to`). `align` does not compare it and writes no statement for
+     it: the held migration makes the change when `promote_to` is raised. A module that names a
+     held object that the database does not have, or has in another shape than its file, is
+     under "Hand-write" with the name of the held object, and `align.sql` does not send it.
 3. `align.sql` runs in this order: constraint names (`sp_rename`), table-class objects, modules,
    constraint state. The constraint state statements build an index again
    (`ALTER INDEX ... REBUILD`) or check every row of their table (`WITH CHECK CHECK CONSTRAINT`).
@@ -824,12 +829,17 @@ What the tool does in an environment that comes after `promote_to` (the product 
    deploy past it, as past a parked migration (the "Park a migration that fails" section above):
    what runs must be independent of it, else 22 `SET_ASIDE_DEPENDENCY`.
 2. A change of a module of the product is not sent, and a tombstone of it is not dropped. A
-   pending migration or a module that names a held module that the database does not have is
-   refused with 22 `SET_ASIDE_DEPENDENCY`.
+   pending migration or a module that names a held module is refused with 22
+   `SET_ASIDE_DEPENDENCY` when the database does not have the held module, or has it with another
+   text than its file: what names it can need the held text, which does not come here.
 3. The plan text, `plan.json` and the job summary have the notes `products: balance (2
    migrations, 1 module)` and `held in <env>: balance (promote_to = "<env>"): <files and keys>`.
 4. An object of the product that the database does not have is not expected there. `plan` does
    not ask for a baseline of it, and `baseline` does not compare or record it.
+5. `align` writes no statement for an object of the product, also not a rename of its
+   constraints, and `align.md` lists it under "Held in <env>". The database is right with the
+   objects as they are: the held migration makes the change when `promote_to` is raised, and it
+   fails if somebody made the change before.
 
 To promote the product, raise or remove `promote_to` by pull request. The next release runs the
 held migrations of the earlier releases first, in chain order (note `catch-up past set-aside:

@@ -2063,8 +2063,17 @@ and A45). A46 is their combination.
   be safe; the two-step way (remove `promote_to`, promote everywhere, then remove the product)
   always works.
 - `verify` warns for new migrations that depend on a held migration, not for new or changed shared
-  modules that name a held object. Such a module is refused at deploy with `SET_ASIDE_DEPENDENCY`
-  where the product is held.
+  modules that name a held object. Where the product is held, such a module is refused at deploy
+  with `SET_ASIDE_DEPENDENCY` when it names a held module that the database does not have, or has
+  with another text than its file. A shared module that names a held table is refused only when it
+  is not independent of a held migration (the footprint of A40). A held module with another text
+  refuses every shared module that names it, also one that does not need the held change.
+- `align` does not compare the objects of a held product. A held object that a DBA changed by
+  hand in that environment is not in `align.md` as a difference: `drift` reports it.
+- `baseline` leaves out only the held objects that the database does not have
+  (`onboard.absent_held`). It compares a held object that the database has with its file, as any
+  other object. So where a database to onboard has a held object at the level before the held
+  change, `baseline` reports a difference, and `align` writes no statement for it. Not tested.
 - `azsqlcd products --codeowners` finds the files of a product by their file name
   (`<schema>.<name>.sql`), not by the module header.
 - Proven against fakes only. No live run on Azure SQL Database.

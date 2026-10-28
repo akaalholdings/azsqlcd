@@ -1182,8 +1182,9 @@ def pending_work(
     # E5: recorded as managed and tombstoned
     drops = [key for key in tombstones if key in managed and key not in held_modules]
     if hold is not None:
-        absent = [key for key in held_modules if key not in managed]
-        products.check_held_modules(hold, pending, [in_release[key] for key in need], absent)
+        # a held module in need: this database lacks it, or holds another text than its file
+        changed = [key for key in held_modules if key in in_release]
+        products.check_held_modules(hold, pending, [in_release[key] for key in need], changed, managed)
         # held only: a park or a skip as not_managed of a product migration keeps its own reason
         on_hold = [entry.file for entry in held if aside.active[entry.file].reason == set_aside.HELD]
         aside_notes += hold.notes(pending, on_hold, [*need, *drops], held_modules)

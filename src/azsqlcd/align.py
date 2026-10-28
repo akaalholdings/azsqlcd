@@ -23,16 +23,34 @@ Sections of align.sql, in the order in which they run:
      enabled while the index of the key that it references is disabled), smallest table first and
      the clustered index first in its table; then the checks, smallest table first. A constraint or
      an index that section 2 creates again is not listed: it is created enabled and trusted.
+
+The objects of a product that is held in the environment ([products], products.hold) are not
+compared, present or not: the held migration makes their change when promote_to is raised, and it
+fails if a DBA made it before. align.md lists them under "Held in <env>". A module that names a held
+object that the database lacks, or holds in another shape than its file, is not sent: Hand-write.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
-from azsqlcd import catalog, catalog_tables, diff, emit, gen, modules, names, onboard, plan, replay, tables
+from azsqlcd import (
+    catalog,
+    catalog_tables,
+    diff,
+    emit,
+    gen,
+    modules,
+    names,
+    onboard,
+    plan,
+    products,
+    replay,
+    tables,
+)
 from azsqlcd.catalog_tables import SystemNamed
-from azsqlcd.config import Config, for_env, in_scope
+from azsqlcd.config import Config, Product, for_env, in_scope
 from azsqlcd.model import (
     ABSENT_IN_OTHER,
     ABSENT_IN_SELF,
@@ -96,6 +114,7 @@ class AlignResult:
     states: tuple[tuple[str, int, str], ...]  # (table key, row count, statement), in run order
     hand_write: tuple[Item, ...]
     only_here: tuple[Item, ...]
+    held: tuple[Item, ...]  # the objects of a product that is held here: not aligned
     sql: str  # onboarding/<env>/align.sql
     md: str  # onboarding/<env>/align.md
 
@@ -104,7 +123,7 @@ class AlignResult:
         return (
             f"{len(self.renames)} rename(s), {len(self.statements)} statement(s), {len(self.modules)} "
             f"module(s), {len(self.states)} constraint state statement(s), {len(self.hand_write)} to "
-            f"hand-write, {len(self.only_here)} only in the database"
+            f"hand-write, {len(self.only_here)} only in the database, {len(self.held)} held"
         )
 
 
@@ -170,10 +189,15 @@ class _Tables:
     head: Model  # the files, with what stays as the database has it
     declared_of: dict[str, str]  # case-folded '<table key>.<name as read>' -> declared name
     recreated: set[tuple[str, str]]  # case-folded (table key, name) that a statement drops or adds
+    held: list[Item] = field(default_factory=list)
 
 
-def _tables(live_read: catalog_tables.CatalogRead, head: Model) -> _Tables:
-    live = live_read.model
+def _tables(
+    live_read: catalog_tables.CatalogRead, head: Model, held: Collection[str] = frozenset()
+) -> _Tables:
+    """held: the case-folded keys of the objects of a held product. They are not compared: neither
+    the database nor the files give a statement for them."""
+    live = Model(obj for obj in live_read.model.values() if fold(obj.key) not in held)
     hand: list[Item] = []
     unsupported = {fold(u.object_key): u for u in live_read.unsupported}
     external = {fold(key) for key in live_read.external_tables}
@@ -191,7 +215,9 @@ def _tables(live_read: catalog_tables.CatalogRead, head: Model) -> _Tables:
             kept.append(obj)
     head = Model(kept)
     only = [
-        Item(u.object_key, f"{u.code}: {u.reason}") for u in live_read.unsupported if u.object_key not in head
+        Item(u.object_key, f"{u.code}: {u.reason}")
+        for u in live_read.unsupported
+        if u.object_key not in head and fold(u.object_key) not in held
     ]
 
     # the live model holds a fixed name for each engine-named constraint; give it the declared
@@ -359,24 +385,45 @@ def align(
         else Model()
     )
 
-    # a held product (products.hold): the objects that the database lacks are right here, as baseline
-    # takes them; a statement that creates one would make its held migration fail later
-    held = onboard.absent_held(session, files, config, env, scope, head)
+    # a held product (products.hold): its objects are right here as they are, at the level before
+    # the held changes. A statement that makes a held change, or creates a held object, would make
+    # the held migration fail when promote_to is raised. So none of them is compared or aligned
+    hold = products.hold(config, env, files) if config.products else None
+    held: dict[str, tuple[str, Product]] = {}
+    if hold is not None:
+        for key in [*(key for key in in_files if in_scope(scope, key)), *head]:
+            product = hold.holds(key)
+            if product is not None:
+                held[fold(key)] = (key, product)
+    files_head = head
     head = Model(head[key] for key in head if fold(key) not in held)
 
     found = _Tables([], [], [], [], [], head, {}, set())
     states: list[tuple[str, int, str]] = []
+    # the held objects that this database lacks, or holds in another shape than the file: a module
+    # that names one is not sent (plan: SET_ASIDE_DEPENDENCY)
+    changed: dict[tuple[str, str], str] = {}
     if table_model:
         read = catalog_tables.read_model(session, scope=scope)
-        found = _tables(read, head)
+        found = _tables(read, head, held)
         filed = {fold(key) for key in head}
         states, notes = _states(session, read, found.head, found.declared_of, found.recreated, filed)
         found.hand += notes
+        for key in files_head:
+            live = read.model.get(key)
+            if fold(key) in held and (
+                live is None or Model([live]).diff_paths(Model([files_head[key]]), expressions=False)
+            ):
+                changed[_named(key)] = key
     hand, only = found.hand, found.only
 
+    compared = onboard.compare_modules(session, files, env, scope)
+    for item in compared:
+        if fold(item.object_key) in held and item.status in (onboard.DIFFERS, onboard.MISSING_HERE):
+            changed[_named(item.object_key)] = item.object_key
     module_items: list[Item] = []
     send: list[modules.ModuleFile] = []
-    for item in onboard.compare_modules(session, files, env, scope):
+    for item in compared:
         if fold(item.object_key) in held:
             continue
         if item.status == onboard.ONLY_HERE:
@@ -384,17 +431,39 @@ def align(
         elif item.status == onboard.MISSING_HERE and item.note:
             hand.append(Item(item.object_key, item.note))
         elif item.status in (onboard.DIFFERS, onboard.MISSING_HERE):
-            send.append(in_files[item.object_key])
+            module = in_files[item.object_key]
+            named = sorted(set(changed) & modules.named_objects(module.text))
+            if named:
+                key, product = held[fold(changed[named[0]])]
+                hand.append(
+                    Item(
+                        item.object_key,
+                        f"names {key} of the product {product.name}, held in {env} "
+                        f'(promote_to = "{product.promote_to}")',
+                    )
+                )
+                continue
+            send.append(module)
             note = (
                 "missing" if item.status == onboard.MISSING_HERE else "the definition differs from the file"
             )
             if item.note.startswith("the text is the text of the file"):
                 note = item.note
             module_items.append(Item(item.object_key, note))
+    found.held = [
+        Item(key, f'product {product.name}, promote_to = "{product.promote_to}": not aligned')
+        for key, product in sorted(held.values(), key=lambda pair: fold(pair[0]))
+    ]
     order, _ = modules.deploy_order(send, modules.build_edges(send, ()))
     by_key = {module.key: module for module in send}
     ordered = tuple(by_key[key] for key in order)
     return _result(env, target_id, schema, found, ordered, module_items, states)
+
+
+def _named(key: str) -> tuple[str, str]:
+    """The case-folded (schema, name) of an object key, as modules.named_objects gives it."""
+    _, schema, name = names.parse_object_key(key)
+    return (schema or "").casefold(), name.casefold()
 
 
 # ------------------------------------------------------------------ the files
@@ -463,6 +532,7 @@ def _report(
         ("Constraint state", len(states)),
         ("Hand-write", len(found.hand)),
         ("Only in the database", len(found.only)),
+        (f"Held in {_cell(env)}", len(found.held)),
     )
     parts = [
         f"# azsqlcd align: {_cell(env)} / {_cell(target_id)}{of}\n",
@@ -491,6 +561,7 @@ def _report(
         ],
     )
     parts += _list("Constraint state", [Item(key, f"{count} rows: {sql}") for key, count, sql in states])
+    parts += _list(f"Held in {_cell(env)}", found.held)
     parts += _list("Hand-write", found.hand)
     parts += _list("Only in the database", found.only)
     if found.only:
@@ -532,6 +603,7 @@ def _result(
         states=tuple(states),
         hand_write=tuple(found.hand),
         only_here=tuple(found.only),
+        held=tuple(found.held),
         sql=sql,
         md=_report(env, target_id, schema, found, module_items, states, empty),
     )

@@ -304,7 +304,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, not_managed, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
-| `align.py` | `align`: the alignment script and its report (A38); read-only | catalog, catalog_tables, config, diff, emit, gen, model, modules, names, onboard, plan, replay, session, tables |
+| `align.py` | `align`: the alignment script and its report (A38); read-only | catalog, catalog_tables, config, diff, emit, gen, model, modules, names, onboard, plan, products, replay, session, tables |
 | `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | align, catalog, chain, config, errors, gen, lint, not_managed, onboard, plan, release, runner, session, sqlerrors, state, tables |
 
 Rules as built. SQL text is built in `state.py`, `catalog.py`, `catalog_tables.py`, `runner.py` and
@@ -966,13 +966,17 @@ stay in dev, never promoted, without a pull request that stays open. `docs/setup
   as set aside before (`Aside.released`), so it runs at its place in the chain after `promote_to`
   is raised; in dev, where nothing is held, not so. A module change or a drop of a module of a held
   product is not sent. A pending migration or a module to send that names a held module that the
-  database lacks is 22 `SET_ASIDE_DEPENDENCY` (`products.check_held_modules`).
+  database lacks, or holds with another text than its file (no managed row, or another
+  `source_sha256`), is 22 `SET_ASIDE_DEPENDENCY` (`products.check_held_modules`).
 - What a migration touches is `set_aside.footprint`, the rule of the independence check.
 - Not expected: in `compute_plan` an object of a held product, or one that a held migration
   creates, is not `BASELINE_REQUIRED`. `onboard.baseline` leaves out the objects of a held
   product that the database lacks (`onboard.absent_held`: one read of `catalog.list_user_objects`,
-  sent only with `[products]`). `align` writes no statement for them, for the same reason: a
-  DBA who creates such an object makes the held migration fail when it runs. `drift` and the read-back compare managed rows only, so a held object that was
+  sent only with `[products]`). `align` compares no object of a held product, present or not, and
+  writes no statement for it (also no rename of its constraints); `align.md` lists it under "Held
+  in <env>". A DBA who makes a held change, or creates a held object, makes the held migration
+  fail when it runs. A module that `align` would send and that names a held object that the
+  database lacks or holds in another shape is listed under "Hand-write". `drift` and the read-back compare managed rows only, so a held object that was
   never recorded is not in them.
 - Pull requests: `verify` and `gen` give `MIXED_HOLD` for a new migration that touches objects of
   a product with `promote_to` and other objects.

@@ -176,11 +176,29 @@ def test_a_module_that_names_a_held_module_that_the_database_lacks_is_refused():
         "schema/views/sales.vw_Report.sql",
         b"CREATE OR ALTER VIEW [sales].[vw_Report] AS\nSELECT 1 AS [x] FROM [sales].[vw_Balance];\n",
     )
-    products.check_held_modules(sandbox, [], [user], [])  # the database holds the held view
+    # the database holds the held view with the text of its file
+    products.check_held_modules(sandbox, [], [user], [], ["VIEW:[sales].[vw_Balance]"])
     with pytest.raises(ToolError) as e:
-        products.check_held_modules(sandbox, [], [user], ["VIEW:[sales].[vw_Balance]"])
+        products.check_held_modules(sandbox, [], [user], ["VIEW:[sales].[vw_Balance]"], [])
     assert (e.value.exit_code, e.value.reason_code) == (Exit.REFUSED, "SET_ASIDE_DEPENDENCY")
     assert "VIEW:[sales].[vw_Report] names VIEW:[sales].[vw_Balance]" in e.value.message
+    assert "is not in this database" in e.value.message
+
+
+def test_a_module_that_names_a_held_module_with_another_text_here_is_refused():
+    """The database holds the held view, but not the text of its file: what names the view can need
+    the held text, which does not come here."""
+    sandbox = products.hold(CONFIG, "sandbox", files_of(BALANCE))
+    user = read_module(
+        "schema/views/sales.vw_Report.sql",
+        b"CREATE OR ALTER VIEW [sales].[vw_Report] AS\nSELECT 1 AS [x] FROM [sales].[vw_Balance];\n",
+    )
+    held = ["VIEW:[sales].[vw_Balance]"]
+    with pytest.raises(ToolError) as e:
+        products.check_held_modules(sandbox, [], [user], held, held)
+    assert (e.value.exit_code, e.value.reason_code) == (Exit.REFUSED, "SET_ASIDE_DEPENDENCY")
+    assert e.value.detail["set_aside"] == "VIEW:[sales].[vw_Balance]"
+    assert "holds it with another text than its file" in e.value.message
 
 
 def test_codeowners_gives_one_glob_where_a_folder_holds_only_files_of_the_product_and_else_one_line_a_file():

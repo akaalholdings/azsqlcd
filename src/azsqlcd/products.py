@@ -289,14 +289,16 @@ def check_held_modules(
     hold: Hold,
     pending: Iterable[Migration],
     sent: Iterable[ModuleFile],
-    absent: Collection[str],
+    changed: Collection[str],
+    managed: Collection[str],
 ) -> None:
     """Refuse (SET_ASIDE_DEPENDENCY) a pending migration or a module to send that names a held
-    module that this database does not hold. absent: the keys of the held modules with no managed
-    row here."""
-    if not absent:
+    module whose file this database does not hold: the module is not here, or here with another
+    text. What names it can need the held text, which does not come here. changed: the keys of
+    these held modules; managed: the keys of the modules with a managed row here."""
+    if not changed:
         return
-    wanted = {_fold_key(key): key for key in absent}
+    wanted = {_fold_key(key): key for key in changed}
     texts = [(m.file, batch.text) for m in pending for batch in m.batches]
     texts += [(module.key, module.text) for module in sorted(sent, key=lambda m: m.key)]
     for who, text in texts:
@@ -305,11 +307,16 @@ def check_held_modules(
             key = wanted[shared[0]]
             product = hold.holds(key)
             assert product is not None
+            here = (
+                "this database holds it with another text than its file"
+                if key in managed
+                else "is not in this database"
+            )
             raise refused(
                 "SET_ASIDE_DEPENDENCY",
                 f"{who} names {key}, a module of the product {product.name}, which is held in {hold.env} "
-                f'(promote_to = "{product.promote_to}") and is not in this database. Either raise '
-                f"promote_to of [products.{product.name}] by pull request, or take {who} out of the release",
+                f'(promote_to = "{product.promote_to}") and {here}. Either raise promote_to of '
+                f"[products.{product.name}] by pull request, or take {who} out of the release",
                 blocked=who,
                 set_aside=key,
                 reason=set_aside.HELD,

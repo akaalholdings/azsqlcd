@@ -2405,6 +2405,43 @@ def test_a_shared_change_that_names_a_held_object_is_refused_where_the_product_i
     assert frozen(pipe.dbs["sandbox"]) == before
 
 
+HELD_VIEW = (
+    "schema/views/sales.vw_Balance.sql",
+    "CREATE OR ALTER VIEW [sales].[vw_Balance] AS\nSELECT [OrderId] FROM [sales].[Order];\n",
+)
+SUMMARY = (
+    "schema/views/sales.vw_Summary.sql",
+    "CREATE OR ALTER VIEW [sales].[vw_Summary] AS\nSELECT [OrderId] FROM [sales].[vw_Balance];\n",
+)
+
+
+def test_a_shared_change_that_names_a_held_module_with_a_held_text_change_is_refused_where_it_is_held(pipe):
+    """test holds vw_Balance of the product at its old text. The release changes vw_Balance (held in
+    test) and the shared vw_Summary, which selects the new column of vw_Balance. Sent alone, the
+    shared view does not bind in test (error 207). It is refused as a shared view on an absent held
+    view is: SET_ASIDE_DEPENDENCY, and nothing is sent."""
+    first = release_1(pipe)
+    product(pipe, "prod")
+    pipe.write(*HELD_VIEW)
+    pipe.write(*SUMMARY)
+    r2 = pipe.release("a product view and a shared view on it")
+    everywhere(pipe, first, r2, envs=("dev", "test"))
+    product(pipe, "dev")
+    pipe.write(HELD_VIEW[0], HELD_VIEW[1].replace("[OrderId] FROM", "[OrderId], [CustomerId] FROM"))
+    pipe.write(SUMMARY[0], SUMMARY[1].replace("[OrderId] FROM", "[OrderId], [CustomerId] FROM"))
+    r3 = pipe.release("the customer in both views")
+    assert pipe.promote(r3, "dev").code == 0
+    test = pipe.dbs["test"]
+    before = frozen(test)
+
+    refused = pipe.promote(r3, "test")
+
+    assert (refused.code, refused.reason) == (22, "SET_ASIDE_DEPENDENCY"), refused.err
+    assert "VIEW:[sales].[vw_Summary] names VIEW:[sales].[vw_Balance]" in refused.err
+    assert "promote_to" in refused.err
+    assert "another text than its file" in refused.err and frozen(test) == before
+
+
 def test_without_products_the_plan_and_the_state_writes_are_those_of_the_code_without_products(
     pipe, monkeypatch
 ):

@@ -451,6 +451,101 @@ def test_align_writes_no_statement_for_the_objects_of_a_held_product_that_the_da
     assert script == "-- nothing to align\n"
 
 
+KEYED_BALANCE = Table(
+    "sales",
+    "Balance",
+    (Column("BalanceId", TypeRef("int"), False),),
+    (PrimaryKey("PK_Balance", True, (KeyColumn("BalanceId"),)),),
+)
+HELD_BALANCE = Table(  # the held change: a column and another name of the key
+    "sales",
+    "Balance",
+    (Column("BalanceId", TypeRef("int"), False), Column("Extra", TypeRef("int"), True)),
+    (PrimaryKey("PK_Balance_Id", True, (KeyColumn("BalanceId"),)),),
+)
+HELD_VIEW = (
+    BALANCE_VIEW[0],
+    "CREATE OR ALTER VIEW [sales].[vw_Balance] AS\nSELECT [BalanceId], [Extra] FROM [sales].[Balance];\n",
+)
+SUMMARY = (
+    "schema/views/sales.vw_Summary.sql",
+    "CREATE OR ALTER VIEW [sales].[vw_Summary] AS\nSELECT [BalanceId] FROM [sales].[vw_Balance];\n",
+)
+
+
+def test_align_writes_no_statement_for_a_held_change_of_product_objects_that_the_database_holds(
+    project, monkeypatch
+):
+    """test holds the product balance at the level before its held change (a column, a view text and
+    the rename of its key). That is right while the product is held: the held migration makes the
+    change when promote_to is raised, and it fails if a DBA made it before. So align.sql has no
+    statement for these objects, also no sp_rename to the held name of the key, and align.md lists
+    them as held. In dev, where nothing is held, the same change is aligned."""
+    release_1(project)
+    project.write("azsqlcd.toml", (project.repo / "azsqlcd.toml").read_text() + ENV_TEST)
+    project.write_objects(HELD_BALANCE)
+    project.write(*HELD_VIEW)
+    db = project.database()
+    db.model = Model([SALES, CUSTOMER, ORDER, KEYED_BALANCE])
+    db.out_of_band(FUNCTION[1], VIEW[1], PROCEDURE[1], BALANCE_VIEW[1])
+
+    def engine_named(model):
+        rows = rows_from_model(model)
+        for row in rows["indexes"]:
+            if row["name"] == "PK_Balance":  # a DBA added the key again with no name
+                row["name"], row["constraint_is_system_named"] = "PK__Balance__3214EC08", 1
+        return rows
+
+    monkeypatch.setattr(fake_database, "rows_from_model", engine_named)
+
+    _, dev_script, _ = align(project, db)
+    assert "ALTER TABLE [sales].[Balance] ADD [Extra] int NULL;" in dev_script
+    assert "N'PK_Balance_Id'" in dev_script and HELD_VIEW[1] in dev_script
+
+    out = project.out("align")
+    where = ["--env", "test", "--target", "sales-test", "--out", str(out)]
+    done = project.tool("align", "--root", str(project.repo), *where, db=db)
+    assert done.code == 0, done.err
+    script = (out / "onboarding" / "test" / "align.sql").read_text()
+    report = (out / "onboarding" / "test" / "align.md").read_text()
+    assert script == "-- nothing to align\n"
+    assert "sp_rename" not in script and "[Extra]" not in script
+    held = report[report.index("## Held in test") : report.index("## Hand-write")]
+    for key in ("TABLE:[sales].[Balance]", "VIEW:[sales].[vw_Balance]"):
+        assert f'| {key} | product balance, promote_to = "dev": not aligned |' in held
+    assert "[sales].[Balance]" not in report[report.index("## Only in the database") :]
+
+
+def test_align_hand_writes_a_shared_module_that_names_a_held_object_that_the_database_lacks(project):
+    """vw_Summary is shared and selects from vw_Balance, which is held in test and not there: the plan
+    refuses it with SET_ASIDE_DEPENDENCY, and a DBA who runs it gets error 208. align.sql must not
+    send it; align.md lists it under Hand-write with the held object."""
+    release_1(project)
+    project.write("azsqlcd.toml", (project.repo / "azsqlcd.toml").read_text() + ENV_TEST)
+    project.write_objects(BALANCE)
+    project.write(*BALANCE_VIEW)
+    project.write(*SUMMARY)
+    db = project.database()
+    db.model = Model([SALES, CUSTOMER, ORDER])
+    db.out_of_band(FUNCTION[1], VIEW[1], PROCEDURE[1])
+
+    _, dev_script, _ = align(project, db)
+    assert SUMMARY[1] in dev_script  # not held in dev
+
+    out = project.out("align")
+    where = ["--env", "test", "--target", "sales-test", "--out", str(out)]
+    done = project.tool("align", "--root", str(project.repo), *where, db=db)
+    assert done.code == 0, done.err
+    script = (out / "onboarding" / "test" / "align.sql").read_text()
+    report = (out / "onboarding" / "test" / "align.md").read_text()
+    assert "[vw_Summary]" not in script and script == "-- no statement: see Hand-write in align.md\n"
+    hand = report[report.index("## Hand-write") : report.index("## Only in the database")]
+    assert (
+        "| VIEW:[sales].[vw_Summary] | names VIEW:[sales].[vw_Balance] of the product balance, held in test "
+        '(promote_to = "dev") |'
+    ) in hand
+
+
 # ------------------------------------------------------------------ align and [env.<name>] not_managed
 def test_align_does_not_read_or_write_the_objects_that_the_environment_does_not_manage(project):
     """test does not manage sales.Customer: the tool must not touch it there, so align.sql has no
