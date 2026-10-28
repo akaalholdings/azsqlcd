@@ -355,9 +355,10 @@ def _index(keys: Iterable[str]) -> _Index:
     return index
 
 
-def _scan(module: ModuleFile, index: _Index) -> set[str]:
-    toks = lex.significant(lex.tokens(module.text))
-    found: set[str] = set()
+def _names(text: str) -> list[tuple[_Name, bool]]:
+    """(name, written with its schema) of each object name of the text, in text order."""
+    toks = lex.significant(lex.tokens(text))
+    found: list[tuple[_Name, bool]] = []
     i = 0
     while i < len(toks):
         if toks[i].kind not in _IDENT:
@@ -371,10 +372,23 @@ def _scan(module: ModuleFile, index: _Index) -> set[str]:
             i += 2
         if not member:
             # [s].[n] and [s].[n].[column]; a one-part name is looked up in dbo only (A17)
-            name = (parts[0], parts[1]) if len(parts) > 1 else ("dbo", parts[0])
-            found |= index.get(_fold(name), set())
+            found.append(((parts[0], parts[1]), True) if len(parts) > 1 else (("dbo", parts[0]), False))
+    return found
+
+
+def _scan(module: ModuleFile, index: _Index) -> set[str]:
+    found: set[str] = set()
+    for name, _ in _names(module.text):
+        found |= index.get(_fold(name), set())
     found.discard(module.key)
     return found
+
+
+def named_objects(text: str) -> set[tuple[str, str]]:
+    """Every (schema, name) that a piece of SQL writes with its schema ([s].[n], s.n), case-folded:
+    the token scan of scan_references with no list of known keys. A one-part name is left out:
+    with no list of keys it cannot be told from a column, a type or a keyword."""
+    return {_fold(name) for name, qualified in _names(text) if qualified}
 
 
 def scan_references(module: ModuleFile, known_keys: Collection[str]) -> set[str]:
