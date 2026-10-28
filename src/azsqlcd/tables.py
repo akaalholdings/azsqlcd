@@ -64,6 +64,7 @@ from azsqlcd.model import (
     CreateTable,
     CreateType,
     DropColumn,
+    DropConstraint,
     DropTable,
     ForeignKey,
     Model,
@@ -312,7 +313,8 @@ def _name_drift(
     The rename gives the recorded name, in the recorded letters: Hooks.read_back records the name
     of the file. file_names (fixed name -> name of the file, from _aligned) is for a record of
     v0.1.0, which holds such a constraint under its fixed name: when no file has that name, the
-    rename gives the name of the file.
+    rename gives the name of the file. table_drift leaves out a name that a pending migration drops
+    or renames: that name was the name of a file of the recorded release.
     """
     by_label = {
         label: item
@@ -466,6 +468,39 @@ class Hooks:
         return [key for key in self.model if fold(key) not in managed and fold(key) not in created]
 
     # -------------------------------------------------------------- drift
+    def _named_later(self, recorded: State) -> set[tuple[str, str]] | None:
+        """(schema, constraint name), case-folded, of each constraint that a migration of this release
+        drops or renames and that the database did not apply: a name of a file of the recorded
+        release. None when that is not known: the database applied a migration that this release
+        does not hold, or a migration file cannot be read."""
+        files = self._bundle.files
+        applied = {s.migration_id for s in recorded.steps if s.migration_id is not None and s.status == "ok"}
+        found: set[tuple[str, str]] = set()
+        try:
+            text = files[chain.SUM_PATH].decode("utf-8") if chain.SUM_PATH in files else None
+            order = chain.effective_order(chain.parse_sum(text)) if text is not None else []
+            by_file = {entry.file: entry for entry in order}
+            if not applied <= set(by_file):
+                return None
+            for entry in order:
+                done = entry  # a replacement of an applied migration is applied
+                while done.file not in applied and done.replaces in by_file:
+                    done = by_file[done.replaces]
+                if entry.withdrawn or done.file in applied:
+                    continue
+                data = files[f"migrations/{entry.file}"]
+                for op in _operations(chain.parse_migration(data.decode("utf-8"), entry.file)):
+                    match op:
+                        case DropConstraint():
+                            found.add((fold(op.schema), fold(op.name)))
+                        case Rename(kind="object"):
+                            found.add((fold(op.old[0]), fold(op.old[1])))
+                        case _:
+                            pass
+        except (KeyError, ToolError, ValueError):
+            return None
+        return found
+
     def table_drift(
         self, session: Session, state: State, keys: Collection[str]
     ) -> dict[str, list[Difference]]:
@@ -491,6 +526,7 @@ class Hooks:
         for item in found.system_named:
             engine_named[fold(item.table_key)].append(item)
         rows = {fold(key): row for key, row in state.objects.items()}
+        later = self._named_later(state) if found.system_named else set()
         drift: dict[str, list[Difference]] = {}
         for key in keys:
             row = rows[fold(key)]
@@ -499,8 +535,15 @@ class Hooks:
                 items = engine_named[fold(key)]
                 declared, table = self.model.get(key), found.model.get(key)
                 file_names: dict[str, str] = {}
-                if items and declared is not None and table is not None:
-                    file_names = _aligned(table, declared, [i.fixed_name for i in items], lambda: None)[2]
+                if items and isinstance(declared, Table) and table is not None and later is not None:
+                    aligned = _aligned(table, declared, [i.fixed_name for i in items], lambda: None)[2]
+                    # a name that a pending migration drops or renames was a name of a file: never
+                    # replace it with the name that the next release gives
+                    file_names = {
+                        fixed: name
+                        for fixed, name in aligned.items()
+                        if (fold(declared.schema), fold(fixed)) not in later
+                    }
                 stored = catalog_tables.with_stored_defaults(row.capture)
                 seen, named = _name_drift(stored, live[fold(key)], items, file_names)
                 differences = [

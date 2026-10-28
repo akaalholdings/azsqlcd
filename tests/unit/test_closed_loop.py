@@ -605,6 +605,8 @@ def test_a_record_of_v0_1_0_under_a_fixed_name_ends_with_the_name_of_the_file(pr
     (statement,) = rename_statements(project.tool("drift", *second.where, db=db), ORDER.key)
 
     assert statement.endswith(", N'FK_Order_Customer', N'OBJECT';")
+    # release 3 changes the table and keeps the key: its bundle gives the same name
+    assert rename_statements(project.tool("drift", *third.where, db=db), ORDER.key) == [statement]
     db.out_of_band(statement)
     # the database has the name of the file now; the record still has the old label
     left = project.tool("drift", *second.where, db=db)
@@ -617,6 +619,51 @@ def test_a_record_of_v0_1_0_under_a_fixed_name_ends_with_the_name_of_the_file(pr
     done = project.deploy(third, db)
     assert done.code == 0, done.err
     assert db.model == third.model
+
+
+DROP_DEFAULT = "ALTER TABLE [sales].[Order] DROP CONSTRAINT [DF_Order_Status];"
+DEFAULT_WITHOUT_A_NAME = "ALTER TABLE [sales].[Order] ADD DEFAULT ((0)) FOR [Status];"
+
+
+@pytest.mark.parametrize("new_column", [False, True])
+def test_the_rename_gives_the_recorded_name_when_the_next_release_renames_the_constraint(project, new_column):
+    """F1. The default of the file has the fixed name of the reader (DF_Order_Status). A DBA makes it
+    again without a name; the next release renames it in its file. The rename must give the recorded
+    name with each bundle and in the plan refusal: the pending migration drops DF_Order_Status. After
+    that statement the release must plan and deploy."""
+    first = release_1(project)
+    db = deployed(project, first)
+    before = constraint_names(db, ORDER.key)
+    db.out_of_band(DROP_DEFAULT, DEFAULT_WITHOUT_A_NAME)
+    (engine_name,) = constraint_names(db, ORDER.key) - before
+    columns = tuple(
+        dataclasses.replace(c, default=DefaultConstraint("DF_Order_State", Expression.from_sql("((0))")))
+        if c.name == "Status"
+        else c
+        for c in ORDER.columns
+    )
+    if new_column:
+        columns += (Column("Note", TypeRef("nvarchar", length=200), True),)
+    project.write_objects(dataclasses.replace(ORDER, columns=columns))
+    second = project.release("rename the default", "rename_default")
+    statement = f"EXEC sys.sp_rename N'[sales].[{engine_name}]', N'DF_Order_Status', N'OBJECT';"
+
+    assert rename_statements(project.tool("drift", *first.where, db=db), ORDER.key) == [statement]
+    assert rename_statements(project.tool("drift", *second.where, db=db), ORDER.key) == [statement]
+    plan = project.tool("plan", *second.where, "--out", str(project.out("plan")), db=db)
+    assert plan.reason == "DRIFT_TOUCHED"
+    assert [line.strip() for line in plan.err.splitlines() if line.strip().startswith("rename ")] == [
+        f"rename {ORDER.key} {statement}"
+    ]
+
+    db.out_of_band(statement)
+
+    assert project.tool("plan", *second.where, "--out", str(project.out("plan")), db=db).code == 0
+    done = project.deploy(second, db)
+    assert done.code == 0, done.err
+    assert db.model == second.model
+    clean = project.tool("drift", *second.where, db=db)
+    assert (clean.code, clean.out.strip()) == (0, "no drift")
 
 
 def test_a_migration_that_was_run_by_hand_without_a_name_ends_with_the_name_of_the_file(project):
