@@ -399,7 +399,7 @@ Existing database:
      environment compares with it;
    - `onboarding/prod/rename-constraints.sql`, only when prod has constraints with a name that
      the engine made. The files use fixed names. A DBA reads the script and runs it on prod by
-     hand; it holds `EXEC sys.sp_rename` only. The tool does not run it (`align` is cut).
+     hand; it holds `EXEC sys.sp_rename` only. The tool does not run it.
 3. Read `export.md`. Each object in its unmanaged lists stays outside the tool; its change path is
    a `raw` batch. Then commit by one pull request:
    - `onboarding/prod/` of the artefact;
@@ -424,7 +424,7 @@ Existing database:
      name, the report says so and the plan will stop with `NAME_COLLISION`.
    - Table-class objects, with `table_model = true`: each one against `onboarding/prod/snapshot.json`
      of the release. `differs` or `missing_here`: step 7 will refuse. Refresh the environment from
-     prod (runbook), or a DBA aligns it by hand. `only_here`: unmanaged in this target. If the
+     prod (runbook), or align it ("A database that differs from the files", below). `only_here`: unmanaged in this target. If the
      release holds no `snapshot.json` the report says that tables were not compared.
    - A constraint with a name that the engine made, and the shape of a constraint of prod: the
      report holds `rename-constraints.sql`. A DBA reads it and runs it on this database. The
@@ -516,6 +516,35 @@ a temporal table came back byte-equal in the live run (13 of 14 table files and 
 differed). The exported files are the model at onboarding only. Do not copy an export over a
 repository that already runs with `table_model = true`: `verify` then fails with `PRF002` and
 `gen` refuses (`COMPUTED_CHANGE`, `USER_TYPE_CHANGE`). `schema/_tombstones.toml` is not exported.
+
+### A database that differs from the files
+
+Lower environments often differ from prod: other columns, indexes, constraints or compression;
+foreign keys that are disabled or not trusted; older modules. `baseline` refuses such a table
+(`READBACK_MISMATCH`). `azsqlcd align` writes the script that makes the database equal to the
+files. It only reads the database. It never runs the script.
+
+1. In the repository, with the files that the next release will hold:
+   `azsqlcd align --root . --env <env> --target <target> [--schema <schema>] [--out <dir>]`.
+   It writes `onboarding/<env>/align.sql` and `onboarding/<env>/align.md` under `--out` (default:
+   `--root`). Do not commit them.
+2. Read `align.md`. It gives the count of each section and each object with what differs.
+   - "To review: loses data": a dropped column, or a type that may not hold every value. The
+     statement is in `align.sql`, commented out, after a line `-- REVIEW: loses data: <why>`.
+     Remove the comment marks only when the loss is accepted.
+   - "Hand-write": a change that `gen` refuses (for example `PARTITION_CHANGE`,
+     `TEMPORAL_CHANGE`, `IDENTITY_CHANGE`, `COLLATION_CHANGE`), an object that the tool cannot
+     read (`UNSUPPORTED`), or a module whose name another kind of object holds. `align.sql` has no
+     statement for it. Write it by hand, or refresh the environment from prod.
+   - "Only in the database": an object with no file. It is never dropped. Add its file, exclude
+     it in `[scope]` of `azsqlcd.toml`, or drop it by hand.
+3. `align.sql` runs in this order: constraint names (`sp_rename`), table-class objects, modules,
+   constraint state. The constraint state statements check every row of their table
+   (`WITH CHECK CHECK CONSTRAINT`) or build an index again (`ALTER INDEX ... REBUILD`). Each has
+   the row count of its table in a comment, smallest table first.
+4. A DBA runs `align.sql` in a maintenance window, batch by batch.
+5. Run `baseline --report-only`, then `baseline` (or `baseline --schema <schema>`). It must pass.
+   Run `align` again: on a database that equals the files it writes "nothing to align".
 
 ### One schema at a time
 

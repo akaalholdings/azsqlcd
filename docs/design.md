@@ -11,9 +11,10 @@ Reading order:
 1. Part 1, "Owner decisions" and "Amendments". The amendments come from two adversarial reviews
    of the blueprint. **Where an amendment and Part 2 disagree, the amendment wins.**
 2. Part 1, "Build contracts": exit codes, command line, module map.
-3. Part 2: the blueprint. It is unchanged but for two lines of 2026-10-07: the heading of the
-   tool repository in section (a) no longer states a visibility, and the install line at the end
-   of section (k) names the tag that exists.
+3. Part 2: the blueprint. It is unchanged but for three lines: two of 2026-10-07 (the heading of
+   the tool repository in section (a) no longer states a visibility, and the install line at the
+   end of section (k) names the tag that exists) and one of 2026-10-28 (the onboarding line on a
+   table-class object that differs names `azsqlcd align`, A35).
 
 ---
 
@@ -300,7 +301,8 @@ and `tables.py` are not in the map of "Build contracts".
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, state, tables |
 | `gen.py` | `gen`, `gen --resum`, model validation and the `verify` proof | chain, config, diff, emit, errors, lex, lint, model, modules, names, parse, release, replay |
-| `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | catalog, chain, config, errors, gen, lint, onboard, plan, release, runner, session, sqlerrors, state, tables |
+| `align.py` | `align`: the alignment script and its report (A35); read-only | catalog, catalog_tables, config, diff, emit, gen, model, modules, names, onboard, plan, replay, session, tables |
+| `cli.py` | argparse, the wiring of every command, exit handling, CI outputs. The only module that prints | align, catalog, chain, config, errors, gen, lint, onboard, plan, release, runner, session, sqlerrors, state, tables |
 
 Rules as built. SQL text is built in `state.py`, `catalog.py`, `catalog_tables.py`, `runner.py` and
 `emit.py`; `plan.py` holds three constant batches of the syntax check (`SET PARSEONLY ON;`,
@@ -338,6 +340,7 @@ sign-in that cannot be used is refused before the release is read (22 `AUTH_INVA
 | `drift [--export KEY --out DIR]` | One line for each difference: `class key property stored_hash live_hash`. One more line, `rename <table key> <EXEC sys.sp_rename statement>`, for each recorded constraint that has a name of the engine (A35). A plan refusal for drift prints the same lines on stderr. With `--export` and `--out` (given together): checks the fence, writes `DIR/schema/<kind dir>/<schema>.<name>.sql`, exit 0, no drift report | 0 / 30 `DRIFT_FOUND` / 22 / 24 |
 | `export --root DIR --env E --target T --out DIR [--schema NAME]` | `DIR/schema/**` (modules and table-class files) and `DIR/onboarding/<env>/export.md`, `snapshot.json`, `rename-constraints.sql` (when not empty) | 0 / 22 / 24 |
 | `baseline [--report-only] --confirm-database NAME [--out DIR] [--schema NAME]` | In the working directory: `onboarding/<env>/baseline-diff.md`, `onboarding/<env>/modules/*.sql` (live text of each module that differs), `onboarding/<env>/rename-constraints.sql`. Write mode with `--out`: `DIR/report.json` | 0 / 22; write mode also 21 / 23 / 24 / 25 |
+| `align --root DIR [--schema NAME] [--out DIR]` | `onboarding/<env>/align.sql` and `align.md` under `--out` (default `--root`); read-only (A35). Takes `--root` in place of `--bundle` and `--digest` | 0 / 22 / 24 |
 | `resolve --confirm-database NAME --reason TEXT (--mark-applied M \| --mark-not-applied M \| --accept-drift KEY \| --adopt-module KEY \| --clear-run RUN_ID \| --rebind-environment ENV) [--force-no-readback] [--out DIR]` | With `--out`: `DIR/report.json`. `--force-no-readback` is for `--mark-applied` only. `--rebind-environment` must name the environment of `--env` | 0 / 21 / 22 / 23 / 24 / 25 |
 
 Ends and outputs:
@@ -837,9 +840,30 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   for one plan (the same session and the same `Work`), so a plan reads each dependant once. No
   reason code, no state value and no state column was added.
 
+### Align (2026-10-28)
+
+- A35. `azsqlcd align --root DIR --env E --target T [--schema S] [--out DIR]` writes
+  `onboarding/<E>/align.sql` and `align.md` under `--out` (default `--root`). This overrides A30
+  for `align` in part: the tool writes the alignment script, and it never runs it. The command is
+  read-only: fence facts and catalog reads only, no lock, no state row. The database model is
+  `catalog_tables.read_model` under `[scope]` (or the one schema of `--schema`, as
+  `export --schema`); the file model is `gen.load_model` of the working tree, cut to the same
+  scope. Sections: 1, `sp_rename` of each engine-named constraint that a file holds in the same
+  shape (`tables.declared_names`); 2, the operations of `diff.diff` (the order of `gen`); 3, the
+  file text of each module that differs or is missing (`onboard.compare_modules`), in deploy
+  order; 4, `WITH CHECK CHECK CONSTRAINT` and `ALTER INDEX ... REBUILD` for constraints that are
+  disabled or not trusted and indexes or keys that are disabled, with the row count of the table
+  (`catalog.table_facts`), smallest table first. A change that `diff` refuses gets no statement:
+  `align.md` lists it under "Hand-write" with the refusal code, and the object stays as the
+  database has it. An object that only the database has is never dropped ("Only in the
+  database"). A statement whose `diff.classify` code can lose data (`DROP_COLUMN`,
+  `ALTER_COLUMN_LOSSY`, and the drops) is written commented out after `-- REVIEW: loses data:`.
+  No new reason code; a file that cannot be written is `EXPORT_INCOMPLETE`. The state tables are
+  not read or written. Proven against fakes only (`tests/unit/test_align.py`).
+
 ---
 
-# Part 2: blueprint (unchanged but for two lines; see "Reading order")
+# Part 2: blueprint (unchanged but for three lines; see "Reading order")
 
 # azsqlcd: final blueprint
 
@@ -1031,7 +1055,7 @@ Reference environment: prod (read-only, plan identity) [owner question].
    - Module differs: no action. Its row is written with `source_sha256 = NULL`; the first deploy overwrites it with the file text; the plan lists it as OVERWRITE_MODULE.
    - Only here: unmanaged in that target. Reported, never dropped.
    - System-named constraint with equal shape (table, kind, columns, expression): the tool writes `onboarding/<E>/rename-constraints.sql` (only `EXEC sys.sp_rename`, metadata only), for prod too. A human reviews it.
-   - Table-class object differs or is missing: baseline refuses. Fix: refresh the environment from prod (DBA work), or a human writes `onboarding/<E>/align.sql`. The tool writes no alignment DDL.
+   - Table-class object differs or is missing: baseline refuses. Fix: refresh the environment from prod (DBA work), or `azsqlcd align` writes `onboarding/<E>/align.sql` (read-only; a DBA reviews and runs it, A35).
    - `azsqlcd align --env <E> --target <T> --script onboarding/<E>/rename-constraints.sql --confirm-database <db>` runs a script through the runner (lock, run row, one transaction, guard). Used for rename and align scripts only; available from `resolve.yml`.
 7. `azsqlcd baseline --env <E> --target <T> --confirm-database <db>`: takes the lock; creates schema `azsqlcd` and its tables; writes meta (project, environment); requires structural equality of the catalog and the release model for managed table-class objects (v0.2); writes a `baseline` step and one object row per managed object with its capture. No object DDL. Order: dev, sandbox, test, preprod, prod.
 8. v0.1 to v0.2 switch: one pull request adds the table files and sets `table_model = true`, with no migration. A plan that finds a table-class object in the model with no object row and no pending migration that creates it refuses: "run baseline".

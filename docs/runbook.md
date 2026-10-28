@@ -260,19 +260,19 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | `REBIND_ENV_MISMATCH` | `--rebind-environment` names another environment than `--env` | Untouched | Start the workflow again with `subject` equal to `environment` |
 | `REBIND_PROD_SERVER` | `rebind-environment` to prod on a server that is not the prod server of `azsqlcd.toml` | Untouched | A database is bound to prod only on the configured prod server. Check the target; do not work around it |
 
-### Onboarding: export, baseline, drift --export
+### Onboarding: export, baseline, align, drift --export
 
 | Reason code | Meaning | State of the database | What to do |
 |---|---|---|---|
 | `ALREADY_BASELINED` | The database has a baseline step. A second baseline is allowed only once, for the switch to `table_model = true`, while the state holds no row of a table-class object. `baseline --schema <name>`: nothing is left to record: each object of the schema in the release has a managed row, or the release holds no file of the schema | Untouched | An object that changed since is drift: `-f action=accept-drift -f subject=<object key>`. A module that the tool does not manage: `-f action=adopt-module -f subject=<object key>` |
 | `BASELINE_ACK_REQUIRED` | A live module differs from its file, the first deploy will overwrite it, and `onboarding/<env>/overwrite-ack.toml` of the release does not list its key | Untouched | "Baseline acknowledgement file" |
 | `BASELINE_ACK_INVALID` | `onboarding/<env>/overwrite-ack.toml` does not hold exactly one key `modules` with a list of module keys | Untouched | Fix the file by pull request: "Baseline acknowledgement file" |
-| `EXPORT_INCOMPLETE` | `export`: a file under `--out` could not be written. The message names the file and the error of the operating system. On Windows without long paths the usual cause is a full path above 259 characters | Untouched: the database was only read. A part of the files is under `--out` | Remove the directory of `--out`, fix the cause (a shorter `--out` path; on Windows `git config --global core.longpaths true` and the system setting `LongPathsEnabled`), and run `export` again |
+| `EXPORT_INCOMPLETE` | `export` or `align`: a file under `--out` could not be written. The message names the file and the error of the operating system. On Windows without long paths the usual cause is a full path above 259 characters | Untouched: the database was only read. A part of the files is under `--out` | Remove the directory of `--out`, fix the cause (a shorter `--out` path; on Windows `git config --global core.longpaths true` and the system setting `LongPathsEnabled`), and run `export` (or `align`) again |
 | `SNAPSHOT_INVALID` | `baseline --report-only`: `onboarding/prod/snapshot.json` of the release is not a table snapshot that `export` wrote | Untouched | Export from prod again and commit the new `snapshot.json` by pull request |
 | `CONSTRAINT_NAMES` | `baseline` (write mode, `table_model = true`): a constraint of the table files has a name that the engine made in this database (for example `PK__Customer__3214EC07A1B2C3D4`). Recorded under the name of the file it would be a name that the database does not have. Detail `constraints` lists them | Untouched: nothing was written | The tool wrote `onboarding/<env>/rename-constraints.sql` in the working directory of the run (the same text is `rename_constraints_sql` of the refusal). It holds `EXEC sys.sp_rename` only. A DBA reviews and runs it; then `gh workflow run onboard.yml --ref main -f environment=<env> -f target=<target> -f action=baseline -f release=r<n> -f confirm_database=<name>` again. `baseline --report-only` lists the same constraints before any write |
 | `SECRET_LITERAL` | `export`: a table-class file would hold a `PASSWORD =` or `SECRET =` literal. Nothing was written. `drift --export`: the module text holds such a literal | Untouched | A DBA removes the literal from the object, or a pull request lists the object under `[unmanaged] objects` in `azsqlcd.toml`. Then export again |
 | `SCHEMA_NOT_FOUND` | `export --schema`: the database has no schema of that name (compared without letter case). Nothing was written | Untouched: the database was only read | Check the name, for example with `SELECT [name] FROM sys.schemas;` |
-| `OUT_OF_SCOPE` | `export --schema`: the schema is the schema of the tool (`azsqlcd`) or is in `[scope] exclude` of `azsqlcd.toml`. `baseline --schema`: `[scope]` of the release does not manage the schema (it is not in `schemas`, or it is excluded). `resolve --adopt-module`: the module is outside `[scope]` | Untouched: nothing was written | Export: take the schema out of `exclude` first, by pull request. Baseline: merge the pull request that adds the schema to `[scope] schemas` with its files, build, and baseline with that release |
+| `OUT_OF_SCOPE` | `export --schema` and `align --schema`: the schema is the schema of the tool (`azsqlcd`) or is in `[scope] exclude` of `azsqlcd.toml`. `baseline --schema`: `[scope]` of the release does not manage the schema (it is not in `schemas`, or it is excluded). `resolve --adopt-module`: the module is outside `[scope]` | Untouched: nothing was written | Export: take the schema out of `exclude` first, by pull request. Baseline: merge the pull request that adds the schema to `[scope] schemas` with its files, build, and baseline with that release |
 | `MODULE_NOT_EXPORTABLE` | `drift --export`: the key is not a module key, the database has no module with this name and kind, the definition is encrypted, or the text cannot be a module file | Untouched | Give the module key as the drift report prints it. An encrypted module cannot be managed |
 
 ## Exit 23
@@ -869,6 +869,17 @@ work (a new target, after the script of `setup-sql`) takes the whole chain with 
    step 2, or onboard the target (`docs/setup.md`).
 4. After the first deploy the database is a normal target: each later release applies only what
    it added.
+
+### A table differs from its file at onboarding
+
+`baseline` stops with `READBACK_MISMATCH`, or `baseline --report-only` lists a table-class object
+as `differs` or `missing_here`. Refresh the environment from prod, or run
+`azsqlcd align --root . --env <env> --target <target>` in the repository (read-only). A DBA
+reviews `onboarding/<env>/align.sql` and runs it in a maintenance window; the tool never runs it.
+`align.md` lists what has no statement ("Hand-write", with the refusal code of `gen`), the
+statements that can lose data (commented out after `-- REVIEW: loses data`), and the objects that
+only the database has (never dropped). Then run `baseline` again. `docs/setup.md`, section 7, "A
+database that differs from the files", has the steps.
 
 ### Baseline acknowledgement file
 
