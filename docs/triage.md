@@ -203,6 +203,10 @@ Open the `.jsonl` file in a text editor before you send it. It is plain text.
 - Paths of the runner or of your machine in `argv` (`--out`, `--bundle`, `--root`): a home
   directory holds a user name.
 - Names of migration files and steps, in the message of `end` and in `report.json`.
+- One `EXEC sys.sp_rename` statement in the message of `end`, when a plan stops with
+  `TABLE_BLOCKER` for an index or a foreign key that is a recorded constraint with a name that the
+  engine made. It holds the two names and no other text. A refusal for drift (`DRIFT_TOUCHED`,
+  `DRIFT_BLOCK`, `DRIFT_FOUND`) holds no statement: its `rename` lines are printed, not logged.
 - The sha256 of each batch. A hash of a short batch with a guessable value can be tested against
   guesses by someone who has the rest of the text.
 - With SQL authentication, `<hidden>` in a place where you expect a name: an object name, a

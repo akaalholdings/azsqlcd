@@ -130,6 +130,10 @@ class DriftItem(NamedTuple):
 @dataclass(frozen=True)
 class DriftResult:
     items: tuple[DriftItem, ...]  # by object key, then property
+    # A35: the recorded constraints that the database holds under a name that the engine made, each
+    # with the name to give it (fixed_name: the recorded name, which is the name of the file). One
+    # item of `items` for each; tables.rename_lines gives the statements that end this drift
+    renames: tuple[catalog_tables.SystemNamed, ...] = ()
 
     @property
     def has_drift(self) -> bool:
@@ -1195,7 +1199,8 @@ def drift(
     managed): ALTER VIEW would drop the index, and the runner refuses to send it. Modules are
     compared here; table-class objects by table_hooks.table_drift, and without table_hooks not at
     all. An item holds a key, a property name and hashes, never text (A25). The bundle is not
-    read: nothing of a module drift comes from the files.
+    read: nothing of a module drift comes from the files. `renames` names each recorded
+    constraint that has a name of the engine now (A35).
 
     Raises ToolError REFUSED: ENV_NOT_CONFIGURED, TARGET_NOT_CONFIGURED, the fence codes,
     FENCE_META_MISMATCH, STATE_MISSING and the other codes of read_state, NO_VIEW_DEFINITION.
@@ -1264,7 +1269,14 @@ def drift(
             for name in catalog.list_schemas(session)
             if not scope.listed(name)
         ]
-    return DriftResult(tuple(sorted(items, key=lambda item: (item.object_key, item.property))))
+    renames = [
+        rename
+        for key, differences in differing.items()
+        for rename in catalog_tables.name_drift_renames(key, [d.property for d in differences])
+    ]
+    return DriftResult(
+        tuple(sorted(items, key=lambda item: (item.object_key, item.property))), tuple(renames)
+    )
 
 
 def export_drift(session: Session, key: str) -> tuple[str, bytes]:

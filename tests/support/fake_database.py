@@ -29,6 +29,10 @@ State (plain attributes; a test may read and set them)
                of a table and of each key and index is in `model` (Table.on, .on of a key or index)
     external_tables    (schema, name) of the external tables: sys.objects type ET, a row of
                read_tabulars with is_external = 1 and no column. No DDL of the fake makes one
+    engine_named     folded (schema, name) of the constraints that have a name of the engine
+                     (is_system_named = 1): ALTER TABLE ... ADD of a constraint with no name makes
+                     one, as a DBA can write it and the parser of the tool cannot; sp_rename of the
+                     constraint ends it
 
 Sessions
     db.session() opens a session on the shared state; pass db.session as session_factory. Each
@@ -289,6 +293,7 @@ class _Snapshot:
     model: Model
     modules: dict[Name, Module]
     tables: dict[str, list[dict[str, Any]]] | None
+    engine_named: frozenset[Name]
 
 
 # ------------------------------------------------------------------ the database
@@ -308,6 +313,7 @@ class FakeDatabase:
         self.indexed_views: set[str] = set()
         self.partition_schemes: set[str] = set()
         self.external_tables: set[tuple[str, str]] = set()
+        self.engine_named: set[Name] = set()
         self.batches: list[str] = []
         self.ddl: list[str] = []
         self.unknown: list[str] = []
@@ -315,6 +321,7 @@ class FakeDatabase:
         self.lock_holder: FakeDbSession | None = None
         self._rules: list[_Rule] = []
         self._identity: dict[str, int] = {}
+        self._engine_names = 0
         self._transactions = 1000
         self._clock = 0
         if setup_sql is not None:
@@ -448,10 +455,12 @@ class FakeDatabase:
         return self._transactions
 
     def snapshot(self) -> _Snapshot:
-        return _Snapshot(self.model, dict(self.modules), copy.deepcopy(self.tables))
+        tables = copy.deepcopy(self.tables)
+        return _Snapshot(self.model, dict(self.modules), tables, frozenset(self.engine_named))
 
     def restore(self, saved: _Snapshot) -> None:
         self.model, self.modules, self.tables = saved.model, dict(saved.modules), copy.deepcopy(saved.tables)
+        self.engine_named = set(saved.engine_named)
 
     # -------------------------------------------------------------- the catalog, from the state
     def schema_names(self) -> dict[str, str]:
@@ -642,8 +651,39 @@ class FakeDatabase:
         self.modules[parts[0], parts[1]] = self.bind(module)
 
     # -------------------------------------------------------------- table DDL
+    def _name_as_the_engine(self, batch: str) -> tuple[str, Name | None]:
+        """ALTER TABLE ... ADD of a constraint with no name: the statement with the name that the
+        engine makes, and that name. Any other batch: as it is, and None.
+
+        The parser of the tool refuses a constraint without a name (NF002), so the fake gives the
+        name first. The name has the form of the engine (PK__<table>__<hex>) and is counted, not
+        hashed: no rule of the tool reads its parts.
+        """
+        toks = lex.significant(lex.tokenize(batch))
+        words = [_word(tok) for tok in toks]
+        at = words.index("ADD") + 1 if words[:2] == ["ALTER", "TABLE"] and "ADD" in words else len(words)
+        prefixes = {"PRIMARY": "PK", "UNIQUE": "UQ", "CHECK": "CK", "FOREIGN": "FK", "DEFAULT": "DF"}
+        prefix = prefixes.get(words[at]) if at < len(words) else None
+        if prefix is None:
+            return batch, None
+        table = [tok.value for tok in toks[2 : _first(toks, "ADD", "WITH")] if tok.kind in _IDENT]
+        assert len(table) == 2, f"the fake alters a table by its two-part name: {head(batch)}"
+        self._engine_names += 1
+        name = f"{prefix}__{table[1][:9]}__{0x3214EC07 + self._engine_names:08X}"
+        start = toks[at].pos
+        return f"{batch[:start]}CONSTRAINT {names.quote(name)} {batch[start:]}", (fold(table[0]), fold(name))
+
+    def _constraint_names(self) -> set[Name]:
+        found: set[Name] = set()
+        for obj in self.model.values():
+            if isinstance(obj, Table):
+                used = [c.name for c in obj.constraints] + [c.default.name for c in obj.columns if c.default]
+                found |= {(fold(obj.schema), fold(name)) for name in used if name}
+        return found
+
     def apply_ddl(self, batch: str) -> None:
         """One statement of the closed grammar of the tool, with the checks of replay.apply."""
+        batch, made = self._name_as_the_engine(batch)
         try:
             op = parse.parse_statement(batch)
         except parse.ParseError as error:
@@ -666,6 +706,8 @@ class FakeDatabase:
             if new and (fold(obj.schema), fold(obj.name)) in self.modules:
                 raise _engine(f"There is already an object named '{obj.name}' in the database.")
         self.model = model
+        # a constraint that was dropped or renamed no longer has the name that the engine made
+        self.engine_named = (self.engine_named | ({made} if made else set())) & self._constraint_names()
         if isinstance(op, DropTable):  # the engine drops the triggers of a table with the table
             gone = (fold(op.schema), fold(op.name))
             triggers = [
@@ -744,6 +786,18 @@ class FakeDatabase:
                     "is_external": 1,
                 }
             )
+        schemas_of = {row["object_id"]: fold(row["schema_name"]) for row in rows["tabulars"]}
+        for name, parent, flag in (
+            ("defaults", "parent_object_id", "is_system_named"),
+            ("checks", "parent_object_id", "is_system_named"),
+            ("foreign_keys", "parent_object_id", "is_system_named"),
+            ("indexes", "object_id", "constraint_is_system_named"),
+        ):
+            for row in rows[name]:
+                is_constraint = name != "indexes" or row["is_primary_key"] or row["is_unique_constraint"]
+                named = (schemas_of[row[parent]], fold(row["name"] or "")) in self.engine_named
+                if is_constraint and named:
+                    row[flag] = 1
         objects = set(_object_names(toks))
         types = {_parts(literal) for _, literal in _calls(toks, "TYPE_ID")}
         schemas = {fold(literal) for _, literal in _calls(toks, "SCHEMA_ID")}

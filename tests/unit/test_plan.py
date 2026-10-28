@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from azsqlcd import catalog, chain, lex, names, plan, release, state
+from azsqlcd import catalog, catalog_tables, chain, lex, names, plan, release, state
 from azsqlcd.catalog import Difference
 from azsqlcd.config import load_config
 from azsqlcd.errors import Exit, ToolError, failed
@@ -2104,6 +2104,91 @@ def test_drift_on_a_touched_table_that_is_not_the_model_after_the_migration_name
     error = refusal(planned, b, st, db, table_hooks=hooks)
     assert error.reason_code == "DRIFT_TOUCHED" and hooks.read_back_calls == [([TABLE], M1)]
     assert "--accept-drift" in error.message and "--mark-applied" not in error.message
+
+
+PK_ENGINE = "PK__Order__3214EC07A1B2C3D4"
+ENGINE_NAMED = catalog_tables.SystemNamed(TABLE, "PRIMARY KEY", PK_ENGINE, "PK_Order")
+NAME_DRIFT = Difference(catalog_tables.name_drift_property(ENGINE_NAMED), "1" * 64, "2" * 64)
+RENAME = f"rename {TABLE} EXEC sys.sp_rename N'[sales].[{PK_ENGINE}]', N'PK_Order', N'OBJECT';"
+RENAME_LINES = "rename line of this refusal"  # how the message names the lines of detail `renames`
+
+
+def test_a_constraint_name_drift_on_a_touched_table_is_refused_with_the_rename_and_not_accept_drift():
+    """A35: the constraint is as the tool recorded it, under a name that the engine made. To revert
+    the change is to drop a key; --accept-drift records the same capture and the drift stays. The
+    way out is the rename, so the refusal gives the statement: as a detail line, never in the
+    message, because the message goes into the triage log (docs/triage.md, section 4)."""
+    b, st, db = table_release()
+    error = refusal(planned, b, st, db, table_hooks=Hooks(drift={TABLE: [NAME_DRIFT]}))
+
+    assert (error.exit_code, error.reason_code) == (Exit.REFUSED, "DRIFT_TOUCHED")
+    assert TABLE in error.message and "PRIMARY KEY" in error.message
+    assert "[PK_Order]" in error.message and f"[{PK_ENGINE}]" in error.message
+    assert RENAME_LINES in error.message and "Do not drop such a constraint" in error.message
+    assert "sp_rename N'" not in error.message
+    assert "--accept-drift" not in error.message and "Revert" not in error.message
+    assert error.detail["renames"] == [RENAME] == catalog_tables.rename_lines([ENGINE_NAMED])
+    assert error.detail["objects"] == [{"object": TABLE, "differences": [dataclasses.asdict(NAME_DRIFT)]}]
+
+
+def test_a_refusal_whose_first_object_has_no_name_drift_still_tells_the_rename_of_the_other():
+    # the message is about the first object; the rename of a later object must not be lost
+    b, st, _ = table_release()
+    st = dataclasses.replace(st, meta=Meta(1, "sales", "prod"))  # [env.prod] has drift = "block"
+    other = "TABLE:[sales].[A]"
+    drift = {other: [Difference("columns", "1" * 64, "2" * 64)], TABLE: [NAME_DRIFT]}
+    hooks = Hooks(touched=[], drift=drift)
+    error = refusal(planned, b, st, database(st), env="prod", table_hooks=hooks)
+
+    assert error.reason_code == "DRIFT_BLOCK"
+    assert error.message.startswith(f"{other} differs from what the tool recorded (columns)")
+    assert "--accept-drift" in error.message and RENAME_LINES in error.message
+    assert "1 constraint(s) have a name that the engine made" in error.message
+    assert error.detail["renames"] == [RENAME]
+
+
+def test_a_refusal_for_a_name_drift_and_another_difference_names_both_ways_out():
+    b, st, db = table_release()
+    drift = {TABLE: [Difference("columns", "1" * 64, "2" * 64), NAME_DRIFT]}
+    error = refusal(planned, b, st, db, table_hooks=Hooks(drift=drift))
+
+    assert error.reason_code == "DRIFT_TOUCHED"
+    assert "--accept-drift" in error.message and RENAME_LINES in error.message
+    assert error.detail["renames"] == [RENAME]
+
+
+def test_a_name_drift_does_not_hide_the_way_out_for_a_migration_that_was_applied_by_hand():
+    b, st, db = table_release()
+    drift = {TABLE: [Difference("columns", "1" * 64, "2" * 64), NAME_DRIFT]}
+    hooks = Hooks(drift=drift, read_back={TABLE: {"columns": ["a", "c"]}})
+    error = refusal(planned, b, st, db, table_hooks=hooks)
+
+    assert f"azsqlcd resolve --mark-applied {M1}" in error.message and RENAME_LINES in error.message
+    assert error.detail["renames"] == [RENAME]
+
+
+def test_a_name_drift_on_a_table_that_the_release_does_not_touch_is_listed_or_blocks_by_the_environment():
+    b, st, db = table_release()
+    result = planned(b, st, db, table_hooks=Hooks(touched=[], drift={TABLE: [NAME_DRIFT]}))
+
+    assert [(d.key, d.differences) for d in result.drift] == [(TABLE, (NAME_DRIFT,))]
+    assert Plan.from_json(result.to_json()).drift == result.drift  # the plan file keeps the names
+
+    b, st, _ = table_release()
+    st = dataclasses.replace(st, meta=Meta(1, "sales", "prod"))  # [env.prod] has drift = "block"
+    hooks = Hooks(touched=[], drift={TABLE: [NAME_DRIFT]})
+    error = refusal(planned, b, st, database(st), env="prod", table_hooks=hooks)
+
+    assert error.reason_code == "DRIFT_BLOCK" and RENAME_LINES in error.message
+    assert error.detail["renames"] == [RENAME]
+
+
+def test_a_refusal_for_drift_without_a_name_drift_has_no_rename_script():
+    b, st, db = table_release()
+    drift = {TABLE: [Difference("columns", "1" * 64, "2" * 64)]}
+    error = refusal(planned, b, st, db, table_hooks=Hooks(drift=drift))
+
+    assert set(error.detail) == {"objects"} and "rename" not in error.message
 
 
 def test_a_plan_with_no_drift_on_a_touched_table_makes_no_read_back():

@@ -56,7 +56,7 @@ from azsqlcd.model import (
     TypeRef,
     Unique,
 )
-from azsqlcd.parse import parse_object_file
+from azsqlcd.parse import ParseError, parse_object_file, parse_statement
 from azsqlcd.plan import ModuleChange, TableFindings, Work
 from azsqlcd.release import Bundle, Manifest
 from azsqlcd.sqlerrors import sql_error
@@ -477,6 +477,266 @@ def test_no_key_to_compare_sends_no_batch():
     assert db.batches == []
 
 
+# ------------------------------------------------------------------ drift: a name that the engine made (A35)
+PK_ENGINE = "PK__Order__3214EC07A1B2C3D4"
+# every constraint of this table has the fixed name of the design, as an export writes it
+LINE = Table(
+    "sales",
+    "Line",
+    (
+        Column("LineId", TypeRef("int"), False),
+        Column("OrderId", TypeRef("int"), False),
+        Column(
+            "Qty",
+            TypeRef("int"),
+            False,
+            default=DefaultConstraint("DF_Line_Qty", Expression.from_sql("((1))")),
+        ),
+        Column("Code", TypeRef("nvarchar", length=10), True),
+    ),
+    (
+        PrimaryKey("PK_Line", True, (KeyColumn("LineId"),)),
+        Unique("UQ_Line_Code", False, (KeyColumn("Code"),)),
+        Check("CK_Line_1", Expression.from_sql("([Qty]>(0))")),
+        ForeignKey("FK_Line_Order_1", ("OrderId",), "sales", "Order", ("OrderId",)),
+    ),
+)
+LINES = Model([SALES, ORDER, CUSTOMER, LINE])
+ENGINE_NAMES = {  # query, column of the flag, name of the file -> the name that the engine made
+    ("checks", "is_system_named", "CK_Line_1"): "CK__Line__Qty__2B3C4D5E",
+    ("defaults", "is_system_named", "DF_Line_Qty"): "DF__Line__Qty__1A2B3C4D",
+    ("foreign_keys", "is_system_named", "FK_Line_Order_1"): "FK__Line__OrderId__3C4D5E6F",
+    ("indexes", "constraint_is_system_named", "PK_Line"): "PK__Line__2CB5D6E7F8091A2B",
+    ("indexes", "constraint_is_system_named", "UQ_Line_Code"): "UQ__Line__A25C5AA7B8C9D0E1",
+}
+
+
+def made_again_without_a_name(rows: CatalogRows, query: str, flag: str, name: str, engine: str) -> None:
+    """The catalog after DROP CONSTRAINT and ADD of the same constraint with no name."""
+    only(rows, query, name=name).update({"name": engine, flag: 1})
+
+
+def test_a_recorded_constraint_that_the_engine_named_is_drift_and_names_both_names():
+    # T4 of the live onboarding run, owner decision of 2026-10-07: somebody dropped the PRIMARY KEY
+    # of a managed table and added it again without a name. The reader gives the constraint its
+    # fixed name, so the capture equals the recorded one; the name in the database does not.
+    rows = rows_from_model(MODEL)
+    made_again_without_a_name(rows, "indexes", "constraint_is_system_named", "PK_Order", PK_ENGINE)
+
+    drift = hooks().table_drift(database(rows), recorded(), list(MODEL))
+
+    assert list(drift) == [ORDER_KEY]
+    (difference,) = drift[ORDER_KEY]
+    assert difference.property == f"constraint_name [PK_Order] (PRIMARY KEY, live name [{PK_ENGINE}])"
+    assert re.fullmatch("[0-9a-f]{64}", difference.stored_sha256)
+    assert re.fullmatch("[0-9a-f]{64}", difference.live_sha256 or "")
+    assert difference.stored_sha256 != difference.live_sha256
+    # the way out is made from the report: sp_rename to the recorded name, and then no drift
+    renames = catalog_tables.name_drift_renames(ORDER_KEY, [difference.property])
+    assert renames == [SystemNamed(ORDER_KEY, "PRIMARY KEY", PK_ENGINE, "PK_Order")]
+    assert tables.rename_script(renames) == (
+        f"EXEC sys.sp_rename N'[sales].[{PK_ENGINE}]', N'PK_Order', N'OBJECT';\nGO\n"
+    )
+    assert hooks().table_drift(database(MODEL), recorded(), list(MODEL)) == {}
+
+
+def test_every_kind_of_recorded_constraint_under_an_engine_made_name_is_drift():
+    rows = rows_from_model(LINES)
+    for (query, flag, name), engine in ENGINE_NAMES.items():
+        made_again_without_a_name(rows, query, flag, name, engine)
+
+    drift = hooks(LINES).table_drift(database(rows, recorded(LINES)), recorded(LINES), list(LINES))
+
+    assert list(drift) == [LINE.key]
+    kinds = ("CHECK", "DEFAULT", "FOREIGN KEY", "PRIMARY KEY", "UNIQUE")
+    assert [d.property for d in drift[LINE.key]] == [
+        f"constraint_name [{name}] ({kind}, live name [{engine}])"
+        for kind, ((_, _, name), engine) in zip(kinds, ENGINE_NAMES.items(), strict=True)
+    ]
+    assert len({d.live_sha256 for d in drift[LINE.key]}) == len(ENGINE_NAMES)
+
+
+def test_an_engine_named_constraint_that_is_not_as_the_tool_recorded_it_gets_no_rename():
+    # FD-2: a rename is for a constraint that is what the tool recorded. This one has another
+    # definition: it is the ordinary difference, and no report says "do not drop it, rename it"
+    rows = rows_from_model(LINES)
+    made_again_without_a_name(rows, "checks", "is_system_named", "CK_Line_1", "CK__Line__Qty__2B3C4D5E")
+    only(rows, "checks", name="CK__Line__Qty__2B3C4D5E")["definition"] = "([Qty]>(5))"
+
+    drift = hooks(LINES).table_drift(database(rows, recorded(LINES)), recorded(LINES), [LINE.key])
+
+    assert [d.property for d in drift[LINE.key]] == ["constraint [CK_Line_1]"]
+    assert drift[LINE.key][0].live_sha256 not in (None, drift[LINE.key][0].stored_sha256)
+
+
+def test_two_recorded_checks_that_the_engine_named_get_the_names_of_their_own_definitions():
+    # FD-2, DE-2: the reader numbers engine-named CHECK constraints by their definition text, and
+    # the record numbers them as the files do. The rename must follow the definition, not the number
+    checks = (
+        Check("CK_Line_1", Expression.from_sql("([Qty]>(0))")),
+        Check("CK_Line_2", Expression.from_sql("([LineId]>(0))")),
+    )
+    line = dataclasses.replace(LINE, constraints=(*LINE.constraints[:2], *checks, LINE.constraints[3]))
+    model = Model([SALES, ORDER, CUSTOMER, line])
+    rows = rows_from_model(model)
+    made_again_without_a_name(rows, "checks", "is_system_named", "CK_Line_1", "CK__Line__Qty__2B3C4D5E")
+    made_again_without_a_name(rows, "checks", "is_system_named", "CK_Line_2", "CK__Line__LineId__11")
+    live = read_model(session_for(rows), [LINE.key])
+    assert "LineId" in live.captures[LINE.key]["constraint [CK_Line_1]"]["expression"]  # the file: Qty
+
+    stored = recorded(model)
+    drift = hooks(model).table_drift(database(rows, stored), stored, [LINE.key])
+
+    properties = [d.property for d in drift[LINE.key]]
+    assert sorted(catalog_tables.name_drift_renames(LINE.key, properties), key=lambda i: i.fixed_name) == [
+        SystemNamed(LINE.key, "CHECK", "CK__Line__Qty__2B3C4D5E", "CK_Line_1"),
+        SystemNamed(LINE.key, "CHECK", "CK__Line__LineId__11", "CK_Line_2"),
+    ]
+    assert len(properties) == 2  # the two constraints are as recorded: no other difference
+
+    # one of the two was changed too: the other keeps its rename, whatever fixed name the changed
+    # one got, and the changed one is the ordinary difference of its recorded name
+    only(rows, "checks", name="CK__Line__Qty__2B3C4D5E")["definition"] = "([Qty]>(5))"
+    assert read_model(session_for(rows), [LINE.key]).system_named[1].live_name == "CK__Line__Qty__2B3C4D5E"
+
+    drift = hooks(model).table_drift(database(rows, stored), stored, [LINE.key])
+
+    assert [(d.property, d.live_sha256 is None) for d in drift[LINE.key]] == [
+        ("constraint [CK_Line_1]", True),
+        ("constraint_name [CK_Line_2] (CHECK, live name [CK__Line__LineId__11])", False),
+    ]
+
+
+def test_the_rename_of_a_name_drift_gives_the_name_as_the_tool_recorded_it():
+    # the fixed name follows the name of the table in the catalog; the recorded name is the name of
+    # the file. They are one name for the engine, and the rename must give the recorded letters
+    lower = dataclasses.replace(
+        ORDER, constraints=(PrimaryKey("pk_order", True, (KeyColumn("OrderId"),)), *ORDER.constraints[1:])
+    )
+    model = Model([SALES, lower, CUSTOMER])
+    rows = rows_from_model(model)
+    made_again_without_a_name(rows, "indexes", "constraint_is_system_named", "pk_order", PK_ENGINE)
+
+    drift = hooks(model).table_drift(database(rows, recorded(model)), recorded(model), [ORDER_KEY])
+
+    properties = [d.property for d in drift[ORDER_KEY]]
+    # the capture of the live table holds [PK_Order]: that is no second difference
+    assert properties == [f"constraint_name [pk_order] (PRIMARY KEY, live name [{PK_ENGINE}])"]
+    assert catalog_tables.name_drift_renames(ORDER_KEY, properties) == [
+        SystemNamed(ORDER_KEY, "PRIMARY KEY", PK_ENGINE, "pk_order")
+    ]
+
+
+def test_an_engine_made_name_of_a_table_that_is_not_asked_is_not_drift():
+    # a table with no managed row is never a key of table_drift: before a baseline the state has
+    # no row at all, and the baseline has its own refusal (CONSTRAINT_NAMES)
+    rows = rows_from_model(MODEL)
+    made_again_without_a_name(rows, "indexes", "constraint_is_system_named", "PK_Order", PK_ENGINE)
+    only_customer = recorded(Model([SALES, CUSTOMER]))
+
+    assert hooks().table_drift(database(rows, only_customer), only_customer, [CUSTOMER_KEY]) == {}
+    assert hooks().table_drift(database(rows, only_customer), only_customer, []) == {}
+
+
+def test_an_engine_named_constraint_that_the_tool_did_not_record_is_not_a_name_drift():
+    # a constraint that a DBA added without a name is an unmanaged sub-object, as a named one is
+    rows = rows_from_model(MODEL)
+    recorded_check = only(rows, "checks", name="CK_Order_Status")
+    rows["checks"].append(
+        recorded_check | {"name": "CK__Order__Note__4D5E6F70", "definition": "(1=1)", "is_system_named": 1}
+    )
+    assert read_model(session_for(rows)).system_named[0].fixed_name == "CK_Order_1"
+
+    assert hooks().table_drift(database(rows), recorded(), list(MODEL)) == {}
+
+
+def test_a_recorded_constraint_whose_name_is_not_the_fixed_name_gets_its_recorded_name_back():
+    # FD-1, DE-1: the usual names of a file (FK_<table>_<ref>, UQ_<table>_<word>, CK_<table>_<word>)
+    # are not the fixed names that the reader gives. The constraint is matched by what it is, and
+    # the rename gives the recorded name, which is the name of the file
+    rows = rows_from_model(MODEL)
+    made_again_without_a_name(rows, "indexes", "constraint_is_system_named", "UQ_Order_Note", "UQ__Order__1")
+    made_again_without_a_name(rows, "checks", "is_system_named", "CK_Order_Status", "CK__Order__2")
+    made_again_without_a_name(rows, "foreign_keys", "is_system_named", "FK_Order_Customer", "FK__Order__3")
+    fixed = {item.fixed_name for item in read_model(session_for(rows)).system_named}
+    assert fixed == {"UQ_Order_Note_Status", "CK_Order_1", "FK_Order_Customer_1"}
+
+    drift = hooks().table_drift(database(rows), recorded(), list(MODEL))
+
+    assert [d.property for d in drift[ORDER_KEY]] == [
+        "constraint_name [CK_Order_Status] (CHECK, live name [CK__Order__2])",
+        "constraint_name [FK_Order_Customer] (FOREIGN KEY, live name [FK__Order__3])",
+        "constraint_name [UQ_Order_Note] (UNIQUE, live name [UQ__Order__1])",
+    ]
+
+
+def legacy_record() -> State:
+    """The record of v0.1.0 after accept-drift or mark-applied of a table with an engine-named key:
+    the label of the fixed name of the design, which is not the name of the file."""
+    stored = recorded()
+    capture = dict(stored.objects[ORDER_KEY].capture)
+    capture["constraint [FK_Order_Customer_1]"] = capture.pop("constraint [FK_Order_Customer]")
+    row = ObjectRow("managed", None, 1, capture, state.capture_sha256(capture))
+    return dataclasses.replace(stored, objects=stored.objects | {ORDER_KEY: row})
+
+
+def test_a_record_under_a_fixed_name_that_no_file_has_gets_the_name_of_the_file():
+    # FD-1, the upgrade from v0.1.0. A rename to the recorded label would give a name that the file
+    # does not have, and the next deploy of the table would fail its read-back
+    rows = rows_from_model(MODEL)
+    made_again_without_a_name(rows, "foreign_keys", "is_system_named", "FK_Order_Customer", "FK__Order__3")
+    stored = legacy_record()
+
+    drift = hooks().table_drift(database(rows, stored), stored, [ORDER_KEY])
+
+    assert [d.property for d in drift[ORDER_KEY]] == [
+        "constraint_name [FK_Order_Customer] (FOREIGN KEY, live name [FK__Order__3])"
+    ]
+    # after the rename the database holds the files; the old label of the record is the difference
+    # that is left, and accept-drift (a read-back) records the name of the file
+    after = hooks().table_drift(database(MODEL, stored), stored, [ORDER_KEY])
+    assert [(d.property, d.live_sha256) for d in after[ORDER_KEY]] == [
+        ("constraint [FK_Order_Customer_1]", None)
+    ]
+    assert read_back(MODEL)[ORDER_KEY] == captures_of(MODEL)[ORDER_KEY]
+
+
+def test_a_recorded_constraint_under_another_name_that_a_human_gave_is_an_ordinary_difference():
+    rows = rows_from_model(MODEL)
+    only(rows, "indexes", name="PK_Order")["name"] = "PK_Order_new"
+
+    drift = hooks().table_drift(database(rows), recorded(), list(MODEL))
+
+    assert [(d.property, d.live_sha256) for d in drift[ORDER_KEY]] == [("constraint [PK_Order]", None)]
+
+
+def test_an_index_that_is_no_constraint_is_never_a_name_drift():
+    rows = rows_from_model(MODEL)
+    only(rows, "indexes", name="IX_Order_Status")["constraint_is_system_named"] = 1
+
+    assert hooks().table_drift(database(rows), recorded(), list(MODEL)) == {}
+
+
+def test_the_history_table_of_a_temporal_table_gives_no_name_drift():
+    stored = recorded(TEMPORAL)
+    rows = price_rows()
+    history = only(rows, "tabulars", temporal_type=1)["object_id"]
+    column = only(rows, "columns", object_id=history, name="Amount")["column_id"]
+    rows["defaults"].append(
+        {
+            "parent_object_id": history,
+            "parent_column_id": column,
+            "name": "DF__Price_His__Amoun__5EBF139D",
+            "definition": "((0))",
+            "is_system_named": 1,
+        }
+    )
+    keys = [*TEMPORAL, PRICE_HISTORY_KEY]
+
+    assert read_model(session_for(rows), keys).system_named == ()
+    assert hooks(TEMPORAL).table_drift(database(rows, stored), stored, list(TEMPORAL)) == {}
+
+
 # ------------------------------------------------------------------ read-back
 def read_back(
     live: Model | CatalogRows, model: Model = MODEL, keys: list[str] | None = None
@@ -495,6 +755,34 @@ def test_a_database_that_holds_the_model_reads_back_and_gives_the_captures_to_re
     captures = read_back(MODEL, keys=[*MODEL, "TABLE:[sales].[Dropped]"])
 
     assert captures == captures_of(MODEL) | {"TABLE:[sales].[Dropped]": None}
+
+
+def test_what_a_deploy_made_and_read_back_is_never_a_drift_of_a_constraint_name():
+    # A35. A deploy cannot trip on its own work: a model batch states the name of every constraint
+    # (the parser refuses one without a name, NF002), so the catalog after the batches holds no
+    # name of the engine, and the capture that the read-back records is the capture of drift.
+    for statement in (
+        "ALTER TABLE [sales].[Line] ADD PRIMARY KEY CLUSTERED ([LineId]);",
+        "ALTER TABLE [sales].[Line] ADD UNIQUE NONCLUSTERED ([Code]);",
+        "ALTER TABLE [sales].[Line] ADD CHECK ([Qty]>(0));",
+        "ALTER TABLE [sales].[Line] ADD FOREIGN KEY ([OrderId]) REFERENCES [sales].[Order] ([OrderId]);",
+        "ALTER TABLE [sales].[Line] ADD DEFAULT ((1)) FOR [Qty];",
+        "ALTER TABLE [sales].[Line] ADD [N] int NOT NULL DEFAULT ((0));",
+    ):
+        with pytest.raises(ParseError) as refused:
+            parse_statement(statement)
+        assert refused.value.code == "NF002"
+    made = rows_from_model(LINES)  # the catalog after CREATE TABLE of the files
+    assert read_model(session_for(made)).system_named == ()
+
+    captures = read_back(made, LINES)
+
+    objects = {
+        key: ObjectRow("managed", None, 1, capture, state.capture_sha256(capture))
+        for key, capture in captures.items()
+    }
+    after = State(Meta(1, "sales", "dev"), (), None, (), objects)
+    assert hooks(LINES).table_drift(database(made, after), after, list(LINES)) == {}
 
 
 def test_a_temporal_table_reads_back_and_its_capture_holds_the_temporal_facts():
@@ -631,14 +919,22 @@ def test_a_constraint_that_the_engine_named_is_matched_to_the_model_by_its_shape
 
     captures = read_back(rows)
 
-    # recorded under the fixed names: a capture never holds a name that the engine made
-    assert {label for label in captures[ORDER_KEY] if label.startswith("constraint ")} == {
-        "constraint [CK_Order_1]",
-        "constraint [DF_Order_Status]",
-        "constraint [FK_Order_Customer_1]",
-        "constraint [PK_Order]",
-        "constraint [UQ_Order_Note_Status]",
+    # FD-1, DE-1: recorded under the names of the files. A capture never holds a name that the
+    # engine made, and never a fixed name that no file has: the rename of drift gives recorded names
+    assert captures[ORDER_KEY] == captures_of(MODEL)[ORDER_KEY]
+    # and drift tells each engine-made name, with the name of the file as the name to give
+    objects = {
+        key: ObjectRow("managed", None, 1, capture, state.capture_sha256(capture))
+        for key, capture in captures.items()
     }
+    after = State(Meta(1, "sales", "dev"), (), None, (), objects)
+    drift = hooks().table_drift(database(rows, after), after, list(MODEL))
+    assert [d.property for d in drift[ORDER_KEY]] == [
+        "constraint_name [CK_Order_Status] (CHECK, live name [CK__1])",
+        "constraint_name [DF_Order_Status] (DEFAULT, live name [DF__1])",
+        "constraint_name [FK_Order_Customer] (FOREIGN KEY, live name [FK__1])",
+        "constraint_name [UQ_Order_Note] (UNIQUE, live name [UQ__1])",
+    ]
 
 
 def test_an_engine_named_constraint_of_another_shape_is_not_the_constraint_of_the_model():
@@ -1092,6 +1388,33 @@ def test_the_findings_of_each_dependant_are_read_before_the_change_and_decide_no
     }
     assert len(db.batches) == 3 and len(db.sent("azsqlcd:broken_references")) == 3  # one read for each key
     assert hooks().dependant_findings(FakeSession(), []) == {}
+
+
+def test_an_engine_named_foreign_key_of_another_table_is_told_with_the_rename_to_its_recorded_name():
+    # the usual name of a file, FK_<table>_<ref>, is not the fixed name of the reader (FK_C_P_1).
+    # The key is recorded: the blocker must not say "not recorded, drop it by hand"
+    def parent(column: str) -> Table:
+        columns = (Column(column, TypeRef("int"), False),)
+        return Table("sales", "P", columns, (PrimaryKey("PK_P", True, (KeyColumn(column),)),))
+
+    def child(column: str) -> Table:
+        key = ForeignKey("FK_C_P", ("PId",), "sales", "P", (column,))
+        return Table("sales", "C", (Column("PId", TypeRef("int"), False),), (key,))
+
+    before = Model([SALES, parent("Id"), child("Id")])
+    after = Model([SALES, parent("PId"), child("PId")])
+    rename = mig(M1, "EXEC sys.sp_rename N'[sales].[P].[Id]', N'PId', N'COLUMN';")
+    engine_name = "FK__C__PId__3C4D5E6F"
+    live = rows_from_model(before)
+    only(live, "foreign_keys", name="FK_C_P").update(name=engine_name, is_system_named=1)
+    blockers = [("INDEX", "sales", "P", "PK_P"), ("FOREIGN KEY", "sales", "C", engine_name)]
+    db = database(live, recorded(before), blockers=blockers)
+
+    found = hooks(after, rename).blockers_and_dependants(db, pending(rename), config())
+
+    (blocker,) = found.blockers
+    assert "Drop it by hand" not in blocker and "not recorded" not in blocker
+    assert f"EXEC sys.sp_rename N'[sales].[{engine_name}]', N'FK_C_P', N'OBJECT';" in blocker
 
 
 def test_a_release_that_changes_no_table_has_no_dependant_to_check():

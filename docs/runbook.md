@@ -97,7 +97,7 @@ row copies the recorded release; a `resolve` never moves it.
 |---|---|---|
 | `mark-applied` | migration file | (a) A non-transactional step with the status `started` or `unknown` that did finish. The tool does no catalog check for this case: the check of the DBA is the only one. (b) The next pending transactional migration of the release, when its change is in the database already. With `table_model = true` the catalog must equal the model after the migration; if the tool cannot compare, add `-f force_no_readback=true` |
 | `mark-not-applied` | migration file | A non-transactional step that left nothing: the index is absent and `sys.index_resumable_operations` has no row for it. Only for a batch that is `CREATE INDEX` or `ADD CONSTRAINT ... PRIMARY KEY` or `UNIQUE`. The next deploy sends the migration again |
-| `accept-drift` | object key | Keep the live definition of a managed module that exists (the next deploy lists it as `OVERWRITE_MODULE` and sends the file). Tables: only with `table_model = true` and only when the live table equals the files |
+| `accept-drift` | object key | Keep the live definition of a managed module that exists (the next deploy lists it as `OVERWRITE_MODULE` and sends the file). Tables: only with `table_model = true` and only when the live table equals the files. It does not end a `constraint_name` difference: "A constraint with a name that the engine made" |
 | `adopt-module` | object key | Make an unmanaged module managed. The key must spell kind, schema and name exactly as the catalog does. Use it only for a module that has a file in the release; else the next plan stops with `MODULE_ORPHAN` |
 | `clear-run` | run id | A run with the status `unknown`, after inspection. The run row keeps the status `unknown`; plans run again |
 | `rebind-environment` | environment name | After a refresh of the database from another environment. The subject must equal the `environment` input |
@@ -225,8 +225,8 @@ plan job (PROMOTE), or, when the row says so, RERUN.
 | `TOMBSTONE_CONFLICT` | An object has a module file and a tombstone, also when the two keys differ only by case | Untouched | By pull request: remove the file or the tombstone |
 | `DIRECTIVE_UNRESOLVED` | `-- azsqlcd:unbind` names no managed module of this database, or more than one; or `-- azsqlcd:deploy-module` names no module file of the release | Untouched | `unbind` of a module that is unmanaged here and has a file in the release: `-f action=adopt-module -f subject=<object key>`. Else fix the migration by pull request (withdraw and replace) |
 | `NAME_COLLISION` | A pending create names an object, an index or a constraint that exists in the database and is not recorded | Untouched | If the live object is the change of the migration (made by hand before): `-f action=mark-applied -f subject=<migration file>`. If it is another object: rename one of them (pull request, or DBA). A module that has a file in the release: `-f action=adopt-module -f subject=<object key>` |
-| `DRIFT_TOUCHED` | A managed object that this release changes differs from what the tool recorded, or is gone. The detail lines hold object, property and two hashes | Untouched | "Drift on a touched object" |
-| `DRIFT_BLOCK` | A managed object that the release does not change differs from what the tool recorded, and `[env.<env>]` has `drift = "block"` | Untouched | "Drift on a touched object"; or a DBA reverts the object by hand |
+| `DRIFT_TOUCHED` | A managed object that this release changes differs from what the tool recorded, or is gone. The detail lines hold object, property and two hashes, and one `rename` line for each constraint with a name that the engine made | Untouched | "Drift on a touched object". A property `constraint_name [...]`: "A constraint with a name that the engine made" |
+| `DRIFT_BLOCK` | A managed object that the release does not change differs from what the tool recorded, and `[env.<env>]` has `drift = "block"` | Untouched | "Drift on a touched object"; or a DBA reverts the object by hand. A property `constraint_name [...]`: "A constraint with a name that the engine made" |
 | `LEGACY_FLAGS` | A module to deploy is stored with `ANSI_NULLS` or `QUOTED_IDENTIFIER` off. A deploy would change the flags | Untouched | A DBA creates the module again with both options on; then `-f action=accept-drift -f subject=<object key>`; then PROMOTE |
 | `INDEXED_VIEW` | A managed view that the release alters or unbinds has an index. `ALTER VIEW` would drop every index of it. Detail `objects` lists the keys | Untouched | Take the change of the view out of the release; or a DBA drops the indexes of the view by hand, PROMOTE, and creates them again. A view with an index that needs no change stays unmanaged (`[unmanaged] objects`) |
 | `UNBIND_HEADER` | The header of a schema-bound module in the database cannot be rewritten: the definition cannot be read, or the header has no `SCHEMABINDING` | Untouched | A DBA alters the module in the database without `SCHEMABINDING`; then `-f action=accept-drift -f subject=<object key>`; then PROMOTE. The deploy binds it again from the file |
@@ -335,7 +335,13 @@ drifted object stops with exit 22.
 
 | Reason code | Meaning | State of the database | What to do |
 |---|---|---|---|
-| `DRIFT_FOUND` | One or more managed objects were changed or dropped outside the pipeline. Each object is a detail line | Untouched by the tool | "Out-of-band change by a DBA" below. Do it before the next release touches the object |
+| `DRIFT_FOUND` | One or more managed objects were changed or dropped outside the pipeline. Each object is a detail line | Untouched by the tool | "Out-of-band change by a DBA" below. Do it before the next release touches the object. A property `constraint_name [...]`: "A constraint with a name that the engine made" |
+
+The property `constraint_name [<name of the file>] (<kind>, live name [<name in the database>])`
+says that a managed table holds the constraint as the tool recorded it, under a name that the
+engine made. The two hashes are the hashes of the two names. The report has one more line for each
+such constraint, `rename <table key> EXEC sys.sp_rename ...;`, and the step summary has the same
+statement in a table. What to do: "A constraint with a name that the engine made".
 
 ## Findings of plan and drift
 
@@ -693,6 +699,60 @@ that creates the same name stops with `NAME_COLLISION`.
    `-f force_no_readback=true`.
 3. `gh workflow run db.yml --ref main -f release=r<n> -f from_stage=prod`
 4. A module that was changed by hand: "Drift on a touched object", module.
+
+### A constraint with a name that the engine made
+
+`drift` ends with exit 30, or a plan stops with `DRIFT_TOUCHED` or `DRIFT_BLOCK`, and the property
+is `constraint_name [<name of the file>] (<kind>, live name [<name in the database>])`. A managed
+table holds the constraint as the tool recorded it, but its name in the database is a name that
+the engine made, for example `PK__Order__3214EC07A1B2C3D4`. The usual cause: someone dropped the
+constraint and added it again and wrote no name. Owner decision of 2026-10-07: this is drift.
+
+The tool finds which recorded constraint it is by what the constraint is (kind, columns, target,
+expression text, state, and the partition scheme of a key), not by a name. The statement gives the
+recorded name, and the tool records the name of the file.
+
+1. Do not drop the constraint. Do not run `accept-drift`: the tool accepts the table and records
+   the same capture again, and the drift stays.
+2. Take the statement. `drift` prints one line `rename <table key> EXEC sys.sp_rename ...;` for
+   each such constraint, and the step summary has the same statement in a table. A plan refusal
+   prints the same lines below its message, in the step log, for every object of the refusal.
+   The message and the triage log hold no statement.
+3. A DBA reads the statement and runs it on the database. It is `EXEC sys.sp_rename` only: it
+   changes a name and no data. It runs outside the pipeline and has no run row.
+4. The next `drift` run does not have the property. Then PROMOTE the release that stopped.
+
+Special cases:
+
+- The engine refuses the statement because the name is taken. Another object of the schema has
+  the name of the file. A DBA renames or drops that object first.
+- After the rename, `drift` reports `constraint [<other name>]` with no live hash for the same
+  table. Version 0.1.0 recorded an engine-named constraint under a name that no file has
+  (`resolve` with `mark-applied` or `accept-drift`). The database has the name of the file now:
+  `-f action=accept-drift -f subject=<object key>` records it.
+- The difference of the table is `unsupported`, and the table has a constraint with a name that
+  the engine made. The reader gives such a constraint a fixed name (`PK_<table>`,
+  `DF_<table>_<column>`, `UQ_<table>_<columns>`, `CK_<table>_<n>`, `FK_<table>_<reftable>_<n>`).
+  When another object of the schema has that fixed name, the reader cannot hold the table, and
+  the report has no rename line. A DBA finds the constraint in `sys.objects` and renames it by
+  hand to the name of the file:
+  `EXEC sys.sp_rename N'[<schema>].[<name in the database>]', N'<name of the file>', N'OBJECT';`
+
+Not drift of this kind:
+
+- A table with no managed row, and a database before its baseline. The baseline has its own
+  refusal: `CONSTRAINT_NAMES`.
+- A table outside `[scope]`. The tool does not read it.
+- A constraint with no name that the tool did not record. It is an unmanaged sub-object, as an
+  index made by hand is.
+- A recorded constraint that has another name which a person gave. `drift` reports
+  `constraint [<recorded name>]` with no live hash: "Out-of-band change by a DBA".
+- A recorded constraint that was made again without a name and is not as the tool recorded it
+  (other columns, another expression, another action, another place, disabled or not trusted).
+  `drift` reports the ordinary difference `constraint [<recorded name>]` and prints no statement:
+  "Drift on a touched object". When that difference is resolved (`mark-applied` for a migration
+  that was run by hand, or `accept-drift`), the next `drift` run reports the name and prints the
+  statement.
 
 ### Refresh of an environment from prod
 

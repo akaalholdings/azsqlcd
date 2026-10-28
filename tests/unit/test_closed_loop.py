@@ -10,6 +10,7 @@ A test that fails because the tool is wrong stays, with xfail(strict=True) and t
 
 import dataclasses
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -17,11 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from azsqlcd import catalog, catalog_tables, chain, cli, emit, names, release, runner, state, tables
+from azsqlcd import catalog, catalog_tables, chain, cli, emit, lex, names, release, runner, state, tables
 from azsqlcd.config import load_config
 from azsqlcd.errors import ToolError
 from azsqlcd.model import (
     ON_PRIMARY,
+    Check,
     Column,
     DefaultConstraint,
     Expression,
@@ -428,6 +430,290 @@ def test_a_change_behind_the_tool_is_drift_blocks_a_release_that_touches_it_and_
     assert done.code == 0, done.err
     assert db.model == third.model and db.module(PROCEDURE_KEY).sent == PROCEDURE_3[1]
     assert project.tool("drift", *third.where, db=db).code == 0
+
+
+# ------------------------------------------------------------------ 3b. a key under a name of the engine
+DROP_KEY = "ALTER TABLE [sales].[Order] DROP CONSTRAINT [PK_Order];"
+ADD_KEY_WITHOUT_A_NAME = "ALTER TABLE [sales].[Order] ADD PRIMARY KEY CLUSTERED ([OrderId]);"
+
+
+def triage_log(outcome: Outcome) -> str:
+    """The text of the triage log that a command named on stderr."""
+    line = next(line for line in outcome.err.splitlines() if line.startswith("log: "))
+    return Path(line.removeprefix("log: ")).read_text(encoding="utf-8")
+
+
+def primary_key_name(db: FakeDatabase) -> str:
+    table = db.model[ORDER.key]
+    assert isinstance(table, Table)
+    return next(str(c.name) for c in table.constraints if isinstance(c, PrimaryKey))
+
+
+def test_a_key_that_was_made_again_without_a_name_is_drift_until_it_has_its_recorded_name(
+    project, tmp_path, monkeypatch
+):
+    """A35, owner decision of 2026-10-07 (T4 of the live onboarding run). The constraint is what the
+    tool recorded, under a name that the engine made. Every report names the table, the kind and
+    both names, and gives the statement that ends it."""
+    first, second = release_1(project), release_2(project)
+    db = deployed(project, first, second)
+    # a deploy states the name of every constraint, so it cannot leave such a drift behind
+    assert db.engine_named == set() and primary_key_name(db) == "PK_Order"
+    assert project.tool("drift", *second.where, db=db).out.strip() == "no drift"
+
+    db.out_of_band(DROP_KEY, ADD_KEY_WITHOUT_A_NAME)  # a DBA, behind the tool
+    engine_name = primary_key_name(db)
+    assert engine_name.startswith("PK__Order__") and len(db.engine_named) == 1
+    rename = f"EXEC sys.sp_rename N'[sales].[{engine_name}]', N'PK_Order', N'OBJECT';"
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    drift = project.tool("drift", *second.where, "--ci", "github", db=db)
+
+    assert (drift.code, drift.reason) == (30, "DRIFT_FOUND")
+    item, statement = drift.out.splitlines()
+    told = f"managed {ORDER.key} constraint_name [PK_Order] (PRIMARY KEY, live name [{engine_name}]) "
+    assert item.startswith(told) and re.fullmatch("[0-9a-f]{64} [0-9a-f]{64}", item.removeprefix(told))
+    assert statement == f"rename {ORDER.key} {rename}"
+    assert "rename line" in drift.err.splitlines()[0]  # the message says what the rename lines are for
+    assert "sp_rename" not in triage_log(drift)  # the statement is printed, never logged
+    shown = summary.read_text(encoding="utf-8").replace("\\", "")
+    assert rename in shown and "PRIMARY KEY" in shown and engine_name in shown
+
+    # a release that changes the table is refused, by the plan job and by the deploy, with the statement
+    third = release_3(project)
+    sent, state_before = len(db.ddl), (db.rows("run"), db.rows("step"), db.rows("object"))
+    plan = project.tool("plan", *third.where, "--out", str(project.out("plan")), db=db)
+    deploy = project.deploy(third, db)
+
+    for refused in (plan, deploy):
+        assert (refused.code, refused.reason) == (22, "DRIFT_TOUCHED")
+        message, *detail = refused.err.splitlines()
+        assert ORDER.key in message and "rename line" in message and "--accept-drift" not in message
+        assert f"  rename {ORDER.key} {rename}" in detail  # the statement is a line under the message
+    assert db.ddl[sent:] == [] and (db.rows("run"), db.rows("step"), db.rows("object")) == state_before
+
+    # accept-drift takes the table (it equals its file) and records the capture that the tool had:
+    # the name in the database is still the name of the engine, so the drift stays
+    accept = project.tool("resolve", *second.where, *RESOLVE, "--accept-drift", ORDER.key, db=db)
+    assert accept.code == 0, accept.err
+    assert project.tool("drift", *second.where, db=db).code == 30
+
+    # the DBA runs the statement of the report
+    db.out_of_band(statement.removeprefix(f"rename {ORDER.key} "))
+
+    assert db.engine_named == set() and primary_key_name(db) == "PK_Order"
+    clean = project.tool("drift", *second.where, db=db)
+    assert (clean.code, clean.out.strip()) == (0, "no drift")
+    done = project.deploy(third, db)
+    assert done.code == 0, done.err
+    assert db.model == third.model and project.tool("drift", *third.where, db=db).code == 0
+
+
+def test_an_engine_made_name_in_a_database_that_has_no_baseline_is_not_drift(project):
+    # before a baseline no table has a managed row: the drift command reports the tables as
+    # unmanaged, and the baseline keeps its own refusal (CONSTRAINT_NAMES, tests of onboard)
+    first = release_1(project)
+    db = deployed(project, first)
+    other = project.database()
+    other.out_of_band(*db.ddl, DROP_KEY, ADD_KEY_WITHOUT_A_NAME)
+    assert len(other.engine_named) == 1 and managed(other) == {}
+
+    drift = project.tool("drift", *first.where, db=other)
+
+    assert drift.code == 0, drift.err
+    *objects, last = drift.out.splitlines()
+    assert last == "no drift" and {line.split(" ")[0] for line in objects} == {"unmanaged"}
+    assert "constraint_name" not in drift.out + drift.err and "sp_rename" not in drift.out + drift.err
+
+
+# ------------------------------------------------------------------ 3c. the rename gives the name of the file
+DROP_FOREIGN_KEY = "ALTER TABLE [sales].[Order] DROP CONSTRAINT [FK_Order_Customer];"
+FOREIGN_KEY_WITHOUT_A_NAME = (
+    "ALTER TABLE [sales].[Order] ADD FOREIGN KEY ([CustomerId]) REFERENCES [sales].[Customer] ([CustomerId])"
+)
+
+
+def constraint_names(db: FakeDatabase, key: str) -> set[str]:
+    table = db.model[key]
+    assert isinstance(table, Table)
+    return {str(c.name) for c in table.constraints} | {
+        str(c.default.name) for c in table.columns if c.default
+    }
+
+
+def rename_statements(drift: Outcome, key: str) -> list[str]:
+    """The statement of each rename line of a drift report, as a DBA copies it."""
+    lines = [line for line in drift.out.splitlines() if line.startswith("rename ")]
+    assert all(line.startswith(f"rename {key} EXEC sys.sp_rename N'") for line in lines), lines
+    return [line.removeprefix(f"rename {key} ") for line in lines]
+
+
+def test_the_rename_of_a_key_whose_name_is_not_a_fixed_name_gives_the_name_of_the_file(project):
+    """FD-1. The file names the key FK_Order_Customer; the reader gives an engine-named key the fixed
+    name FK_Order_Customer_1. Every step is what the tool says to do, and the release that touches
+    the table must deploy at the end."""
+    first, second = release_1(project), release_2(project)
+    db = deployed(project, first, second)
+    third = release_3(project)
+    before = constraint_names(db, ORDER.key)
+    db.out_of_band(DROP_FOREIGN_KEY, f"{FOREIGN_KEY_WITHOUT_A_NAME};")
+    (engine_name,) = constraint_names(db, ORDER.key) - before
+    statement = f"EXEC sys.sp_rename N'[sales].[{engine_name}]', N'FK_Order_Customer', N'OBJECT';"
+
+    drift = project.tool("drift", *second.where, db=db)
+
+    assert drift.code == 30
+    told = (
+        f"managed {ORDER.key} constraint_name [FK_Order_Customer] (FOREIGN KEY, live name [{engine_name}]) "
+    )
+    assert [line.startswith(told) for line in drift.out.splitlines()] == [True, False]
+    assert rename_statements(drift, ORDER.key) == [statement]
+    refused = project.deploy(third, db)
+    assert refused.reason == "DRIFT_TOUCHED" and "--accept-drift" not in refused.err.splitlines()[0]
+
+    # accept-drift is not the way out, and it must not make the statement wrong
+    accept = project.tool("resolve", *second.where, *RESOLVE, "--accept-drift", ORDER.key, db=db)
+    assert accept.code == 0, accept.err
+    assert rename_statements(project.tool("drift", *second.where, db=db), ORDER.key) == [statement]
+
+    db.out_of_band(statement)
+
+    assert "FK_Order_Customer" in constraint_names(db, ORDER.key) and db.engine_named == set()
+    clean = project.tool("drift", *second.where, db=db)
+    assert (clean.code, clean.out.strip()) == (0, "no drift")
+    done = project.deploy(third, db)
+    assert done.code == 0, done.err
+    assert db.model == third.model and project.tool("drift", *third.where, db=db).code == 0
+
+
+def test_a_record_of_v0_1_0_under_a_fixed_name_ends_with_the_name_of_the_file(project):
+    """FD-1, the upgrade. v0.1.0 recorded an engine-named key under the fixed name of the reader
+    (accept-drift, mark-applied). No file has that name: the rename must give the name of the file,
+    and each next step that the tool names must work."""
+    first, second = release_1(project), release_2(project)
+    db = deployed(project, first, second)
+    third = release_3(project)
+    db.out_of_band(DROP_FOREIGN_KEY, f"{FOREIGN_KEY_WITHOUT_A_NAME};")
+    assert db.tables is not None
+    row = next(row for row in db.tables["object"] if row["object_key"] == ORDER.key)
+    capture = json.loads(row["catalog_capture"])
+    capture["constraint [FK_Order_Customer_1]"] = capture.pop("constraint [FK_Order_Customer]")
+    row |= {"catalog_capture": state.capture_json(capture), "catalog_sha256": state.capture_sha256(capture)}
+
+    (statement,) = rename_statements(project.tool("drift", *second.where, db=db), ORDER.key)
+
+    assert statement.endswith(", N'FK_Order_Customer', N'OBJECT';")
+    db.out_of_band(statement)
+    # the database has the name of the file now; the record still has the old label
+    left = project.tool("drift", *second.where, db=db)
+    assert left.code == 30 and left.out.startswith(f"managed {ORDER.key} constraint [FK_Order_Customer_1] ")
+    refused = project.deploy(third, db)
+    assert refused.reason == "DRIFT_TOUCHED" and "--accept-drift" in refused.err.splitlines()[0]
+    accept = project.tool("resolve", *second.where, *RESOLVE, "--accept-drift", ORDER.key, db=db)
+    assert accept.code == 0, accept.err
+    assert project.tool("drift", *second.where, db=db).out.strip() == "no drift"
+    done = project.deploy(third, db)
+    assert done.code == 0, done.err
+    assert db.model == third.model
+
+
+def test_a_migration_that_was_run_by_hand_without_a_name_ends_with_the_name_of_the_file(project):
+    """DE-1. A DBA runs the change of the pending migration by hand and writes no name. The plan
+    names --mark-applied; after it the drift report must give the name of the file, and the next
+    release that changes the table must deploy."""
+    first, second = release_1(project), release_2(project)
+    db = deployed(project, first, second)
+    cascade = ForeignKey(
+        "FK_Order_Customer", ("CustomerId",), "sales", "Customer", ("CustomerId",), "CASCADE"
+    )
+    order_3 = dataclasses.replace(ORDER_2, constraints=(ORDER_2.constraints[0], cascade))
+    project.write_objects(order_3)
+    third = project.release("orders go with their customer", "fk_cascade")
+    db.out_of_band(DROP_FOREIGN_KEY, f"{FOREIGN_KEY_WITHOUT_A_NAME} ON DELETE CASCADE;")
+
+    plan = project.tool("plan", *third.where, "--out", str(project.out("plan")), db=db)
+    assert plan.reason == "DRIFT_TOUCHED"
+    assert f"--mark-applied {third.migration.file}" in plan.err and "sp_rename" not in plan.err
+    args = [*third.where, *RESOLVE, "--mark-applied", third.migration.file]
+    marked = project.tool("resolve", *args, db=db)
+    assert marked.code == 0, marked.err
+
+    drift = project.tool("drift", *third.where, db=db)
+
+    assert drift.code == 30
+    (statement,) = rename_statements(drift, ORDER.key)
+    assert statement.endswith(", N'FK_Order_Customer', N'OBJECT';")
+    db.out_of_band(statement)
+    clean = project.tool("drift", *third.where, db=db)
+    assert (clean.code, clean.out.strip()) == (0, "no drift")
+    project.write_objects(
+        dataclasses.replace(order_3, columns=(*order_3.columns, Column("Priority", TypeRef("tinyint"), True)))
+    )
+    fourth = project.release("order priority", "order_priority")
+    done = project.deploy(fourth, db)
+    assert done.code == 0, done.err
+    assert db.model == fourth.model
+
+
+def test_two_checks_that_were_made_again_without_a_name_get_their_own_names_back(project):
+    """FD-2, DE-2. The reader numbers engine-named CHECK constraints by their definition text; the
+    files number them as their author did. The statements must give each rule its recorded name."""
+    checks = (
+        Check("CK_Order_1", Expression.from_sql("([Status]<(9))")),
+        Check("CK_Order_2", Expression.from_sql("([OrderId]>(0))")),
+    )
+    project.write_objects(
+        SALES, CUSTOMER, dataclasses.replace(ORDER, constraints=(*ORDER.constraints, *checks))
+    )
+    for path, text in MODULES.values():
+        project.write(path, text)
+    first = project.release("sales schema", "create_sales")
+    db = deployed(project, first)
+
+    def rules() -> dict[str, str]:
+        table = db.model[ORDER.key]
+        assert isinstance(table, Table)
+        return {str(c.name): "".join(c.expression.tokens) for c in table.constraints if isinstance(c, Check)}
+
+    recorded = rules()
+    assert set(recorded) == {"CK_Order_1", "CK_Order_2"}
+    db.out_of_band(
+        "ALTER TABLE [sales].[Order] DROP CONSTRAINT [CK_Order_1];",
+        "ALTER TABLE [sales].[Order] DROP CONSTRAINT [CK_Order_2];",
+        "ALTER TABLE [sales].[Order] ADD CHECK ([Status]<(9));",
+        "ALTER TABLE [sales].[Order] ADD CHECK ([OrderId]>(0));",
+    )
+
+    drift = project.tool("drift", *first.where, db=db)
+
+    assert drift.code == 30
+    statements = rename_statements(drift, ORDER.key)
+    assert len(statements) == 2 and len(drift.out.splitlines()) == 4  # two names, no other difference
+    db.out_of_band(*statements)
+    assert rules() == recorded
+    clean = project.tool("drift", *first.where, db=db)
+    assert (clean.code, clean.out.strip()) == (0, "no drift")
+
+
+def test_a_plan_refusal_shows_the_rename_of_every_object_and_its_triage_log_holds_no_statement(project):
+    """The refusal message is about the first drifted object, here a procedure. The rename of the
+    table must still reach the person, and no statement goes into the triage log (docs/triage.md,
+    section 4)."""
+    first, second = release_1(project), release_2(project)
+    db = deployed(project, first, second)
+    db.out_of_band(HOTFIX, DROP_KEY, ADD_KEY_WITHOUT_A_NAME)
+    third = release_3(project)  # changes the procedure and the table
+    rename = f"EXEC sys.sp_rename N'[sales].[{primary_key_name(db)}]', N'PK_Order', N'OBJECT';"
+
+    plan = project.tool("plan", *third.where, "--out", str(project.out("plan")), db=db)
+
+    assert plan.reason == "DRIFT_TOUCHED" and plan.err.startswith(f"DRIFT_TOUCHED: {PROCEDURE_KEY} ")
+    message, *detail = plan.err.splitlines()
+    assert "rename line" in message and "sp_rename N'" not in message
+    assert f"  rename {ORDER.key} {rename}" in detail
+    assert "DRIFT_TOUCHED" in triage_log(plan) and "sp_rename" not in triage_log(plan)
 
 
 # ------------------------------------------------------------------ 4. a batch that fails
@@ -1846,3 +2132,38 @@ def test_the_fake_needs_the_partition_scheme_of_a_statement_and_keeps_the_place_
     (members,) = [batch for batch in session.batches if "azsqlcd:read_index_columns" in batch]
     assert "ic.[partition_ordinal]" in members
     assert [c.name for c in partitioned.index("IX_aligned").columns] == ["n"]
+
+
+def test_the_fake_names_a_constraint_that_is_added_without_a_name_and_a_rename_ends_that():
+    # is_system_named of the engine: 1 for a constraint that was added with no name, 0 again after
+    # sp_rename. A rollback takes the constraint back and its name with it
+    db, session = scratch()
+    pk = "ALTER TABLE [dbo].[T] ADD PRIMARY KEY CLUSTERED ([id]);"
+    read = lambda: catalog_tables.read_model(session, ["TABLE:[dbo].[T]"])  # noqa: E731
+    assert read().system_named == () and db.engine_named == set()
+
+    session.execute("BEGIN TRANSACTION;")
+    session.execute("ALTER TABLE [dbo].[T] DROP CONSTRAINT [PK_T];")
+    session.execute(pk)
+    (made,) = read().system_named
+    assert (made.kind, made.fixed_name) == ("PRIMARY KEY", "PK_T") and made.live_name.startswith("PK__T__")
+    session.execute("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;")
+    assert read().system_named == () and db.engine_named == set()
+
+    db.out_of_band("ALTER TABLE [dbo].[T] DROP CONSTRAINT [PK_T];", pk)
+    db.out_of_band("ALTER TABLE [dbo].[T] ADD DEFAULT ((0)) FOR [id];")
+    db.out_of_band("ALTER TABLE [dbo].[T] ADD CHECK ([id]>(0));")
+    found = read()
+    assert [(item.kind, item.fixed_name) for item in found.system_named] == [
+        ("CHECK", "CK_T_1"),
+        ("DEFAULT", "DF_T_id"),
+        ("PRIMARY KEY", "PK_T"),
+    ]
+    assert len({item.live_name for item in found.system_named}) == 3
+    assert "constraint [PK_T]" in found.captures["TABLE:[dbo].[T]"]  # the capture has the fixed name
+
+    script = catalog_tables.rename_constraints_sql(found.system_named)
+    db.out_of_band(*(batch.text for batch in lex.split_batches(script)))
+
+    assert read().system_named == () and db.engine_named == set()
+    assert read().captures == found.captures

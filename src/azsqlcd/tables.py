@@ -9,7 +9,9 @@ Model.diff_paths(expressions=False). Before that the live object is brought to w
     unmanaged sub-object (Part 2 (c) 4). The capture that read_back returns leaves it out too,
     so it is not recorded and takes no part in drift;
   * a constraint that the engine named is matched to a constraint of the model of the same shape
-    (same kind, columns, target and actions; a DEFAULT by its column; a CHECK by its kind);
+    (same kind, columns, target and actions; a DEFAULT by its column; a CHECK by its kind). The
+    capture that read_back returns holds it under the name of the file, and drift reports the
+    name of the engine with the rename to that name (A35);
   * options and the owner of a schema: catalog_tables.project_options. An option that the file
     does not state is compared with the engine default;
   * a column whose file states the collation of the database: the reader gives no collation for
@@ -289,9 +291,86 @@ def _aligned(
     return project_options(cut, declared), keep, renames
 
 
+def _name_drift(
+    recorded: Mapping[str, Any],
+    live: Mapping[str, Any],
+    engine_named: Iterable[SystemNamed],
+    file_names: Mapping[str, str],
+) -> tuple[dict[str, Any], list[Difference]]:
+    """A35: (the live capture as the compare with the record needs it, the name differences).
+
+    An engine-named constraint is the recorded constraint that has the same capture value (kind,
+    columns, target, expression text, state), as in _against_reference: first the one that the
+    record holds under its fixed name, then one that the database holds under no name of a person.
+    The fixed name alone does not say which constraint it is: the reader numbers CHECK and FOREIGN
+    KEY constraints in its own order. A matched constraint goes into the live capture under the
+    recorded label, so that it is no second difference, and gives one difference of
+    catalog_tables.NAME_DRIFT. An engine-named constraint with no such twin stays as the reader
+    gave it: a constraint that was changed is the ordinary difference and gets no rename, and one
+    that the record does not hold is an unmanaged sub-object.
+
+    The rename gives the recorded name, in the recorded letters: Hooks.read_back records the name
+    of the file. file_names (fixed name -> name of the file, from _aligned) is for a record of
+    v0.1.0, which holds such a constraint under its fixed name: when no file has that name, the
+    rename gives the name of the file.
+    """
+    by_label = {
+        label: item
+        for item in engine_named
+        if (label := f"constraint {names.quote(item.fixed_name)}") in live
+    }
+    seen = {label: value for label, value in live.items() if label not in by_label}
+    held = {fold(label) for label in seen}
+    labels = {fold(label): label for label in recorded if label.startswith("constraint ")}
+    free = [label for folded, label in labels.items() if folded not in held]
+
+    def value(capture: Mapping[str, Any], label: str) -> str:  # as catalog.capture_differences compares
+        return state.capture_json({"": capture[label]})
+
+    twins: dict[str, str] = {}  # label of the reader -> label of the record
+    for by_name in (True, False):
+        for label in by_label:
+            if label in twins:
+                continue
+            same = labels.get(fold(label))
+            wanted = ([same] if same in free else []) if by_name else list(free)
+            twin = next((other for other in wanted if value(recorded, other) == value(live, label)), None)
+            if twin is not None:
+                free.remove(twin)
+                twins[label] = twin
+    found: list[Difference] = []
+    for label, twin in twins.items():
+        seen[twin] = live[label]
+        name = twin.removeprefix("constraint ")[1:-1].replace("]]", "]")  # twin holds names.quote(name)
+        in_file = file_names.get(by_label[label].fixed_name, name)
+        if fold(name) == fold(by_label[label].fixed_name) and fold(in_file) != fold(name):
+            name = in_file  # a record of v0.1.0
+        item = replace(by_label[label], fixed_name=name)
+        stored, now = ({catalog_tables.NAME_DRIFT: text} for text in (item.fixed_name, item.live_name))
+        found.append(
+            Difference(
+                catalog_tables.name_drift_property(item),
+                state.capture_sha256(stored),
+                state.capture_sha256(now),
+            )
+        )
+    for label in by_label:
+        if label not in twins:
+            # no twin: under its fixed name, in the recorded letters when the record has that name
+            # and no twin took it. Never in the place of a twin
+            same = labels.get(fold(label))
+            seen.setdefault(same if same in free else label, live[label])
+    return seen, sorted(found, key=lambda difference: difference.property)
+
+
 def rename_script(engine_named: Iterable[SystemNamed]) -> str:
     """rename-constraints.sql for these constraints: EXEC sys.sp_rename only. '' when there is none."""
     return catalog_tables.rename_constraints_sql(engine_named)
+
+
+def rename_lines(engine_named: Iterable[SystemNamed]) -> list[str]:
+    """'rename <table key> EXEC sys.sp_rename ...;' for each of these constraints (A35)."""
+    return catalog_tables.rename_lines(engine_named)
 
 
 def _problem(
@@ -395,25 +474,41 @@ class Hooks:
         A recorded object that is gone has the difference 'exists'; one that the reader can no
         longer hold has the difference 'unsupported'. A property of catalog_tables.NOT_IN_DRIFT
         (start_value of a sequence) is not compared.
+
+        A35: a recorded constraint that the database holds under a name that the engine made is
+        a difference too. The capture cannot show it (the reader gives such a constraint a fixed
+        name), so it comes from system_named and _name_drift: one difference for each constraint
+        that is as the tool recorded it, with the property of catalog_tables.name_drift_property
+        and the hashes of the two names. An engine-named constraint that the recorded capture does
+        not hold is an unmanaged sub-object, as before.
         """
         if not keys:
             return {}
         found = catalog_tables.read_model(session, keys)
         live = {fold(key): capture for key, capture in found.captures.items()}
         outside = {fold(item.object_key) for item in found.unsupported}
+        engine_named: dict[str, list[SystemNamed]] = defaultdict(list)
+        for item in found.system_named:
+            engine_named[fold(item.table_key)].append(item)
         rows = {fold(key): row for key, row in state.objects.items()}
         drift: dict[str, list[Difference]] = {}
         for key in keys:
             row = rows[fold(key)]
             if fold(key) in live:
                 skipped = catalog_tables.NOT_IN_DRIFT.get(str(row.capture.get("kind")), frozenset())
+                items = engine_named[fold(key)]
+                declared, table = self.model.get(key), found.model.get(key)
+                file_names: dict[str, str] = {}
+                if items and declared is not None and table is not None:
+                    file_names = _aligned(table, declared, [i.fixed_name for i in items], lambda: None)[2]
+                stored = catalog_tables.with_stored_defaults(row.capture)
+                seen, named = _name_drift(stored, live[fold(key)], items, file_names)
                 differences = [
                     difference
-                    for difference in catalog.capture_differences(
-                        catalog_tables.with_stored_defaults(row.capture), live[fold(key)]
-                    )
+                    for difference in catalog.capture_differences(stored, seen)
                     if difference.property not in skipped
                 ]
+                differences += named
             else:
                 gone = SUPPORTED if fold(key) in outside else EXISTS
                 differences = [Difference(gone, row.catalog_sha256, None)]
@@ -459,14 +554,14 @@ class Hooks:
             tuple(fold(part.strip()) for part in entry.split("->")) for entry in config.unmanaged_dependants
         }
         found: list[str] = []
-        engine_named: dict[str, tuple[SystemNamed, ...]] = {}  # case-folded table key -> its renames
+        engine_named: dict[str, list[SystemNamed]] = {}  # case-folded table key -> its renames
         for target in self._targets(work):
             for label in catalog_tables.blockers(session, target.table_key, target.column):
                 module = label.removeprefix("SCHEMABOUND ")
                 if module == label:
                     if fold(label) not in known:
                         found.append(
-                            self._needs_rename(session, label, known, engine_named)
+                            self._needs_rename(session, label, recorded, engine_named)
                             or f"{label} uses {target.text} and is not recorded: the release cannot know "
                             "it. Drop it by hand, or take it into the table file by pull request"
                         )
@@ -491,12 +586,13 @@ class Hooks:
         return found
 
     def _needs_rename(
-        self, session: Session, label: str, known: Collection[str], cache: dict[str, tuple[SystemNamed, ...]]
+        self, session: Session, label: str, recorded: State, cache: dict[str, list[SystemNamed]]
     ) -> str | None:
-        """The blocker text for an index or a foreign key that is recorded under the name of the
-        files and that the engine named in this database; None when the label is not such a one.
+        """The blocker text for an index or a foreign key that is a recorded constraint of a managed
+        table and that the engine named in this database; None when the label is not such a one.
 
         The operator must rename the constraint, never drop it: it is a managed key of the table.
+        Which recorded constraint it is, and the name to give, come from table_drift (A35).
         """
         parts = [part.replace("]]", "]") for part in _QUOTED.findall(label)]
         if len(parts) != 3 or not label.startswith(("INDEX ", "FOREIGN KEY ")):
@@ -504,18 +600,16 @@ class Hooks:
         schema, table, live_name = parts
         table_key = _table_key(schema, table)
         if fold(table_key) not in cache:
-            cache[fold(table_key)] = catalog_tables.read_model(session, [table_key]).system_named
+            stored = [key for key in _managed(recorded) if fold(key) == fold(table_key)]
+            differences = self.table_drift(session, recorded, stored).values()
+            properties = [difference.property for found in differences for difference in found]
+            cache[fold(table_key)] = catalog_tables.name_drift_renames(table_key, properties)
         for item in cache[fold(table_key)]:
             kind = "FOREIGN KEY" if item.kind == "FOREIGN KEY" else "INDEX"
-            recorded_label = f"{kind} {names.qualified(schema, table)}.{names.quote(item.fixed_name)}"
-            if (
-                fold(item.live_name) == fold(live_name)
-                and label.startswith(f"{kind} ")
-                and fold(recorded_label) in known
-            ):
+            if fold(item.live_name) == fold(live_name) and label.startswith(f"{kind} "):
                 rename = catalog_tables.rename_constraints_sql([item]).replace("\nGO\n", "")
                 return (
-                    f"{label} is the {item.kind} constraint that the release names "
+                    f"{label} is the {item.kind} constraint that the tool recorded as "
                     f"{names.quote(item.fixed_name)}: the engine named it in this database. Do not drop "
                     f"it. Rename it, then plan again: {rename}"
                 )
@@ -719,14 +813,20 @@ class Hooks:
             elif declared is None or live is None:
                 problems.append(_problem(key, [EXISTS], declared, live))
             else:
-                aligned, keep, _ = _aligned(live, declared, engine_named[fold(key)], database_collation)
+                aligned, keep, wanted = _aligned(live, declared, engine_named[fold(key)], database_collation)
                 paths = Model([declared]).diff_paths(Model([aligned]), expressions=False)
                 if paths:
                     problems.append(_problem(key, [path for _, path in paths], declared, aligned))
                     continue
                 capture = live_captures[fold(key)]
+                # an engine-named constraint is recorded under the name of its file, never under
+                # the fixed name of the reader: the rename of drift (A35) gives the recorded name
+                in_file = {
+                    f"constraint {names.quote(fixed)}": f"constraint {names.quote(name)}"
+                    for fixed, name in wanted.items()
+                }
                 captures[key] = {
-                    label: value
+                    in_file.get(label, label): value
                     for label, value in capture.items()
                     if keep is None or not label.startswith(("index ", "constraint ")) or label in keep
                 }
@@ -746,9 +846,9 @@ class Hooks:
         holds, each with the name that its file gives it (fixed_name). Read-only.
 
         Such a constraint reads back as the constraint of the model (same shape), but its name in
-        the database is not the name of the file: a capture under the name of the file would be a
-        name that the database does not have. An engine-named constraint that the model does not
-        hold is an unmanaged sub-object and is not in the result.
+        the database is not the name of the file. The baseline refuses a database that has one
+        (CONSTRAINT_NAMES); after a baseline, drift reports it (A35). An engine-named constraint
+        that the model does not hold is an unmanaged sub-object and is not in the result.
         """
         found = catalog_tables.read_model(session, keys)
         by_table: dict[str, list[SystemNamed]] = defaultdict(list)

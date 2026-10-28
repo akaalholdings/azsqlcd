@@ -880,14 +880,33 @@ def _cmd_drift(call: _Call) -> None:
             (i.cls, i.object_key, i.property, i.stored_hash or "", i.live_hash or "") for i in found.items
         ]
         call.summary.append(_table(("Class", "Object", "Property", "Recorded hash", "Live hash"), rows))
+    # A35: a recorded constraint under a name that the engine made. The way out is its rename, so
+    # the report gives the statement: names and EXEC sys.sp_rename only, for a DBA to review and run
+    renames = list(zip(found.renames, tables.rename_lines(found.renames), strict=True))
+    for _, line in renames:
+        call.say(line)
+    if renames:
+        rows = [
+            (i.table_key, i.kind, i.fixed_name, i.live_name, line.removeprefix(f"rename {i.table_key} "))
+            for i, line in renames
+        ]
+        header = ("Table", "Constraint", "Name to give", "Name in the database", "Statement that renames it")
+        call.summary.append(_table(header, rows))
     if found.has_drift:
         reported = (onboard.UNMANAGED, onboard.UNSCOPED)  # reported, never drift
         drifted = sorted({item.object_key for item in found.items if item.cls not in reported})
+        way_out = ""
+        if renames:
+            way_out = (
+                f". {len(renames)} constraint(s) have a name that the engine made (property "
+                "constraint_name): a DBA runs the statement of each rename line of this report, then "
+                "drift again"
+            )
         raise ToolError(
             Exit.DRIFT,
             "DRIFT_FOUND",
             f"{drifted[0]} differs from what the tool recorded, or is gone ({len(drifted)} object(s) in "
-            "all). Nothing was changed",
+            f"all). Nothing was changed{way_out}",
             detail={"objects": drifted},
         )
     call.say("no drift")
@@ -1453,14 +1472,15 @@ def _read_failure(error: SqlError) -> ToolError:
 
 
 def _told_detail(failure: ToolError) -> list[str]:
-    """The lines of a refusal that the message only counts: each object, blocker, partition scheme
-    or batch.
+    """The lines of a refusal that the message only counts: each object, rename, blocker, partition
+    scheme or batch.
 
     By the rule of every module that builds a ToolError, a detail holds names, property names,
-    hashes and redacted engine messages; never definition or batch text (A25).
+    hashes and redacted engine messages; never definition or batch text (A25). A line of `renames`
+    is 'rename <table key> EXEC sys.sp_rename ...;' (A35): names only, for a DBA to review and run.
     """
     lines: list[str] = []
-    for name in ("objects", "blockers", "schemes", "failures"):
+    for name in ("objects", "renames", "blockers", "schemes", "failures"):
         found = failure.detail.get(name)
         for item in found if isinstance(found, list) else []:
             told = item if isinstance(item, str) else json.dumps(item, sort_keys=True, default=str)

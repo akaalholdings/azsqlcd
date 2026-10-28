@@ -17,7 +17,7 @@ import pytest
 
 from azsqlcd import catalog, chain, emit, lex, lint, names, onboard, plan, release, state, tables
 from azsqlcd.catalog import Difference
-from azsqlcd.catalog_tables import read_model
+from azsqlcd.catalog_tables import SystemNamed, name_drift_property, read_model
 from azsqlcd.config import Scope, load_config
 from azsqlcd.errors import Exit, ToolError
 from azsqlcd.model import DefaultConstraint, Expression, Model, Schema
@@ -890,6 +890,28 @@ def test_drift_of_table_class_objects_comes_from_the_table_model():
         DriftItem(table, "columns", "1" * 64, "2" * 64, "managed"),
     )
     assert without.items == () and not without.has_drift  # no table model: tables are not compared
+
+
+def test_drift_gives_the_renames_of_the_recorded_constraints_that_the_engine_named():
+    # A35: the report of the command needs the names; the items hold property and hashes only
+    table = "TABLE:[sales].[Order]"
+    row = ObjectRow("managed", None, 1, {"columns": []}, state.capture_sha256({"columns": []}))
+    engine_named = SystemNamed(table, "PRIMARY KEY", "PK__Order__3214EC07A1B2C3D4", "PK_Order")
+    name_drift = Difference(name_drift_property(engine_named), "1" * 64, "2" * 64)
+    hooks = TableDrift({table: [Difference("columns", "3" * 64, "4" * 64), name_drift]})
+    db = Db(st=recorded(objects={table: row}), user_objects=[("sales", "Order", "U")])
+
+    found = drift(db, bundle(), CONFIG, "dev", "sales-dev", table_hooks=hooks)
+
+    assert found.items == (
+        DriftItem(table, "columns", "3" * 64, "4" * 64, "managed"),
+        DriftItem(table, name_drift.property, "1" * 64, "2" * 64, "managed"),
+    )
+    assert found.renames == (engine_named,) and found.has_drift
+    # a drift with no such constraint has no rename
+    hooks = TableDrift({table: [Difference("columns", "3" * 64, "4" * 64)]})
+    db = Db(st=recorded(objects={table: row}), user_objects=[("sales", "Order", "U")])
+    assert drift(db, bundle(), CONFIG, "dev", "sales-dev", table_hooks=hooks).renames == ()
 
 
 def test_drift_does_not_report_the_history_table_of_a_temporal_table_as_unmanaged():

@@ -1179,8 +1179,25 @@ def _drift(
     absent: the folded keys of the managed modules that the catalog does not hold. resolve
     --accept-drift does not take an object that is gone, so the message names the tombstone.
     applied_by_hand: the pending migration after which the model equals the catalog (N1-F2).
+
+    A35: a difference of catalog_tables.NAME_DRIFT is a recorded constraint under a name that the
+    engine made. To revert it is to drop a key, and --accept-drift records the same capture again,
+    so the way out is the rename. The message says so, whichever object it names first; the detail
+    `renames` holds one line for each such constraint of every object, with its EXEC sys.sp_rename
+    statement. The command line prints the lines. The message holds no statement: it goes into the
+    triage log, and a detail does not.
     """
     objects = [{"object": key, "differences": [asdict(d) for d in differing[key]]} for key in keys]
+    renames = {
+        key: catalog_tables.name_drift_renames(key, [d.property for d in differing[key]]) for key in keys
+    }
+    lines = catalog_tables.rename_lines(item for found in renames.values() for item in found)
+    detail: dict[str, Any] = {"objects": objects} | ({"renames": lines} if lines else {})
+    rename = (
+        f"{len(lines)} constraint(s) have a name that the engine made (difference "
+        f"{catalog_tables.NAME_DRIFT}). Do not drop such a constraint: a DBA runs the statement of each "
+        "rename line of this refusal, then plan again"
+    )
     if fold(keys[0]) in absent:
         return refused(
             reason_code,
@@ -1188,8 +1205,8 @@ def _drift(
             f"{why} ({len(keys)} object(s) in all). azsqlcd resolve --accept-drift does not take an "
             "object that is gone. Create it again by hand as the tool recorded it, or delete its file "
             f"and add a tombstone for it in {chain.TOMBSTONES_PATH}: the deploy of that release marks "
-            "it dropped and sends no statement",
-            objects=objects,
+            f"it dropped and sends no statement{f'. {rename}' if lines else ''}",
+            **detail,
         )
     properties = ", ".join(difference.property for difference in differing[keys[0]])
     way_out = (
@@ -1202,11 +1219,15 @@ def _drift(
             "--accept-drift: the deploy would send the migration again and fail). Else revert the "
             "change in the database"
         )
+    if lines:
+        # nothing else differs in the first object: to revert or to accept is no way out for it
+        only_names = len(renames[keys[0]]) == len(differing[keys[0]]) and applied_by_hand is None
+        way_out = rename if only_names else f"{way_out}. {rename}"
     return refused(
         reason_code,
         f"{keys[0]} differs from what the tool recorded ({properties}), and {why} ({len(keys)} object(s) "
         f"in all). {way_out}",
-        objects=objects,
+        **detail,
     )
 
 

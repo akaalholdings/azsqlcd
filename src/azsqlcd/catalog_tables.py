@@ -19,7 +19,9 @@ Rules where the catalog cannot say what was declared:
     nullable. The engine may have derived that from the expression; declared again, it gives the
     same catalog row. Every other computed column has no nullability (None).
   * A constraint that the engine named gets the fixed name of the design and is listed in
-    system_named. A capture never holds a name that the engine made.
+    system_named. A capture never holds a name that the engine made. So the capture of a table
+    cannot show that a recorded constraint has such a name now: drift reads system_named for
+    that (A35; name_drift_property).
 
 System-versioned temporal tables: a table with sys.tables.temporal_type = 2 is a Table with
 Temporal (period columns from sys.periods, the name of the history table from history_table_id,
@@ -59,6 +61,7 @@ the statistics of the index.
 from __future__ import annotations
 
 import itertools
+import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterable
 from collections.abc import Sequence as Seq
@@ -1487,6 +1490,51 @@ def rename_constraints_sql(system_named: Iterable[SystemNamed]) -> str:
         old = names.sql_literal(names.qualified(schema, item.live_name))
         batches.append(f"EXEC sys.sp_rename {old}, {names.sql_literal(item.fixed_name)}, N'OBJECT';\nGO\n")
     return "".join(batches)
+
+
+# ------------------------------------------------------------------ drift of a constraint name (A35)
+# The first word of the drift property of a recorded constraint that the database holds under a name
+# that the engine made. No property of a capture starts with it.
+NAME_DRIFT = "constraint_name"
+_QUOTED_NAME = r"\[((?:[^\]]|\]\])+)\]"
+_KINDS = "DEFAULT|CHECK|PRIMARY KEY|UNIQUE|FOREIGN KEY"  # SystemNamed.kind
+_NAME_DRIFT = re.compile(rf"{NAME_DRIFT} {_QUOTED_NAME} \(({_KINDS}), live name {_QUOTED_NAME}\)", re.DOTALL)
+
+
+def name_drift_property(item: SystemNamed) -> str:
+    """'constraint_name [name to give] (KIND, live name [name in the database])'. Names only (A25).
+
+    item.fixed_name is the name that the rename gives: the recorded name of the constraint, which
+    is the name of its file (tables._name_drift). A drift difference is a property and two hashes,
+    and every report prints the property. So the property names the constraint, its kind and its
+    name in the database, and name_drift_renames reads the rename back from it.
+    """
+    live = names.quote(item.live_name)
+    return f"{NAME_DRIFT} {names.quote(item.fixed_name)} ({item.kind}, live name {live})"
+
+
+def name_drift_renames(table_key: str, properties: Iterable[str]) -> list[SystemNamed]:
+    """The renames that the drift properties of one table name, for rename_constraints_sql.
+
+    A property that name_drift_property did not write is left out.
+    """
+    found: list[SystemNamed] = []
+    for text in properties:
+        match = _NAME_DRIFT.fullmatch(text)
+        if match is not None:
+            fixed, kind, live = (part.replace("]]", "]") for part in match.groups())
+            found.append(SystemNamed(table_key, kind, live, fixed))
+    return found
+
+
+def rename_lines(renames: Iterable[SystemNamed]) -> list[str]:
+    """'rename <table key> EXEC sys.sp_rename ...;' for each rename, in the given order.
+
+    The line of the drift report and of a plan refusal that a DBA copies the statement from. Names
+    only; the statement is the one of rename_constraints_sql.
+    """
+    statements = ((item, rename_constraints_sql([item]).replace("\nGO\n", "")) for item in renames)
+    return [f"rename {item.table_key} {statement}" for item, statement in statements]
 
 
 # ------------------------------------------------------------------ sub-objects: blockers, names

@@ -1161,6 +1161,36 @@ def test_the_rename_script_holds_only_sp_rename_and_every_name_is_a_literal():
     assert rename_constraints_sql([]) == ""
 
 
+def test_the_drift_property_of_an_engine_made_name_holds_both_names_and_gives_the_rename_back():
+    # A35: a Difference holds a property and two hashes. The property is what every report of a
+    # drift prints, so it names the constraint, its kind and the name in the database, and the
+    # rename script is made from it and from the key of the table: no second read of the catalog.
+    key = "TABLE:[sales].[Order]"
+    plain = SystemNamed(key, "PRIMARY KEY", "PK__Order__3214EC07A1B2C3D4", "PK_Order")
+    hostile = SystemNamed(key, "CHECK", HOSTILE, "CK_O'Brien] (CHECK, live name [x])")
+
+    assert catalog_tables.name_drift_property(plain) == (
+        "constraint_name [PK_Order] (PRIMARY KEY, live name [PK__Order__3214EC07A1B2C3D4])"
+    )
+    properties = [catalog_tables.name_drift_property(item) for item in (hostile, plain)]
+    assert catalog_tables.name_drift_renames(key, properties) == [hostile, plain]
+    for kind in ("DEFAULT", "CHECK", "PRIMARY KEY", "UNIQUE", "FOREIGN KEY"):
+        item = dataclasses.replace(plain, kind=kind)
+        assert catalog_tables.name_drift_renames(key, [catalog_tables.name_drift_property(item)]) == [item]
+    # the line of a report that a DBA copies the statement from: one line for each rename, in the
+    # given order, with the statement of the rename script and no GO
+    lines = catalog_tables.rename_lines([hostile, plain])
+    assert lines == [
+        f"rename {key} " + rename_constraints_sql([hostile]).removesuffix("\nGO\n"),
+        f"rename {key} EXEC sys.sp_rename N'[sales].[PK__Order__3214EC07A1B2C3D4]', N'PK_Order', N'OBJECT';",
+    ]
+    assert catalog_tables.rename_lines([]) == []
+    # a property of a capture is never read as a rename, whatever name it holds
+    others = ["columns", "column [constraint_name]", "constraint [PK_Order]", "index [IX]", "exists"]
+    others += ["constraint_name", "constraint_name [PK_Order]", properties[1] + " "]
+    assert catalog_tables.name_drift_renames(key, others) == []
+
+
 # ------------------------------------------------------------------ outside the model
 def test_an_object_outside_the_model_is_quarantined_and_the_rest_is_read():
     rows = sales_rows()
