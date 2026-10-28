@@ -564,7 +564,9 @@ files. It only reads the database. It never runs the script.
    `azsqlcd align --root . --env <env> --target <target> [--schema <schema>] [--out <dir>]`.
    It writes `onboarding/<env>/align.sql` and `onboarding/<env>/align.md` under `--out` (default:
    `--root`). Do not commit them.
-2. Read `align.md`. It gives the count of each section and each object with what differs.
+2. Read `align.md`. It gives the count of each section and each object with what differs. An
+   expression (DEFAULT, CHECK, computed column, filter) is compared by its presence only, as
+   `baseline` and `drift` compare it: another expression text in the database gives no statement.
    - "To review": a dropped column, or a type that may not hold every value. The statement is in
      `align.sql`, commented out, after a line `-- REVIEW: loses data: <why>`. Also a mask that
      only the database has: after `-- REVIEW: unmasks column ...`, every reader sees the real

@@ -863,7 +863,10 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   read-only: fence facts and catalog reads only, no lock, no state row. The database model is
   `catalog_tables.read_model` under `[scope]` (or the one schema of `--schema`, as
   `export --schema`); the file model is `gen.load_model` of the working tree, cut to the same
-  scope. Sections: 1, `sp_rename` of each engine-named constraint that a file holds in the same
+  scope. An expression (DEFAULT, CHECK, computed column, filter) is compared by its presence only,
+  as read-back, baseline and drift compare it: the engine gives it back in its own normal form, so
+  the database object takes the expression text of the file before `diff` runs
+  (`align._file_expressions`). Sections: 1, `sp_rename` of each engine-named constraint that a file holds in the same
   shape (`tables.declared_names`); 2, the operations of `diff.diff` (the order of `gen`); 3, the
   file text of each module that differs or is missing (`onboard.compare_modules`), in deploy
   order; 4, `WITH CHECK CHECK CONSTRAINT` and `ALTER INDEX ... REBUILD` for constraints that are

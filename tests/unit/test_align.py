@@ -18,7 +18,21 @@ import pytest
 import support.fake_database as fake_database
 from azsqlcd import align as align_module
 from azsqlcd.catalog_tables import CatalogRead
-from azsqlcd.model import Check, Column, Expression, KeyColumn, Model, PrimaryKey, Schema, Table, TypeRef
+from azsqlcd.model import (
+    Check,
+    Column,
+    Computed,
+    DefaultConstraint,
+    Expression,
+    Index,
+    KeyColumn,
+    Model,
+    PrimaryKey,
+    Schema,
+    Table,
+    TableType,
+    TypeRef,
+)
 from support.fake_database import FakeDatabase
 from unit.test_catalog_tables import price, rows_from_model
 from unit.test_closed_loop import (
@@ -128,6 +142,97 @@ def test_align_of_a_database_that_equals_the_files_writes_nothing_to_align(proje
 
     assert script == "-- nothing to align\n"
     assert "Nothing to align." in report
+
+
+LINE = Table(
+    "sales",
+    "Line",
+    (
+        Column("LineId", TypeRef("int"), False),
+        Column(
+            "Kind",
+            TypeRef("char", length=1),
+            False,
+            default=DefaultConstraint("DF_Line_Kind", Expression.from_sql("('S')")),
+        ),
+        Column("Amount", TypeRef("int"), False),
+    ),
+    (
+        PrimaryKey("PK_Line", True, (KeyColumn("LineId"),)),
+        Check("CK_Line_Kind", Expression.from_sql("([Kind] IN ('S', 'B'))")),
+        Check("CK_Line_Amount", Expression.from_sql("([Amount] >= 0)")),
+    ),
+    (Index("IX_Line_Kind", False, False, (KeyColumn("Kind"),), filter=Expression.from_sql("[Kind] = 'S'")),),
+)
+LINE_SUM = Table(  # a computed column: gen refuses a change of it (COMPUTED_CHANGE)
+    "sales",
+    "LineSum",
+    (
+        Column("Amount", TypeRef("int"), False),
+        Column("Total", None, None, computed=Computed(Expression.from_sql("([Amount] * 2)"), True)),
+    ),
+)
+LINE_INPUT = TableType(
+    "sales",
+    "LineInput",
+    (
+        Column("LineId", TypeRef("int"), False),
+        Column("Amount", TypeRef("int"), False, default=DefaultConstraint(None, Expression.from_sql("(0)"))),
+    ),
+    (Check(None, Expression.from_sql("([Amount] > 0)")),),
+)
+# the definitions as the engine gives them back: its normal form, not the text of the file
+ENGINE_FORMS = {
+    "('S')": "('S')",
+    "([Amount] * 2)": "([Amount]*(2))",
+    "([Kind] IN ('S', 'B'))": "([Kind]='B' OR [Kind]='S')",
+    "([Amount] >= 0)": "([Amount]>=(0))",
+    "[Kind] = 'S'": "([Kind]='S')",
+    "(0)": "((0))",
+    "([Amount] > 0)": "([Amount]>(0))",
+    "((0))": "((0))",
+}
+
+
+def test_align_of_a_deployed_database_that_gives_expressions_in_the_engine_form_writes_no_table_statement(
+    project, monkeypatch
+):
+    """The live engine gives DEFAULT, CHECK, computed-column and filter expressions in its normal form,
+    not in the text of the file. Read-back and drift compare an expression by its presence only, so
+    align must too: it writes no DROP and ADD for each DEFAULT, CHECK and filtered index, and no
+    Hand-write COMPUTED_CHANGE or USER_TYPE_CHANGE. A CHECK that a DBA disabled gets its WITH CHECK
+    CHECK CONSTRAINT in section 4, as it is not created again."""
+    release_1(project)
+    project.write_objects(LINE, LINE_SUM, LINE_INPUT)
+    built = project.release("lines", "lines")
+    db = project.database()
+    assert project.deploy(built, db).code == 0
+
+    forms = {Expression.from_sql(text).comparison: form for text, form in ENGINE_FORMS.items()}
+
+    def engine(model):
+        rows = rows_from_model(model)
+        for name, column in (("defaults", "definition"), ("checks", "definition"), ("columns", "definition")):
+            for row in rows[name]:
+                if row.get(column) is not None:
+                    row[column] = forms[Expression.from_sql(row[column]).comparison]
+        for row in rows["indexes"]:
+            if row.get("filter_definition") is not None:
+                row["filter_definition"] = forms[Expression.from_sql(row["filter_definition"]).comparison]
+        for row in rows["checks"]:
+            if row["name"] == "CK_Line_Kind":
+                row["is_disabled"] = row["is_not_trusted"] = 1  # NOCHECK CONSTRAINT ALL
+        return rows
+
+    monkeypatch.setattr(fake_database, "rows_from_model", engine)
+    _, script, report = align(project, db)
+
+    assert "-- 2. Table-class objects" not in script and "DROP" not in script
+    assert "| Hand-write | 0 |" in report and "COMPUTED_CHANGE" not in report
+    assert script.endswith(
+        "-- 4. Constraint state\n-- [sales].[Line]: 0 rows\n"
+        "ALTER TABLE [sales].[Line] WITH CHECK CHECK CONSTRAINT [CK_Line_Kind];\nGO\n"
+    )
 
 
 CHECKED_CUSTOMER = dataclasses.replace(

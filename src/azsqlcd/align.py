@@ -63,9 +63,11 @@ from azsqlcd.model import (
     DropIndex,
     ForeignKey,
     Model,
+    ModelObject,
     Operation,
     PrimaryKey,
     Table,
+    TableType,
     Unique,
     UnmaskColumn,
     fold,
@@ -140,6 +142,43 @@ def _renamed(table: Table, old: str, new: str) -> Table:
         for c in table.columns
     )
     return replace(table, columns=columns, constraints=constraints)
+
+
+def _file_expressions(live: ModelObject, declared: ModelObject | None) -> ModelObject:
+    """The live object with the expression text of the file wherever both have an expression at the
+    same place: a DEFAULT and a computed column (by column), a CHECK (by name; the unnamed ones of a
+    table type in their order), a filter (by index). The engine gives an expression back in its own
+    normal form, not as the file writes it. Read-back, baseline and drift compare an expression by
+    its presence only (Model.diff_paths(expressions=False)), and so does align."""
+    if not isinstance(live, Table | TableType) or type(declared) is not type(live):
+        return live
+    assert isinstance(declared, Table | TableType)
+    columns = []
+    for column in live.columns:
+        other = declared.column(column.name)
+        if other is not None and column.default is not None and other.default is not None:
+            column = replace(column, default=replace(column.default, expression=other.default.expression))
+        if other is not None and column.computed is not None and other.computed is not None:
+            column = replace(column, computed=replace(column.computed, expression=other.computed.expression))
+        columns.append(column)
+    checks = {fold(c.name): c for c in declared.constraints if isinstance(c, Check) and c.name is not None}
+    unnamed = [c for c in declared.constraints if isinstance(c, Check) and c.name is None]
+    constraints = []
+    for constraint in live.constraints:
+        if isinstance(constraint, Check):
+            other = checks.get(fold(constraint.name)) if constraint.name is not None else None
+            if other is None and constraint.name is None and unnamed:
+                other = unnamed.pop(0)
+            if other is not None:
+                constraint = replace(constraint, expression=other.expression)
+        constraints.append(constraint)
+    indexes = []
+    for index in live.indexes:
+        other = declared.index(index.name)
+        if other is not None and index.filter is not None and other.filter is not None:
+            index = replace(index, filter=other.filter)
+        indexes.append(index)
+    return replace(live, columns=tuple(columns), constraints=tuple(constraints), indexes=tuple(indexes))
 
 
 def _table_of(op: Operation) -> str | None:
@@ -243,7 +282,7 @@ def _tables(
             table = _renamed(table, item.fixed_name, name if name is not None else item.live_name)
         named[key] = table
     # each model is built once: Model.add and Model.replace build the whole model again
-    live = Model(named.get(fold(obj.key), obj) for obj in live.values())
+    live = Model(_file_expressions(named.get(fold(obj.key), obj), head.get(obj.key)) for obj in live.values())
     extra = [live[key] for key in live if key not in head]
     only += [Item(obj.key, "no file") for obj in extra]
     head = Model([*head.values(), *extra])  # never dropped: it stays as the database has it
