@@ -136,8 +136,9 @@ class Work:
     units: tuple[Unit, ...] = ()
     destructive: tuple[Destructive, ...] = ()
     warnings: tuple[str, ...] = ()
-    # parsed: the migrations of the release that are set aside here. Not run; the table hooks take
-    # what they create for objects that a migration creates, not for objects never compared
+    # parsed: the migrations of the release that are set aside here and can run later (not a skip as
+    # not_managed, which never runs). Not run; the table hooks take what they create for objects
+    # that a migration creates, not for objects never compared
     set_aside: tuple[Migration, ...] = ()
 
 
@@ -1236,7 +1237,11 @@ def pending_work(
         units=units,
         destructive=tuple(destructive),
         warnings=(*catch_up_notes, *order_notes, *aside_notes, *warnings),
-        set_aside=held_migrations,
+        set_aside=tuple(
+            migration
+            for migration in held_migrations
+            if aside.active[migration.file].reason != set_aside.NOT_MANAGED
+        ),
     )
 
 
