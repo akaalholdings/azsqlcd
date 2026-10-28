@@ -1309,10 +1309,17 @@ def test_onboard_passes_one_schema_to_the_export_and_to_both_baselines():
         form = triggers(doc)["workflow_dispatch"]["inputs"]
         assert form["schema"]["type"] == "string" and form["schema"]["default"] == ""
         called = jobs(caller / ".github" / "workflows" / "onboard.yml")["onboard"]["with"]
-        assert called["schema"] == "${{ inputs.schema }}"
         assert set(called) <= set(inputs), (
             "the caller passes an input that the reusable workflow does not have"
         )
+        # the pinned tag (0.2.0) has no input schema: the caller passes it as a comment line, which a
+        # team takes in when it pins the tag after 0.2.0 (see the test of the pinned inputs)
+        lines = [
+            line.strip()
+            for line in (caller / ".github" / "workflows" / "onboard.yml").read_text().splitlines()
+        ]
+        assert "# schema: ${{ inputs.schema }}" in lines and "schema" not in called
+        assert "# The input schema needs the tool tag after 0.2.0: then remove the `# ` below." in lines
 
 
 def test_onboard_reads_with_the_plan_identity_and_writes_only_behind_the_deploy_environment():
@@ -1962,6 +1969,74 @@ def test_the_split_of_the_runners_says_that_the_pinned_tag_must_have_runs_on_dep
     split = split[split.index("To split the runners:") :]
     assert "is in the tool release after 0.2.0" in split
     assert "must name that tag or a later one (section 9)" in split
+
+
+# The inputs of each reusable workflow at the tag that the callers pin (git show v0.2.0:...), and the
+# actions that resolve.yml of that tag accepts. GitHub refuses a run that passes an unknown input.
+PINNED_TAG = "0.2.0"
+PINNED_INPUTS = {
+    "release.yml": {"release", "runs-on"},
+    "stage.yml": {"check-only", "digest", "environment", "gated", "release", "runs-on", "runs-on-light"},
+    "verify.yml": {"runs-on"},
+    "drift.yml": {"environment", "runs-on", "runs-on-light"},
+    "onboard.yml": {
+        "action",
+        "confirm_database",
+        "digest",
+        "environment",
+        "release",
+        "runs-on",
+        "runs-on-light",
+        "target",
+    },
+    "resolve.yml": {
+        "action",
+        "confirm_database",
+        "digest",
+        "environment",
+        "force_no_readback",
+        "reason",
+        "release",
+        "runs-on",
+        "runs-on-light",
+        "subject",
+        "target",
+    },
+}
+PINNED_RESOLVE_ACTIONS = {
+    "mark-applied",
+    "mark-not-applied",
+    "accept-drift",
+    "adopt-module",
+    "clear-run",
+    "rebind-environment",
+}
+
+
+def test_every_input_that_a_caller_passes_is_an_input_of_the_workflow_at_the_pinned_tag():
+    """A caller that passes an input that the pinned tag does not have makes every dispatch of that
+    workflow fail, not only the runs that use the input. An input of a later tag is a comment line,
+    as runs-on-deploy is, until the caller pins that tag."""
+    for folder in CALLERS:
+        for path in sorted((folder / ".github" / "workflows").glob("*.yml")):
+            for job_id, job in jobs(path).items():
+                found = re.fullmatch(r"\S+/\.github/workflows/(\w+\.yml)@v([\d.]+)", job.get("uses", ""))
+                if found is None:
+                    continue
+                name, tag = found.groups()
+                assert tag == PINNED_TAG, f"{rel(path)}: {job_id}"
+                unknown = sorted(set(job.get("with") or {}) - PINNED_INPUTS[name])
+                assert not unknown, f"{rel(path)}: {job_id} passes {unknown}, not inputs of {name}@v{tag}"
+
+
+def test_a_resolve_action_of_a_later_tag_is_offered_with_a_note_that_it_needs_that_tag():
+    for folder in CALLERS:
+        path = folder / ".github" / "workflows" / "resolve.yml"
+        text = path.read_text(encoding="utf-8")
+        offered = set(triggers(load(path))["workflow_dispatch"]["inputs"]["action"]["options"])
+        later = sorted(offered - PINNED_RESOLVE_ACTIONS)
+        assert later == ["unpark"], rel(path)
+        assert f"# unpark needs the tool tag after {PINNED_TAG}" in text, rel(path)
 
 
 def test_the_runner_group_steps_count_the_deploy_groups_of_the_split():

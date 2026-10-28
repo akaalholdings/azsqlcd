@@ -17,6 +17,7 @@ on:
         description: The release that the failed run used, for example r57
         type: string
         required: true
+      # unpark needs the tool tag after 0.2.0: resolve.yml@v0.2.0 refuses it.
       action:
         type: choice
         options: [mark-applied, mark-not-applied, accept-drift, adopt-module, clear-run, rebind-environment, unpark]

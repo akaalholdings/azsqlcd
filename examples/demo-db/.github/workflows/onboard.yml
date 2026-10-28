@@ -26,7 +26,7 @@ on:
         type: string
         default: ''
       schema:
-        description: One schema of [scope], to onboard schema by schema (empty for the whole scope)
+        description: One schema of [scope], to onboard schema by schema (empty for the whole scope). Needs the tool tag after 0.2.0
         type: string
         default: ''
 
@@ -56,7 +56,8 @@ jobs:
       release: ${{ needs.release.outputs.release }}
       digest: ${{ needs.release.outputs.digest }}
       confirm_database: ${{ inputs.confirm_database }}
-      schema: ${{ inputs.schema }}
+      # The input schema needs the tool tag after 0.2.0: then remove the `# ` below.
+      # schema: ${{ inputs.schema }}
       # Managed identity: remove the `# ` below. baseline then runs on the runners of the deploy identity.
       runs-on: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod"}' || '{"group":"azsql-nonprod"}' }}
       # runs-on-deploy: ${{ inputs.environment == 'prod' && '{"group":"azsql-prod-deploy"}' || '{"group":"azsql-nonprod-deploy"}' }}

@@ -14,7 +14,9 @@ number and date. Version numbers follow semantic versioning.
 - `export --schema NAME` exports one schema, adds its captures to `onboarding/<env>/snapshot.json`
   of the repository, and prints what to add to `[scope] schemas`. `baseline --schema NAME` compares
   and records the objects of one schema that have no managed row; the other rows stay as they are.
-  The workflow `onboard.yml` takes the input `schema` for both.
+  The workflow `onboard.yml` takes the input `schema` for both. A database repository gets it when
+  its callers pin this tag: the callers of the template and the example keep `schema:` as a comment
+  line while they pin v0.2.0, which refuses an unknown input.
 - Reason codes 22 `OUT_OF_SCOPE` (`export --schema`, `baseline --schema`, `align --schema` and
   `resolve --adopt-module` outside the scope) and 22 `SCHEMA_NOT_FOUND` (`export --schema` of a
   schema that the database does not have). Lint and verify finding `OUT_OF_SCOPE`: an object file,
@@ -67,7 +69,8 @@ number and date. Version numbers follow semantic versioning.
   compared by the names in its text (note `independence not proven for a raw batch: <file>`).
 - `resolve --unpark <file>` (RESOLVE with `-f action=unpark -f subject=<file>`) ends a park. The
   next deploy runs the migration at its place among the pending migrations. A withdrawn parked
-  migration never runs, and its replacement (`replaces=`) runs as before.
+  migration never runs, and its replacement (`replaces=`) runs as before. `resolve.yml` of this
+  tag accepts `action=unpark`; `resolve.yml@v0.2.0` refuses it, so a caller needs this tag.
 - Without the key, or with `park_failed = false`, every batch, output, plan, report and state write
   is the same as in 0.2.0.
 - Set-aside migrations (review fixes, A41): a parked migration that creates a table, schema, type,
