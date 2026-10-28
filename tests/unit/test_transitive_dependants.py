@@ -136,3 +136,28 @@ def test_the_modules_that_the_release_changes_are_roots_of_the_closure():
 
     assert [(d.key, d.via) for d in found.dependants] == [(view("v_b"), (view("v_a"),))]
     assert db.sent("azsqlcd:dependants_of") == []  # no table: the direct query is not sent
+
+
+def test_a_module_that_waits_on_a_cycle_comes_after_the_modules_of_the_cycle():
+    """f_x and f_y use each other; a_fn uses f_x and sorts first by key, but it is not on the cycle.
+    Before the fix the first waiting key went first, so a_fn was refreshed before f_x."""
+    db = FakeSession()
+    db.respond("azsqlcd:dependants_of", [[("sales", "f_x", "TF", 0)]])
+    edges = {"f_x": ["f_y", "a_fn"], "f_y": ["f_x"]}
+    db.respond(
+        CHAIN,
+        lambda batch: [
+            [
+                ("sales", user, "TF", 0, "sales", used)
+                for used, users in edges.items()
+                if f"OBJECT_ID(N'[sales].[{used}]')" in batch
+                for user in users
+            ]
+        ],
+    )
+
+    found = catalog.dependant_closure(db, [TABLE])
+
+    function = "FUNCTION:[sales].[{}]".format
+    # f_x opens the cycle (first by key of its members); then a_fn and f_y are ready, in key order
+    assert [d.key for d in found.dependants] == [function("f_x"), function("a_fn"), function("f_y")]

@@ -568,8 +568,8 @@ def dependant_closure(
     sys.sql_expression_dependencies once (one batch for each KEY_CHUNK keys) for the modules that
     reference what the level before found. A module is read once, so a cycle ends. The search
     stops at DEPENDANT_DEPTH levels (Closure.capped). The order is the order of refresh: a module
-    after each found module that it references, else by key; in a cycle the first by key goes
-    first. A module that references a table directly has no path; the root of a longer path is
+    after each found module that it references, else by key; in a cycle the first member by key
+    goes first. A module that references a table directly has no path; the root of a longer path is
     read once more only when there is more than one table.
     """
     found: dict[str, Dependant] = {}  # folded key -> module
@@ -617,12 +617,27 @@ def dependant_closure(
         key: Dependant(d.key, d.kind, d.schema_bound, path(key)) if key in parent else d
         for key, d in found.items()
     }
+
+    def on_cycle(start: str, waiting: set[str]) -> bool:
+        seen: set[str] = set()
+        stack = [*(uses.get(start, set()) & waiting)]
+        while stack:
+            key = stack.pop()
+            if key == start:
+                return True
+            if key not in seen:
+                seen.add(key)
+                stack += uses.get(key, set()) & waiting
+        return False
+
     ordered: list[Dependant] = []
     left = sorted(with_paths.values(), key=lambda d: d.key)
     while left:
         waiting = {_fold(d.key) for d in left}
         ready = [d for d in left if not (uses.get(_fold(d.key), set()) - {_fold(d.key)}) & waiting]
-        ready = ready or left[:1]
+        # nothing is ready: the waiting modules wait on a cycle. A module that only uses the cycle
+        # is not on it, so the first member of a cycle by key goes first
+        ready = ready or [next(d for d in left if on_cycle(_fold(d.key), waiting))]
         ordered += ready
         done = {_fold(d.key) for d in ready}
         left = [d for d in left if _fold(d.key) not in done]
