@@ -1694,6 +1694,37 @@ def _baselined_with_tables(recorded: State) -> bool:
     )
 
 
+def environment_work(
+    bundle: Bundle,
+    config: Config,
+    env: str,
+    recorded: State,
+    aside: Aside,
+    table_hooks: TableHooks | None,
+) -> tuple[Work, Aside, Hold | None, dict[str, tuple[ChainEntry, set_aside.SetAside]], list[str]]:
+    """pending_work for one environment, as the plan computes it: with the holds of its products
+    ([products]), the migrations that it skips as not managed ([env.<name>] not_managed) and its scope.
+    recorded: the state cut to the scope (scoped_state); aside: set_aside.read of the database;
+    table_hooks: give the head model, when tables are modelled. Returns the work, the set-aside facts with the
+    skips, the holds, and the skips of _not_managed_skips."""
+    scope = config.scope
+    hold = products.hold(config, env, bundle.files) if config.products else None
+    skips, skipped = _not_managed_skips(bundle, recorded, aside, scope, hold)
+    if skips:
+        aside = Aside({**aside.active, **{file: item for file, (_, item) in skips.items()}}, aside.released)
+    held_here = aside.active or (hold is not None and hold.held_migrations)
+    work = pending_work(
+        _managed_files(bundle, scope),
+        recorded,
+        config.project.module_chunk,
+        aside,
+        table_hooks.model if table_hooks is not None and held_here else None,
+        hold,
+        scope,
+    )
+    return work, aside, hold, skips, skipped
+
+
 def compute_plan(
     bundle: Bundle,
     config: Config,
@@ -1755,15 +1786,7 @@ def compute_plan(
         ]
 
     aside = set_aside.read(session, config, recorded)
-    hold = products.hold(config, env, bundle.files) if config.products else None
-    skips, skipped = _not_managed_skips(bundle, recorded, aside, scope, hold)
-    if skips:
-        aside = Aside({**aside.active, **{file: item for file, (_, item) in skips.items()}}, aside.released)
-    held_here = aside.active or (hold is not None and hold.held_migrations)
-    model = table_hooks.model if table_hooks is not None and held_here else None
-    work = pending_work(
-        _managed_files(bundle, scope), recorded, config.project.module_chunk, aside, model, hold, scope
-    )
+    work, aside, hold, skips, skipped = environment_work(bundle, config, env, recorded, aside, table_hooks)
     manifest = bundle.manifest
     recorded_sha = recorded.recorded_git_sha
     repo = repo_url.rstrip("/") if repo_url else None

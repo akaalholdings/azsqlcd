@@ -1820,17 +1820,23 @@ def mark_applied(
         # a migration that later ones ran past while it was parked is no hole; one still parked is not
         # pending: --unpark it first
         aside = set_aside.read(session, config, recorded)
-        model = table_hooks.model if table_hooks is not None and aside.active else None
-        work = plan.pending_work(
-            bundle, plan.scoped_state(recorded, config.scope), config.project.module_chunk, aside, model
-        )
-        first = work.pending[0] if work.pending else None
         if migration in aside.active:
             raise _not_applicable(
                 f"{migration} is parked in this database ({aside.active[migration].why}). If its statements "
                 f"ran by hand, run azsqlcd resolve --unpark {migration} first, then --mark-applied",
                 migration=migration,
             )
+        # the holds of products and the skips of not_managed, as the plan takes them: a held
+        # migration before this one is set aside, not a hole in the chain
+        work, *_ = plan.environment_work(
+            bundle,
+            config,
+            env,
+            plan.scoped_state(recorded, config.scope),
+            aside,
+            table_hooks,
+        )
+        first = work.pending[0] if work.pending else None
         if first is None or first.file != migration or first.mode != "tx":
             raise _not_applicable(
                 f"{migration} is not a nontx step with the status started or unknown, and it is not the "

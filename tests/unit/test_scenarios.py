@@ -2442,6 +2442,53 @@ def test_a_shared_change_that_names_a_held_module_with_a_held_text_change_is_ref
     assert "another text than its file" in refused.err and frozen(test) == before
 
 
+def test_mark_applied_where_a_product_is_held_takes_the_holds_as_the_plan_does(pipe):
+    """sandbox holds the migration of the product balance, and the shared migrations after it are
+    applied there. resolve --mark-applied must see the held migration as set aside, as the plan does,
+    and not as a hole in the chain (CHAIN_DIVERGED). Then: a parked migration is refused with
+    RESOLVE_NOT_APPLICABLE, and --unpark then --mark-applied records it."""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    sandbox = pipe.dbs["sandbox"]
+    r1, balance, _ = balance_release(pipe)
+    pipe.write(
+        "azsqlcd.toml",
+        pipe.read("azsqlcd.toml").replace("table_model = true", "table_model = true\npark_failed = true"),
+    )
+    pipe.push("parking of failed migrations")
+    assert pipe.promote(r1, "dev").code == 0 and pipe.promote(r1, "sandbox").code == 0
+    assert balance not in dict(migrations(sandbox))  # held
+
+    # a DBA ran the shared migration of r2 by hand in sandbox
+    pipe.write_objects(ORDER_PRIORITY)
+    r2 = pipe.release("a priority of an order", "order_priority")
+    assert pipe.promote(r2, "dev").code == 0
+    sandbox.out_of_band("ALTER TABLE [sales].[Order] ADD [Priority] tinyint NULL;")
+    marked = pipe.resolve(r2, "sandbox", "--mark-applied", r2.file)
+    assert marked.code == 0, marked.err
+    assert (r2.file, "ok") in migrations(sandbox) and balance not in dict(migrations(sandbox))
+    assert pipe.promote(r2, "sandbox").code == 0
+
+    # a migration that fails in sandbox is parked; the owner applies it by hand
+    pipe.write_objects(with_columns(ORDER_PRIORITY, Column("Rank", TINY, False)))
+    r3 = pipe.release("a rank of an order", "order_rank")
+    assert pipe.promote(r3, "dev").code == 0
+    sandbox.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    assert pipe.promote(r3, "sandbox").reason == "BATCH_FAILED"
+    assert pipe.promote(r3, "sandbox").code == 0  # parked
+    sandbox.out_of_band(
+        "ALTER TABLE [sales].[Order] ADD [Rank] tinyint NOT NULL CONSTRAINT [DF_fill] DEFAULT (0);",
+        "ALTER TABLE [sales].[Order] DROP CONSTRAINT [DF_fill];",
+    )
+    parked = pipe.resolve(r3, "sandbox", "--mark-applied", r3.file)
+    assert (parked.code, parked.reason) == (22, "RESOLVE_NOT_APPLICABLE"), parked.err
+    assert f"--unpark {r3.file} first" in parked.err
+    assert pipe.resolve(r3, "sandbox", "--unpark", r3.file).code == 0
+    marked = pipe.resolve(r3, "sandbox", "--mark-applied", r3.file)
+    assert marked.code == 0, marked.err
+    assert (r3.file, "ok") in migrations(sandbox) and balance not in dict(migrations(sandbox))
+
+
 def test_without_products_the_plan_and_the_state_writes_are_those_of_the_code_without_products(
     pipe, monkeypatch
 ):
