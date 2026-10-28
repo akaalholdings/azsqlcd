@@ -980,7 +980,8 @@ def _cmd_export(call: _Call) -> None:
     args = call.args
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    config = _root_config(args.root)
+    # [env.<name>] not_managed: outside the scope of this environment, so not read or written
+    config = for_env(_root_config(args.root), args.env)
     _, target = resolve_target(config, args.env, args.target)
     onboard.export_scope(config, args.schema)  # a schema that cannot be exported is refused before a session
     snapshot = _snapshot_of(Path(args.root), args.env) if args.schema is not None else None

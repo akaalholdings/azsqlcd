@@ -1013,7 +1013,8 @@ one environment does not manage", is the procedure.
 
 - A44. `[env.<name>] not_managed`: patterns `schema.name` with the syntax and checks of `[scope]
   exclude_objects` (`config._check_patterns`). `config.for_env(config, env)` (applied by
-  `cli._release` for plan, deploy, drift, baseline and resolve) joins them to the scope as
+  `cli._release` for plan, deploy, drift, baseline and resolve, and by `cli._cmd_export` and
+  `align`) joins them to the scope as
   `Scope.not_managed`; without [scope] the scope is every schema. In that environment the objects
   are outside the scope: not read, compared, baselined, listed or sent (`plan._managed_files`
   takes their module files out of the release for `pending_work`; `tables.Hooks.unrecorded_objects`

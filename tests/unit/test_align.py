@@ -9,6 +9,7 @@ flags away again. Then `baseline` must pass.
 """
 
 import dataclasses
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -678,3 +679,30 @@ def test_align_does_not_read_or_write_the_objects_that_the_environment_does_not_
     report = (out / "onboarding" / "test" / "align.md").read_text()
     assert "[Customer]" not in script and "[sales].[Customer]" not in report
     assert script == "-- nothing to align\n"
+
+
+def test_export_does_not_read_or_write_the_objects_that_the_environment_does_not_manage(project):
+    """setup.md, "Objects that one environment does not manage": the matching objects are outside the
+    scope there, as for [scope] exclude_objects, and are not read. export --env test must not write
+    their files or their captures in snapshot.json; export --env dev, which manages them, does."""
+    release_1(project)
+    toml = (project.repo / "azsqlcd.toml").read_text() + ENV_TEST.replace(
+        "gated = true\n", 'gated = true\nnot_managed = ["sales.Customer"]\n'
+    )
+    project.write("azsqlcd.toml", toml)
+    db = project.database()
+    db.model = Model([SALES, CUSTOMER, ORDER])
+    db.out_of_band(FUNCTION[1], VIEW[1], PROCEDURE[1])
+
+    for env, target, held in (("dev", "sales-dev", True), ("test", "sales-test", False)):
+        for schema in ([], ["--schema", "sales"]):
+            out = project.out("export")
+            where = ["--env", env, "--target", target, *schema, "--out", str(out)]
+            done = project.tool("export", "--root", str(project.repo), *where, db=db)
+            assert done.code == 0, done.err
+            snapshot = json.loads((out / "onboarding" / env / "snapshot.json").read_text())
+            assert (out / "schema" / "tables" / "sales.Customer.sql").exists() is held, (env, schema)
+            assert ("TABLE:[sales].[Customer]" in json.dumps(snapshot)) is held, (env, schema)
+            assert (out / VIEW[0]).exists(), (env, schema)  # the other objects are exported
+            # a table with a foreign key to it needs it: not managed there either, as under [scope]
+            assert (out / "schema" / "tables" / "sales.Order.sql").exists() is held, (env, schema)

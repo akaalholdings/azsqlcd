@@ -919,8 +919,9 @@ manages (or hold a wildcard).
 What the tool does in that environment:
 
 1. The matching objects are outside the scope, as for `[scope] exclude_objects`: they are not read,
-   compared, baselined or listed as unmanaged, `drift` reports nothing for them, and `align`
-   writes no statement for them. A DML
+   compared, baselined or listed as unmanaged, `drift` reports nothing for them, `align`
+   writes no statement for them, and `export` writes no file and no capture for them. A table
+   with a foreign key to such an object is not exported there either (`DEPENDS_ON_UNMANAGED`). A DML
    trigger follows its table: the trigger of a matching table is not managed either. A schema
    itself is never matched: `legacy.*` leaves the schema `legacy` managed, while the release holds
    one of its objects that no pattern matches. When the patterns match every object of a schema in
