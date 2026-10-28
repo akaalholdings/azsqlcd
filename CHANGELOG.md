@@ -136,6 +136,13 @@ number and date. Version numbers follow semantic versioning.
 - `azsqlcd products --env <env>` lists apart the held items that `not_managed` takes out of that
   environment (`not managed in <env>: ...`).
 
+- The optional input `runs-on-deploy` in `stage.yml`, `onboard.yml` and `resolve.yml`. When it
+  is set, the jobs of the deploy identity (`stage.yml` deploy, `onboard.yml` baseline,
+  `resolve.yml` resolve) run on it. When it is empty, they run on `runs-on`, as before.
+  `drift.yml` does not have this input: drift uses the plan identity only. The caller workflows
+  of the template and of the example have the input as a comment line. How to split the runners
+  and the order of the steps: `docs/setup.md`, section 2.
+
 ### Changed
 
 - With `[scope]`, `export`, `plan` and `drift` do not read the schemas outside it and list nothing
