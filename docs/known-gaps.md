@@ -1565,12 +1565,14 @@ Two reviewers reproduced eight findings. Each has a regression test.
 - `[project] module_chunk` was required. The message for a missing key did not say what to add.
 - Spike item L9 was `inconclusive` for a slow read that no deploy makes.
 
-### Not proven: SQL authentication
+### SQL authentication: what is not proven
 
-- No connection with SQL authentication was made. Only the Python layer of the driver
-  (mssql-python 1.15.0: its parser and builder of the connection string, in a child process)
-  read 29 hostile login and password strings back as one value each. What the ODBC driver does
-  with the string is not proven.
+- Connections with SQL authentication were made on 2026-10-26: `live_acceptance.py` with
+  `AZSQLCD_AUTH=sql` gave 49 pass, 0 fail, 1 not applicable, and the password was in no line of
+  the output (`docs/live-testing.md`, section 12). The login and the password were plain values.
+  For hostile strings, only the Python layer of the driver (mssql-python 1.15.0: its parser and
+  builder of the connection string, in a child process) read 29 login and password strings back
+  as one value each. What the ODBC driver does with such a string is not proven.
 - The text and the SQLSTATE of a failed SQL login from the real driver were not seen. The tool
   hides the driver message when the number is 18456, the SQLSTATE is 28000, or the text holds
   "login failed", "invalid authorization specification" or "password". Any other connect text is

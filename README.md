@@ -37,6 +37,17 @@ SQL Database on 2026-10-07:
 A column with dynamic data masking is in the table model (not in a table type); a masked column
 has not run through `deploy` on a database.
 
+Second live run, 2026-10-26, on two disposable databases on one server (`docs/live-testing.md`,
+section 12): the table-model script with partitioned tables (35 of 35 checks, both passes), the
+acceptance suite with the token of the Azure CLI (50 of 50) and with a SQL login (49 pass, 1 not
+applicable), `tests/live`, every automatic spike item, L8 on the second database, L12 with its fix,
+L14, and L13 in part. On 2026-10-28 a check of columnstore alignment on partitioned tables.
+
+The features of 0.3.0 (`[scope]`, `align`, parking, product holds, `[env.<name>] not_managed`,
+constraint-name drift, transitive dependants) are proven against the fake engine. A live
+end-to-end run of them on 2026-10-28 found defects in `align` and in `resolve --mark-applied`
+where a product is held; they are fixed and tested against the fake, and that run was not repeated.
+
 On GitHub Actions (a scratch demo repository, 2026-10-07): the workflows ran up to the Azure login
 step. Green: release create, `verify` (pass, and fail as required), dispatch of an existing
 release, `targets`, `record`, `incident`. Every job that needs a database stops at the login (the
@@ -46,9 +57,9 @@ What did not run: any production use; any workflow step after the Azure login on
 (the gate job, approvals, the OIDC subject against Entra, runner groups); anything on Windows
 against a database (the unit tests pass on the Windows runners of `ci.yml`), or on Python 3.14
 against a database, or on the runner image; the role path of `setup-sql` for environments that
-share one identity; the spike items L8 (second database), L12, L13, L14; a loss of the network
-during COMMIT; the sign-in with a managed identity and the sign-in with SQL authentication
-(unit tests only: `docs/known-gaps.md`, section 13). The everyday work and the onboarding through the command line ran before the last
+share one identity; L13 for the full 90 minutes after the expiry of the token; L8 across two
+servers; a loss of the network during COMMIT; the sign-in with a managed identity (unit tests
+only: `docs/known-gaps.md`, section 13). The everyday work and the onboarding through the command line ran before the last
 fix wave and were not repeated on the final commit: the tree holds changes made after those
 runs, and has not run against a database as a whole.
 
