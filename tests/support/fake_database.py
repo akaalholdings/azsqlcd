@@ -1070,6 +1070,16 @@ class FakeDatabase:
             if run["status"] in ("running", "unknown") or run["run_id"] in (ok, committed)
         ]
 
+    def _q_read_failed_runs(self, toks: list[Tok]) -> Rows:
+        columns = ("run_id", "release_seq", "status", "failed_step", "note")
+        return [
+            tuple(run[column] for column in columns)
+            for run in sorted(self._state("run"), key=lambda run: run["run_id"])
+            if run["command"] == "deploy"
+            and run["status"] in ("failed", "unknown")
+            and run["failed_step"] is not None
+        ]
+
     def _q_read_state_steps(self, toks: list[Tok]) -> Rows:
         columns = ("step_id", "run_id", "kind", "migration_id", "file_sha256", "status", "note")
         steps = sorted(self._state("step"), key=lambda step: step["step_id"])

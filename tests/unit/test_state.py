@@ -980,3 +980,17 @@ def test_a_role_of_this_script_does_not_stop_the_second_run_of_the_script():
 
 def flat_sql(sql: str) -> str:
     return " ".join(t.text for t in tokens(sql) if t.kind not in lex.TRIVIA)
+
+
+def test_the_failed_runs_are_read_with_the_step_and_the_reason_code_of_their_end():
+    """The facts of a park (set_aside.py): no new column, no new status. The run row of a deploy
+    that ended failed or unknown at a step holds the step and, in its note, the reason code."""
+    db = FakeSession()
+    db.respond("azsqlcd:read_failed_runs", [[(7, 3, "failed", "0002__order_note.sql#1", "BATCH_FAILED")]])
+
+    got = state.read_failed_runs(db)
+
+    assert got == (state.FailedRun(7, 3, "failed", "0002__order_note.sql#1", "BATCH_FAILED"),)
+    (batch,) = db.sent("azsqlcd:read_failed_runs")
+    assert "[command] = N'deploy'" in batch and "[status] IN (N'failed', N'unknown')" in batch
+    assert "[failed_step] IS NOT NULL" in batch and batch.lstrip().startswith("/* azsqlcd:")

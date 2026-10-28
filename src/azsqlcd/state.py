@@ -576,6 +576,35 @@ def read_state(session: Session) -> State:
     )
 
 
+@dataclass(frozen=True)
+class FailedRun:
+    """A deploy run that ended failed or unknown at a step: the facts of a park (set_aside.py)."""
+
+    run_id: int
+    release_seq: int
+    status: str  # failed | unknown
+    failed_step: str  # the id of the plan step where the run stopped
+    reason_code: str | None  # the note of the run row: the reason code of its end
+
+
+_READ_FAILED_RUNS = (
+    "/* azsqlcd:read_failed_runs */ SELECT [run_id], [release_seq], [status], [failed_step], [note] "
+    f"FROM {_RUN} WHERE [command] = N'deploy' AND [status] IN (N'failed', N'unknown') "
+    "AND [failed_step] IS NOT NULL ORDER BY [run_id];"
+)
+
+
+def read_failed_runs(session: Session) -> tuple[FailedRun, ...]:
+    """The deploy runs that ended failed or unknown at a step, by run_id. One SELECT batch.
+
+    Sent only when [project] park_failed = true: read_state is the same batch set as before.
+    """
+    return tuple(
+        FailedRun(int(r[0]), int(r[1]), str(r[2]), str(r[3]), None if r[4] is None else str(r[4]))
+        for r in rows(session, _READ_FAILED_RUNS)
+    )
+
+
 # ------------------------------------------------------------------ write statements
 def insert_run(
     *,
