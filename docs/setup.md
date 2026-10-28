@@ -736,12 +736,22 @@ What the tool does:
    touches or names, and may not name an object that M touches. A module of the release may not
    name an object that M touches. Else the plan stops with 22 `SET_ASIDE_DEPENDENCY`. A raw or
    data batch is compared by the names in its text (note `independence not proven for a raw
-   batch: <file>`). Only names written with their schema (`[sales].[Order]`) count.
+   batch: <file>`). In a raw or data batch only names written with their schema
+   (`[sales].[Order]`) count. In a module, a name with no schema is an object of dbo, as for the
+   order of modules. A rename is compared by the names of its statement and, with
+   `table_model = true`, also by the tables with a key to the renamed table.
 5. The park ends in three ways. M is applied (for example after `resolve --mark-applied`). M is
    withdrawn by pull request: it never runs, and its replacement runs. Or an operator runs
    `azsqlcd resolve --unpark <file>` (RESOLVE with `-f action=unpark -f subject=<file>`) after the
    cause is fixed: the next deploy runs M at its place among the pending migrations. If M fails
    again, it is parked again.
+6. A DBA applied the statements of M by hand: run `azsqlcd resolve --unpark <file>` first, then
+   `azsqlcd resolve --mark-applied <file>`. `--mark-applied` of a parked migration is refused with
+   `RESOLVE_NOT_APPLICABLE`.
+7. Keep `park_failed = true` while a park holds, or while a migration that was parked is still
+   pending. With the key off, a migration that later releases ran past is a hole: the plan stops
+   with `CHAIN_DIVERGED`, and `--unpark` is refused. Switch the key on again, then unpark or
+   withdraw the migration.
 
 No column and no status was added to the state tables. A park is the run row of the failed deploy
 (status `failed` or `unknown`, `failed_step` `<file>#<n>`, the reason code in `note`); an unpark is

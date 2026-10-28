@@ -297,7 +297,7 @@ and `tables.py` are not in the map of "Build contracts".
 | `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts; `schema_condition`, `list_schemas` | config, errors, names, session, sqlerrors, state |
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
 | `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
-| `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A35) | chain, config, diff, errors, modules, names, parse, session, state |
+| `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A35) | chain, config, diff, errors, model, modules, names, parse, session, state |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -893,9 +893,10 @@ fails", is the procedure.
   resolve step with the note `unpark <file>` (`set_aside.unpark_note`), as `clear-run` does; a
   later failure parks again.
 - Independence (`set_aside.check`): a model batch touches what `diff.touched_objects` gives for
-  its operation; a data or raw batch, and a model batch that cannot be followed without the
-  model, touch every name of their text. Names come from the token scan of modules
-  (`modules.named_objects`), names written with their schema only.
+  its operation; a data or raw batch touches every name of their text. Names come from the token
+  scan of modules (`modules.named_objects`), names written with their schema only. A module is
+  compared by the names that the dependency scan of modules reads (`modules.referenced_objects`):
+  a one-part name is an object of dbo (A17).
 - New reason code `SET_ASIDE_DEPENDENCY` (22). New plan finding `parked`. `resolve --unpark`
   answers `RESOLVE_NOT_APPLICABLE` for a migration that is not parked.
 - Where a set-aside migration is shown: the plan output (`note: parked: <file> (run <id>, <reason
@@ -906,9 +907,9 @@ fails", is the procedure.
   does not change. LOOK shows the run row of the park (`failed_step`, `note`).
 - Plug-in points for a later reason, with the signatures of this build: `REASONS`, `WAY_OUT`,
   `read(session, config, recorded) -> Aside`, `SetAside(file, reason, why)`,
-  `Aside(active, released)`, `check(pending, aside, sent_modules) -> notes`,
+  `Aside(active, released)`, `check(pending, aside, sent_modules, model=None) -> notes`,
   `in_force(aside, steps, files) -> tuple[SetAside, ...]`, `plan.pending_work(bundle, recorded,
-  module_chunk, aside)`. `read` is the one place that switches a reason on; `check`, `in_force`
+  module_chunk, aside, model=None)`. `read` is the one place that switches a reason on; `check`, `in_force`
   and the planner take every reason as it is.
 - Strict default: with no reason switched on, `read` sends no batch and returns `NOTHING`. The
   test `test_with_park_failed_off_the_plan_and_the_state_writes_are_those_of_the_code_without_parking`
@@ -916,8 +917,20 @@ fails", is the procedure.
   `drift`, a refused `--unpark`) with and without the set-aside code paths, for a project without
   the key and with `park_failed = false`: the batches, outputs, `plan.json` files, job summaries,
   reports and state rows are equal.
-- Not done: a name that a raw or data batch writes without its schema is not compared. Proven
-  against fakes only.
+- Not done: a name that a raw or data batch writes without its schema is not compared, and a
+  three-part name (`[db].[s].[n]`) is read as `[db].[s]`. Proven against fakes only.
+- A36. Review of A35. (1) A set-aside migration that creates a table, a schema, a type, a sequence
+  or a synonym, or renames a table, does not give `BASELINE_REQUIRED`: `Work.set_aside` holds the
+  parsed set-aside migrations, and `tables.Hooks.unrecorded_objects` takes what they create as
+  created. (2) The independence check follows a rename with the head model
+  (`plan.TableHooks.model`, passed to `pending_work` only when a migration is set aside): it
+  touches the renamed table and the tables with a key to it. Without the model, a rename touches
+  the names of its statement (in string literals, which the token scan does not read) and gets the
+  note `independence not proven for a model batch: <file>`. (3) A module that names a set-aside
+  table without its schema is refused (A17). (4) `resolve --mark-applied` reads the parks: a
+  migration that later migrations ran past while it was parked is no hole. A migration that is
+  still parked is refused with `RESOLVE_NOT_APPLICABLE` and the advice to unpark it first. (5) A
+  parked replacement gets no note `late replacement: ...`. No state-table change.
 
 ---
 
