@@ -2338,6 +2338,11 @@ def test_a_product_held_after_dev_reaches_sandbox_when_a_later_release_raises_it
     assert any(
         note.startswith(f"catch-up past set-aside: {balance} came") for note in done.report["warnings"]
     )
+    # one migration, and nothing is set aside now
+    assert (
+        f"catch-up past set-aside: {balance} came with an earlier release and runs with r{r3.seq}, in chain "
+        "order, because this environment sets migrations aside or did (set aside now: none)"
+    ) in done.report["warnings"]
     assert sandbox.model == r3.model == dev.model and texts(sandbox) == texts(dev)
     assert pipe.drift(r3, "sandbox").code == 0
 

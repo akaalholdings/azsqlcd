@@ -636,12 +636,18 @@ def _catch_up_past(
     carried = [entry.file for entry in pending if _added_in(entry, manifest) != manifest.release_seq]
     if not carried:
         return []
-    past = ", ".join(entry.file for entry in held) or "none now"
+    past = ", ".join(entry.file for entry in held) or "none"
     return [
-        f"catch-up past set-aside: {', '.join(carried)} came with earlier releases and run with "
-        f"r{manifest.release_seq}, in chain order, because this environment sets migrations aside or "
-        f"did (set aside now: {past})"
+        f"catch-up past set-aside: {', '.join(carried)} {_came(carried)} r{manifest.release_seq}, in "
+        f"chain order, because this environment sets migrations aside or did (set aside now: {past})"
     ]
+
+
+def _came(carried: Sequence[str]) -> str:
+    """The verb phrase of a catch-up note, for one migration or more."""
+    if len(carried) == 1:
+        return "came with an earlier release and runs with"
+    return "came with earlier releases and run with"
 
 
 def _refuse_late_out_of_scope(late: Sequence[Migration], scope: Scope) -> None:
@@ -742,7 +748,7 @@ def _refuse_catch_up(
         return []
     withdrawn = ", ".join(entry.file for entry in never_applied)
     return [
-        f"catch-up in one release: {', '.join(carried)} came with earlier releases and run with "
+        f"catch-up in one release: {', '.join(carried)} {_came(carried)} "
         f"r{manifest.release_seq}, because this database records r{recorded_seq} and never applied the "
         f"withdrawn {withdrawn}; the releases from r{first_withdrawn} to the withdrawal cannot be promoted "
         "here"
