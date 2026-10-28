@@ -402,3 +402,50 @@ def test_a_file_for_the_name_of_an_external_or_a_history_table_is_hand_written()
         ("TABLE:[sales].[Ext]", "an external table holds this name"),
         ("TABLE:[sales].[Price_History]", "the history table of TABLE:[sales].[Price] holds this name"),
     }
+
+
+# ------------------------------------------------------------------ align and product holds
+BALANCE = Table("sales", "Balance", (Column("BalanceId", TypeRef("int"), False),))
+BALANCE_VIEW = (
+    "schema/views/sales.vw_Balance.sql",
+    "CREATE OR ALTER VIEW [sales].[vw_Balance] AS\nSELECT [BalanceId] FROM [sales].[Balance];\n",
+)
+ENV_TEST = """
+[env.test]
+plan_identity = "plan"
+deploy_identity = "deploy"
+drift = "report"
+lock_timeout_ms = 30000
+applock_wait_s = 600
+job_timeout_minutes = 120
+gated = true
+targets = [{ id = "sales-test", server = "sql-sales-test.database.windows.net", database = "sales" }]
+
+[products.balance]
+objects = ["sales.Balance*", "sales.vw_Balance"]
+promote_to = "dev"
+"""
+
+
+def test_align_writes_no_statement_for_the_objects_of_a_held_product_that_the_database_lacks(project):
+    """The product balance is held in test (promote_to = "dev"): its migration does not run there, so
+    test is right without its objects. align.sql must not create them, as baseline does not ask for
+    them: a DBA who runs it would make the held migration fail when promote_to is raised."""
+    release_1(project)
+    project.write("azsqlcd.toml", (project.repo / "azsqlcd.toml").read_text() + ENV_TEST)
+    project.write_objects(BALANCE)
+    project.write(*BALANCE_VIEW)
+    db = project.database()
+    db.model = Model([SALES, CUSTOMER, ORDER])
+    db.out_of_band(FUNCTION[1], VIEW[1], PROCEDURE[1])
+
+    _, dev_script, _ = align(project, db)
+    assert "CREATE TABLE [sales].[Balance]" in dev_script and "[vw_Balance]" in dev_script  # not held in dev
+
+    out = project.out("align")
+    where = ["--env", "test", "--target", "sales-test", "--out", str(out)]
+    done = project.tool("align", "--root", str(project.repo), *where, db=db)
+    assert done.code == 0, done.err
+    script = (out / "onboarding" / "test" / "align.sql").read_text()
+    assert "[Balance]" not in script and "[vw_Balance]" not in script
+    assert script == "-- nothing to align\n"

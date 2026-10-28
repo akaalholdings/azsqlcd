@@ -358,6 +358,11 @@ def align(
         else Model()
     )
 
+    # a held product (products.hold): the objects that the database lacks are right here, as baseline
+    # takes them; a statement that creates one would make its held migration fail later
+    held = onboard.absent_held(session, files, config, env, scope, head)
+    head = Model(head[key] for key in head if fold(key) not in held)
+
     found = _Tables([], [], [], [], [], head, {}, set())
     states: list[tuple[str, int, str]] = []
     if table_model:
@@ -371,6 +376,8 @@ def align(
     module_items: list[Item] = []
     send: list[modules.ModuleFile] = []
     for item in onboard.compare_modules(session, files, env, scope):
+        if fold(item.object_key) in held:
+            continue
         if item.status == onboard.ONLY_HERE:
             only.append(Item(item.object_key, item.note or "no file"))
         elif item.status == onboard.MISSING_HERE and item.note:

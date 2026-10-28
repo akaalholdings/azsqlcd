@@ -958,8 +958,9 @@ stay in dev, never promoted, without a pull request that stays open. `docs/setup
 - What a migration touches is `set_aside.footprint`, the rule of the independence check.
 - Not expected: in `compute_plan` an object of a held product, or one that a held migration
   creates, is not `BASELINE_REQUIRED`. `onboard.baseline` leaves out the objects of a held
-  product that the database lacks (one read of `catalog.list_user_objects`, sent only with
-  `[products]`). `drift` and the read-back compare managed rows only, so a held object that was
+  product that the database lacks (`onboard.absent_held`: one read of `catalog.list_user_objects`,
+  sent only with `[products]`). `align` writes no statement for them, for the same reason: a
+  DBA who creates such an object makes the held migration fail when it runs. `drift` and the read-back compare managed rows only, so a held object that was
   never recorded is not in them.
 - Pull requests: `verify` and `gen` give `MIXED_HOLD` for a new migration that touches objects of
   a product with `promote_to` and other objects.
