@@ -767,6 +767,28 @@ writes the rows again and holds a long lock for each build: plan the time.
 - Approvers: open the compare link in the plan summary before you approve. Reject approvals of
   older releases.
 
+### Dependants of a change
+
+With `table_model = true` the plan reads the modules that depend on the release, at any depth: the
+modules that use a table that a migration changes, the modules that use a module that the release
+changes, and the modules that use those modules. A view on a view on a changed table is one of
+them.
+
+- The deploy refreshes the managed, unchanged views and table-valued functions of that set after
+  the changes, in dependency order: a view before the views that use it. It does not refresh a
+  schema-bound module.
+- After the refresh the deploy checks every managed module of the set (21 `DEPENDANT_BROKEN`).
+- A release that changes modules only does the same for the modules that use the changed modules.
+- The plan gives a note for each dependant that it found through other modules, with the path:
+  `note: dependant through other modules: VIEW:[bal].[vw_b] -> VIEW:[bal].[vw_a] -> TABLE:[bal].[Orders]`.
+- An unmanaged module at any depth is a `TABLE_BLOCKER`. The detail line names the path. Accept it
+  with the same line in `[ack] unmanaged_dependants`: `"[bal].[vw_b] -> [bal].[Orders]"` or
+  `"[bal].[vw_b] -> [bal].[Orders].[Status]"`.
+- The search stops after 32 levels. The plan then gives a note: modules that are further away are
+  not refreshed and not checked.
+
+When a view on a changed view breaks, change that view in the same pull request.
+
 ## 9. Upgrading the tool across repositories
 
 A database repository names the tool version in `db.yml`, `resolve.yml` and `onboard.yml`. All

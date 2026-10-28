@@ -811,6 +811,21 @@ the rows of `OUT_OF_SCOPE` and `SCHEMA_UNSCOPED`.
   reason code; `docs/runbook.md`, "A constraint with a name that the engine made", has the way
   out. Proven against fakes only.
 
+### Transitive dependants (2026-10-28)
+
+- A35. The dependants of A12 are read at any depth. `catalog.dependant_closure(session, tables,
+  modules)` sends the query of `dependants_of` for the tables (unchanged), then the query
+  `azsqlcd:dependant_chain` once for each level (one batch for each 500 keys) on the modules that
+  the level before found, and on the modules that the release changes. A module is read once, so a
+  cycle ends; the search stops after 32 levels (`catalog.DEPENDANT_DEPTH`, plan note). The order
+  is the refresh order: a module after each found module that it references, else by key. The
+  refresh set, the dependants to check and their findings, and the rule of `[ack]
+  unmanaged_dependants` and `TABLE_BLOCKER` use that set. A release with no migration and a
+  changed module also refreshes and checks the dependants of that module. A plan note gives the
+  path of each dependant found through another module; a schema-bound blocker names the
+  schema-bound modules on it. A release whose dependants are all direct gives the plan and the SQL
+  of before. No reason code and no state column was added. Proven against fakes only.
+
 ---
 
 # Part 2: blueprint (unchanged but for two lines; see "Reading order")
