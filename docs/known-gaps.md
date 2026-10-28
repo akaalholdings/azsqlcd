@@ -1611,9 +1611,10 @@ Two reviewers reproduced eight findings. Each has a regression test.
 - The trust boundary (`docs/setup.md`, section 2): every job on a runner can ask for the token of
   every identity of that runner. The approval of a GitHub environment does not guard the
   identity. The tool cannot solve this.
-- The reusable workflows have one `runs-on` input for the plan jobs and the deploy jobs of a
-  stage. Separate runners for the plan identity and the deploy identity of one stage are not
-  built.
+- Separate runners for the plan identity and the deploy identity of one stage are built as the
+  optional input `runs-on-deploy` (`docs/setup.md`, section 2). Open: nothing checks the members
+  or the "Workflow access" limit of the `-deploy` runner groups. No runner group ran the split
+  on GitHub Actions (section 12).
 - The `azure-identity` library writes its own warning lines on stderr when a token fails. Such a
   line can name the client id. The message, the files and the log of the tool do not.
 - The `TOKEN_TOO_SHORT` message speaks of the Azure CLI and `az login` also under
