@@ -1429,7 +1429,7 @@ def place_of(model: Model, name: str, item: str) -> object:
 def test_a_new_index_or_key_gets_the_place_that_the_engine_gives_it_on_that_table(name, clause, place):
     assert place_of(run(PARTITIONED, INDEX.format(name, clause)), name, "IX_New") == place
     assert place_of(run(PARTITIONED, UNIQUE.format(name, clause)), name, "UQ_New") == place
-    if clause != " ON [PS_Quantity]([Quantity])":
+    if place == table(PARTITIONED, name).on:  # measured: a columnstore index elsewhere is refused (below)
         columnstore = f"CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [s].[{name}] ([Quantity]){clause}"
         assert place_of(run(PARTITIONED, columnstore), name, "NCCI") == place
     # the table itself stays where it is
@@ -1505,6 +1505,42 @@ def test_a_clustered_index_without_an_on_clause_is_built_where_the_table_is_and_
     assert place_of(heap, "Keyed", "IX_Keyed_Note") == M.ON_PRIMARY
     columnstore = run(heap, "CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [s].[Keyed]")
     assert table(columnstore, "Keyed").on == PS and place_of(columnstore, "Keyed", "CCI") == PS
+
+
+NCCI = "CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [s].[{}] ([Quantity]){}"
+
+
+@pytest.mark.parametrize(
+    ("statement", "says"),
+    [
+        # each one measured on Azure SQL Database: the engine refuses it (docs/live-testing.md, section 12)
+        (
+            NCCI.format("Keyed", " ON [PRIMARY]"),
+            "index [NCCI] is a columnstore index and is not aligned with the table",
+        ),
+        (NCCI.format("Heap", " ON [PS_ByQuantity]([Quantity])"), "same partition function"),
+        (NCCI.format("Plain", ON_PS), "the table is not partitioned: it has no ON clause"),
+        # accepted by the engine on a scheme of the same function, refused on one of another function
+        # with the same boundaries: the model holds no partition function, so it refuses both
+        (NCCI.format("Keyed", " ON [PS_OrderYearToo]([OrderDate])"), "same partition function"),
+    ],
+)
+def test_a_nonclustered_columnstore_index_that_is_not_aligned_with_its_table_is_blocked(statement, says):
+    with pytest.raises(ReplayError) as caught:
+        run(PARTITIONED, statement)
+    assert says in caught.value.message
+
+
+def test_an_aligned_nonclustered_columnstore_index_passes_and_a_second_columnstore_index_is_blocked():
+    aligned = run(PARTITIONED, NCCI.format("Keyed", ""), NCCI.format("Heap", ON_PS), NCCI.format("Plain", ""))
+    assert [place_of(aligned, name, "NCCI") for name in ("Keyed", "Heap", "Plain")] == [PS, PS, None]
+    with pytest.raises(ReplayError) as caught:
+        run(aligned, "CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI_Two] ON [s].[Keyed] ([Note])")
+    assert "more than one columnstore index" in caught.value.message
+    # the control: a rowstore index on [PRIMARY] of a partitioned table
+    assert (
+        place_of(run(PARTITIONED, INDEX.format("Keyed", " ON [PRIMARY]")), "Keyed", "IX_New") == M.ON_PRIMARY
+    )
 
 
 def test_a_table_moves_only_by_a_clustered_index_or_key_that_states_the_new_place():

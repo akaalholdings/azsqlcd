@@ -625,6 +625,25 @@ def test_a_unique_index_on_a_scheme_without_the_partitioning_column_in_its_key_i
     assert "[OrderDate]" in the(found, "PRF001").message
 
 
+@pytest.mark.parametrize("place", ["ON [PRIMARY]", "ON [PS_ByProduct]([ProductId])"])
+def test_a_nonclustered_columnstore_index_that_is_not_aligned_with_its_table_is_not_proven(
+    tmp_path: Path, place: str
+):
+    """Measured: the engine refuses the statement (a columnstore index must be partition-aligned with
+    the table); the proof must refuse it too."""
+    repo = pair(tmp_path, "partitioned_add_aligned_index")
+    R.put(repo, {path: text for path, text in loader.object_files("partitioned_add_aligned_index", "base")})
+    body = (
+        ALLOW_LOCK.format("[sales].[OrderLine]")
+        + "CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI_OrderLine] ON [sales].[OrderLine] ([Quantity]) "
+        + f"{place};\n"
+    )
+    R.put(repo, one("0001__x.sql", body))
+    found = check(repo)
+    assert errors(found) == [("PRF001", "migrations/0001__x.sql", 4)]
+    assert "index [NCCI_OrderLine]" in the(found, "PRF001").message
+
+
 def test_a_table_file_of_a_partitioned_table_that_leaves_out_the_place_of_an_index_fails_nf000(
     tmp_path: Path,
 ):

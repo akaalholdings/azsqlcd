@@ -50,6 +50,8 @@ clustered key or index, and None when the table is not partitioned. A key or an 
   * on a partitioned table: a Partition or ON_PRIMARY, never None. The engine puts an index that
     states no place on the scheme of the table, so a file that leaves the place out would not say
     what the catalog holds. The clustered key or index is the table: it has the place of the table.
+    A nonclustered columnstore index has the place of the table too (the engine refuses one that is
+    not partition-aligned, and the model holds no partition function to see an equivalent scheme).
 An operation holds what its statement states: there None is "no ON clause", and the replay gives
 the key or index the place that the engine gives it (place_on). The fields are written to the
 canonical form only when they are not None, so an object that is not partitioned keeps its JSON.
@@ -850,9 +852,34 @@ class Table(_Tabular):
                     f"{where}: {label} is clustered: it is the table and has the place of the table "
                     "(state the same ON clause on CREATE TABLE and on it)"
                 )
+            if isinstance(item, Index) and item.columnstore and item.on != on:
+                self._check_columnstore_aligned(where, label, item.on)
             if isinstance(item.on, Partition):
                 unique = not isinstance(item, Index) or item.unique
                 self._check_partition(where, label, item.on, item.columns if unique else None)
+
+    def _check_columnstore_aligned(self, where: str, label: str, place: Place | None) -> None:
+        """A nonclustered columnstore index that is not where its table is. Measured on Azure SQL
+        Database: the engine accepts one only when it is partition-aligned with the table. It accepts
+        another scheme of the same partition function, but the model holds no partition function."""
+        on = self.on
+        if on is None:
+            raise ValueError(
+                f"{where}: {label} is a columnstore index and the table is not partitioned: "
+                "it has no ON clause"
+            )
+        table_place = f"ON {names.quote(on.scheme)}({names.quote(on.column)})"
+        if not isinstance(place, Partition):
+            raise ValueError(
+                f"{where}: {label} is a columnstore index and is not aligned with the table: "
+                f"state {table_place}"
+            )
+        raise ValueError(
+            f"{where}: {label} is a columnstore index and is not aligned with the table. The engine "
+            "accepts another scheme only when it has the same partition function and the same "
+            "partitioning column, and the model holds no partition function: "
+            f"state {table_place}, the place of the table"
+        )
 
     def _check_partition(
         self, where: str, label: str, on: Partition, unique_key: tuple[KeyColumn, ...] | None

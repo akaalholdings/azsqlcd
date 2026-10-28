@@ -683,7 +683,9 @@ code is now, where it differs from the text above:
   partitioning column is a column of the table; it is a key column of a `PRIMARY KEY`, a
   `UNIQUE` constraint or a unique index on a scheme; a computed partitioning column is
   `PERSISTED`. The option `STATISTICS_INCREMENTAL` (`ON`, `OFF`) goes only with a key or an
-  index on a scheme. A table type has no place.
+  index on a scheme. A table type has no place. A nonclustered columnstore index has the place of
+  its table (measured 2026-10-28, `docs/live-testing.md`, section 12): the engine refuses one that
+  is not partition-aligned, and the model holds no partition function to see an equivalent scheme.
 - Operations: a statement of a migration keeps the clause that it states (`None` is "no `ON`
   clause"), and `replay.py` gives the key or index the place that the engine gives it
   (`place_on`). One statement moves a table: a clustered key or index that is created on a heap

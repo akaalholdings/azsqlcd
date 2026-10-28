@@ -725,6 +725,26 @@ Engine facts:
 - The driver ends a connect attempt after 15 seconds. A paused database needs about 35 to 50
   seconds before a connect passes.
 
+Columnstore alignment, measured 2026-10-28 (one Azure SQL Database; statements by hand, no script):
+
+1. A nonclustered columnstore index `ON [PRIMARY]` on a table on a partition scheme: refused. The
+   text is "The statement failed because a columnstore index must be partition-aligned with the
+   base table. Create the columnstore index using the same partition function and same ...
+   partition scheme as the base table" (shortened here).
+2. The same index on a scheme of another partition function: refused, with the same text.
+3. The same index on a partition scheme, on a table that is not partitioned: refused, with the same
+   text.
+4. The same index on another scheme of the same partition function, on the same column: accepted.
+5. The same index on a scheme of a separate function with the same boundaries: refused, with the
+   same text.
+6. A second columnstore index on a table that has one: refused ("Multiple columnstore indexes are
+   not supported").
+7. Control: a rowstore nonclustered index `ON [PRIMARY]` on a partitioned table: accepted.
+
+The model holds no partition function, so it cannot tell case 4 from case 5. The table model
+accepts a nonclustered columnstore index only on the place of its table (`model.Table`), and at
+most one columnstore index on a table.
+
 Still not proven after this run: L13 for the full 90 minutes after the expiry; gate G-D5 on Windows with Python 3.14 and on the runner image;
 sign-in with a managed identity (it needs a machine in Azure); L8 across two servers; the loss of
 the network during `COMMIT` (section 7); the GitHub checklist (section 8).

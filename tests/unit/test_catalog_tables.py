@@ -1906,6 +1906,7 @@ def test_the_partitioning_column_that_the_engine_adds_to_an_index_is_no_column_o
         "Wide",
         (Column("d", TypeRef("date"), False), Column("a", TypeRef("int"), False)),
         indexes=(Index("NCCI", False, False, (), ("a",), columnstore=True, on=Partition("PS_Day", "d")),),
+        on=Partition("PS_Day", "d"),  # a columnstore index is aligned with its table (measured)
     )
     listed = read(rows_from_model(Model([Schema("dw"), wide])))
     assert listed.unsupported == () and listed.model[wide.key] == wide

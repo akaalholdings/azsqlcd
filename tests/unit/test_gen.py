@@ -813,6 +813,27 @@ def test_the_drop_of_the_clustered_index_of_a_partitioned_table_is_written_under
     ]
 
 
+@pytest.mark.parametrize("place", ["ON [PRIMARY]", "ON [PS_ByProduct]([ProductId])"])
+def test_gen_writes_no_nonclustered_columnstore_index_that_is_not_aligned_with_its_table(
+    tmp_path: Path, place: str
+):
+    """The engine refuses such an index at the deploy; the head file is refused before any diff."""
+    repo = pair_repo(tmp_path, "partitioned_add_aligned_index")
+    path, text = next(
+        f for f in loader.object_files("partitioned_add_aligned_index", "head") if "OrderLine" in f[0]
+    )
+    ncci = (
+        "CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI_OrderLine] ON [sales].[OrderLine] ([Quantity])\n"
+        f"    {place};\n"
+    )
+    R.put(repo, {path: text.rstrip("\n") + "\nGO\n" + ncci})
+    error = refusal(lambda: gen.generate(repo, "main", "change"))
+    assert error.reason_code == "MODEL_INVALID"
+    (item,) = error.detail["errors"]
+    assert (item["path"], item["code"]) == (path, "SYNTAX")
+    assert "index [NCCI_OrderLine]" in str(item["message"])
+
+
 def test_a_new_partitioned_table_is_created_on_its_scheme_and_its_indexes_need_no_long_lock(tmp_path: Path):
     text = gen.generate(pair_repo(tmp_path, "partitioned_tables_new_and_dropped"), "main", "change").text
     assert text is not None

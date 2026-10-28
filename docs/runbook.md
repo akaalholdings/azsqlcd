@@ -575,6 +575,13 @@ drop of the clustered index or key (the table becomes a heap) on a table that ex
 `gen` refuses every change that moves a table with `PARTITION_CHANGE` (in `GEN_REFUSED`), and
 writes no file. A person writes that migration, and `verify` proves it.
 
+A nonclustered columnstore index is on the place of its table: on a partitioned table, the scheme
+and the partitioning column of the table (or no `ON` clause); on a table that is not partitioned,
+no `ON` clause. The engine refuses an index that is not aligned. It accepts another scheme of the
+same partition function, but the tool does not hold partition functions, so the parser refuses
+every other place (`SYNTAX`) and `verify` refuses it in a migration (`PRF001`). Use the scheme of
+the table.
+
 | Refusal | Changes | What to do |
 |---|---|---|
 | `PARTITION_CHANGE` | A table goes on a partition scheme, or off one. A table gets another scheme or another partitioning column. `ALTER COLUMN` of a partitioning column, of the table or of an index | Hand-write the migration, then `azsqlcd gen --resum`. A table moves when its clustered key or index is created with the new place. A table that has one: `DROP INDEX` or `DROP CONSTRAINT`, then `CREATE CLUSTERED INDEX` or `ADD CONSTRAINT` with `ON [scheme]([column])`, or with `ON [PRIMARY]` to end the partitioning. A heap: `CREATE CLUSTERED INDEX ... ON [scheme]([column])`, then `DROP INDEX`. The nonclustered keys and indexes stay where they are: drop and create each one that the file puts in another place. `docs/setup.md`, section 7, "Partitioned tables", has an example. A partitioning column: move the table or the index off the scheme, change the column, move it back. Each build, and each drop of a clustered index or key, writes every row again and holds a long lock: write `-- azsqlcd:allow LONG_LOCK [schema].[table] reason: ...` above it. The scheme must exist in every database first |

@@ -583,6 +583,46 @@ def test_statistics_incremental_is_read_where_an_index_or_a_key_is_on_a_partitio
         )
 
 
+NCCI = "\nGO\nCREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [sales].[OrderLine] ([OrderLineId]){}"
+
+
+@pytest.mark.parametrize(
+    ("table_on", "ncci_on", "says"),
+    [
+        (" ON [PS_OrderYear]([OrderDate])", " ON [PRIMARY]", "is not aligned with the table"),
+        (" ON [PS_OrderYear]([OrderDate])", " ON [PS_ByLine]([OrderLineId])", "same partition function"),
+        ("", " ON [PS_OrderYear]([OrderDate])", "the table is not partitioned: it has no ON clause"),
+        (" ON [PS_OrderYear]([OrderDate])", " ON [PS_OrderYearToo]([OrderDate])", "same partition function"),
+    ],
+)
+def test_a_file_with_a_nonclustered_columnstore_index_that_is_not_aligned_with_its_table_is_refused(
+    table_on: str, ncci_on: str, says: str
+):
+    error = rejected(LINE.format("") + table_on + NCCI.format(ncci_on), LINE_PATH)
+    assert (error.code, says in error.message) == ("SYNTAX", True), error.message
+
+
+def test_a_file_with_an_aligned_nonclustered_columnstore_index_or_a_rowstore_index_on_primary_is_read():
+    on = " ON [PS_OrderYear]([OrderDate])"
+    aligned = table(LINE.format("") + on + NCCI.format(on), LINE_PATH)
+    assert aligned.indexes[0].on == PS and aligned == table(LINE.format("") + on + NCCI.format(""), LINE_PATH)
+    rowstore = table(
+        LINE.format("") + on + "\nGO\nCREATE NONCLUSTERED INDEX [IX] ON [sales].[OrderLine] ([OrderLineId])"
+        " ON [PRIMARY]",
+        LINE_PATH,
+    )
+    assert rowstore.indexes[0].on == ON_PRIMARY
+    assert table(LINE.format("") + NCCI.format(""), LINE_PATH).indexes[0].on is None
+    second = (
+        LINE.format("")
+        + on
+        + NCCI.format("")
+        + "\nGO\nCREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI_Two] ON [sales].[OrderLine] ([OrderDate])"
+    )
+    error = rejected(second, LINE_PATH)
+    assert (error.code, "more than one columnstore index" in error.message) == ("SYNTAX", True), error.message
+
+
 # ------------------------------------------------------------------ table types
 def test_constraints_of_a_table_type_have_no_name_and_need_none():
     (found,) = parse_object_file(

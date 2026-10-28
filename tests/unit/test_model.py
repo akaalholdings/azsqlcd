@@ -1232,6 +1232,62 @@ def test_a_partitioned_table_holds_aligned_and_other_indexes_and_keys_with_the_c
     assert order_line(columns=(*LINE_COLUMNS, year), on=Partition("PS_OrderYear", "Year")).on is not None
 
 
+def ncci(on: object) -> Index:
+    return Index("NCCI", False, False, (), ("Quantity",), columnstore=True, on=on)  # type: ignore[arg-type]
+
+
+# Measured on Azure SQL Database (docs/live-testing.md, section 12): the engine accepts a nonclustered
+# columnstore index only when it is partition-aligned with its table. Another scheme of the same
+# partition function is accepted too, but the model holds no partition function: it cannot tell that
+# scheme from a scheme of another function, which the engine refuses.
+@pytest.mark.parametrize(
+    ("build", "says"),
+    [
+        (lambda: order_line(indexes=(ncci(ON_PRIMARY),)), "is not aligned with the table"),
+        (
+            lambda: order_line(indexes=(ncci(Partition("PS_ByQuantity", "Quantity")),)),
+            "the same partition function",
+        ),
+        (
+            lambda: order_line(on=None, indexes=(ncci(PS),)),
+            "the table is not partitioned: it has no ON clause",
+        ),
+        (
+            lambda: order_line(indexes=(ncci(Partition("PS_OrderYearToo", "OrderDate")),)),
+            "the same partition function",
+        ),
+        (
+            lambda: order_line(
+                indexes=(ncci(PS), dataclasses.replace(ncci(PS), name="NCCI_Two", included=("OrderDate",)))
+            ),
+            "more than one columnstore index",
+        ),
+        (
+            lambda: order_line(indexes=(ncci(PS), Index("CCI", False, True, (), columnstore=True, on=PS))),
+            "more than one columnstore index",
+        ),
+    ],
+)
+def test_a_nonclustered_columnstore_index_that_is_not_aligned_with_its_table_is_a_value_error(build, says):
+    with pytest.raises(ValueError, match=says):
+        build()
+
+
+def test_a_nonclustered_columnstore_index_on_the_place_of_its_table_and_a_rowstore_index_elsewhere_are_held():
+    aligned = order_line(
+        indexes=(ncci(PS), Index("IX", False, False, (KeyColumn("Quantity"),), on=ON_PRIMARY))
+    )
+    assert [index.on for index in aligned.indexes] == [PS, ON_PRIMARY]
+    plain = order_line(on=None, indexes=(ncci(None),))
+    assert plain.indexes[0].on is None
+    # a clustered key on the scheme: the nonclustered columnstore index is aligned with it
+    keyed = order_line(
+        constraints=(PrimaryKey("PK", True, (KeyColumn("OrderDate"), KeyColumn("OrderLineId")), on=PS),),
+        indexes=(ncci(PS),),
+    )
+    assert keyed.indexes[0].on == keyed.on == PS
+
+
 def test_a_rebuild_of_all_partitions_is_another_statement_than_a_rebuild_and_the_same_change():
     plain = masking.RebuildTable("s", "T", "PAGE")
     every = masking.RebuildTable("s", "T", "PAGE", all_partitions=True)
