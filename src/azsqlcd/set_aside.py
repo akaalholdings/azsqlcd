@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from azsqlcd import diff, modules, names, state
+from azsqlcd import chain, diff, modules, names, state
 from azsqlcd.chain import Migration
 from azsqlcd.config import Config
 from azsqlcd.errors import ToolError, refused
@@ -112,6 +112,24 @@ def read(session: Session, config: Config, recorded: State) -> Aside:
     if not config.project.park_failed:
         return NOTHING
     return parked(state.read_failed_runs(session), recorded.steps)
+
+
+def in_force(aside: Aside, steps: Sequence[StepRow], files: Mapping[str, bytes]) -> tuple[SetAside, ...]:
+    """The set-aside migrations that still hold, by file: not applied in the database (its step
+    rows), and not withdrawn in the chain of the release (files). For drift and resolve; the
+    planner reads the chain itself. Pure."""
+    if not aside.active:
+        return ()
+    applied = {step.migration_id for step in steps if step.migration_id and step.status == "ok"}
+    sums = files.get(chain.SUM_PATH)
+    withdrawn = (
+        {entry.file for entry in chain.parse_sum(sums.decode("utf-8")).entries if entry.withdrawn}
+        if sums is not None
+        else set()
+    )
+    return tuple(
+        aside.active[file] for file in sorted(aside.active) if file not in applied and file not in withdrawn
+    )
 
 
 # ------------------------------------------------------------------ independence

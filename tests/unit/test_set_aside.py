@@ -160,3 +160,17 @@ def test_a_module_whose_text_names_what_a_set_aside_migration_touches_is_refused
 
 def test_every_reason_has_a_way_out():
     assert set(set_aside.REASONS) == set(set_aside.WAY_OUT)
+
+
+def test_a_park_is_in_force_until_its_migration_is_applied_or_withdrawn():
+    """drift and resolve --unpark list only the parks that still hold."""
+    found = set_aside.parked((failed(4, f"{M2.file}#1"),), ())
+    chain_line = f"azsqlcd-sum 1\n{M2.file} sha256:{'0' * 64} tx\n"
+    files = {chain.SUM_PATH: chain_line.encode()}
+
+    assert set_aside.in_force(found, (), files) == (PARKED_M2,)
+    assert set_aside.in_force(found, (), {}) == (PARKED_M2,)
+    applied = StepRow(50, 5, "migration", M2.file, "0" * 64, "ok", None)
+    assert set_aside.in_force(found, (applied,), files) == ()
+    withdrawn = {chain.SUM_PATH: chain_line.replace(" tx", " tx withdrawn").encode()}
+    assert set_aside.in_force(found, (), withdrawn) == ()

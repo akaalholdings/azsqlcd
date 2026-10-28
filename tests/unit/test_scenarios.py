@@ -2003,35 +2003,97 @@ def test_without_park_failed_a_failed_migration_blocks_later_releases_as_before(
     assert (unpark.code, unpark.reason) == (22, "RESOLVE_NOT_APPLICABLE")
 
 
+@pytest.mark.parametrize("key", [None, False])
 def test_with_park_failed_off_the_plan_and_the_state_writes_are_those_of_the_code_without_parking(
-    pipe, monkeypatch
+    pipe, monkeypatch, key
 ):
     """Strict default: the same story with the set-aside code paths cut out (set_aside.read and
-    set_aside.check fail when called) gives the same batches, plan.json files and state rows."""
-    parking(pipe, False)
+    set_aside.check fail when called) gives the same batches, outputs, plan.json files, job
+    summaries, reports and state rows. The story has a failure, a rerun that fails again, a later
+    release that A7 refuses, drift and an unpark that is refused."""
+    parking(pipe, key)
     first = release_1(pipe)
-    r1, _, _ = two_migrations(pipe)
+    r1, _, m2 = two_migrations(pipe)
+    pipe.write_objects(CUSTOMER_PHONE)
+    r2 = pipe.release("a phone of a customer", "customer_phone")
+    summary = pipe.folder / "summary.md"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(pipe.folder / "output"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    def ends(*outcomes: Outcome) -> list:
+        # the name of the triage log holds the second of the run: the one line that may differ
+        def err(o: Outcome) -> str:
+            return "\n".join(line for line in o.err.splitlines() if not line.startswith("log: "))
+
+        return [
+            (o.code, o.out, err(o), o.report if o.folder and (o.folder / "report.json").exists() else None)
+            for o in outcomes
+        ]
 
     def story() -> tuple:
+        summary.write_text("")
         everywhere(pipe, first, envs=("test",))
         test = pipe.dbs["test"]
-        test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
-        plans = []
+        test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901), times=2)
+        plans, outcomes = [], []
         for _ in range(2):
-            planned, file = pipe.plan(r1, "test")
-            plans.append(file.read_text())
-            pipe.deploy(r1, "test", file)
-        return test.batches, plans, test.rows("run"), test.rows("step"), test.rows("object")
+            folder = pipe.out("plan")
+            planned = pipe.tool("plan", *r1.where("test"), "--ci", "github", db=test, out=folder)
+            plans.append((folder / "plan.json").read_text())
+            outcomes += [planned, pipe.deploy(r1, "test", folder / "plan.json")]
+        outcomes += [
+            pipe.promote(r2, "test"),
+            pipe.tool("drift", *r2.where("test"), "--ci", "github", db=test),
+            pipe.resolve(r2, "test", "--unpark", m2),
+        ]
+        rows = test.rows("run"), test.rows("step"), test.rows("object")
+        return test.batches, plans, ends(*outcomes), summary.read_text(), rows
 
     with_feature = story()
 
     def cut(*args, **kwargs):
         raise AssertionError("a set-aside code path ran with park_failed = false")
 
-    from azsqlcd import plan, set_aside
+    from azsqlcd import set_aside
 
     monkeypatch.setattr(set_aside, "check", cut)
-    monkeypatch.setattr(plan.set_aside, "read", lambda *args: set_aside.NOTHING)
+    monkeypatch.setattr(set_aside, "read", lambda *args: set_aside.NOTHING)
     without = story()
     assert with_feature == without
     assert not any("read_failed_runs" in batch for batch in with_feature[0])
+    assert [end[0] for end in with_feature[2]] == [0, 21, 0, 21, 22, 0, 22]
+    assert "CATCHUP_REQUIRED" in with_feature[2][4][2] and "parked" not in with_feature[3]
+
+
+def test_a_parked_migration_is_listed_in_the_job_summary_and_by_drift_until_the_park_ends(pipe, monkeypatch):
+    parking(pipe, True)
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "test"))
+    test = pipe.dbs["test"]
+    r1, _, m2 = two_migrations(pipe)
+    assert pipe.promote(r1, "dev").code == 0
+    test.fail_on("ADD [Rank] tinyint NOT NULL;", sql_error(NO_RANK, number=4901))
+    assert pipe.promote(r1, "test").reason == "BATCH_FAILED"
+    note = f"parked: {m2} (run {test.rows('run')[-1]['run_id']}, BATCH_FAILED)"
+    summary = pipe.folder / "summary.md"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(pipe.folder / "output"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    def drift() -> Outcome:
+        summary.write_text("")
+        return pipe.tool("drift", *r1.where("test"), "--ci", "github", db=test)
+
+    planned = pipe.tool("plan", *r1.where("test"), "--ci", "github", db=test, out=pipe.out("plan"))
+    assert planned.code == 0 and f"- {cli._md(note)}\n" in summary.read_text()
+
+    # a park is reported, never drift: exit 0, one line, and one line of the job summary
+    found = drift()
+    assert found.code == 0, found.err
+    assert note in found.out.splitlines() and "no drift" in found.out
+    assert f"- {cli._md(note)}\n" in summary.read_text()
+
+    assert pipe.promote(r1, "test").code == 0  # M1 applied, M2 still parked
+    assert note in drift().out.splitlines()
+    assert pipe.resolve(r1, "test", "--unpark", m2).code == 0
+    ended = drift()
+    assert ended.code == 0 and "parked" not in ended.out and "parked" not in summary.read_text()

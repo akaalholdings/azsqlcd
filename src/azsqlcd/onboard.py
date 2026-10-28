@@ -31,7 +31,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from azsqlcd import catalog, catalog_tables, lint, modules, names, plan, runner, state, tables
+from azsqlcd import catalog, catalog_tables, lint, modules, names, plan, runner, set_aside, state, tables
 from azsqlcd.config import Config, Scope, in_scope, out_of_scope, resolve_target
 from azsqlcd.errors import ToolError, refused
 from azsqlcd.model import fold
@@ -134,6 +134,8 @@ class DriftResult:
     # with the name to give it (fixed_name: the recorded name, which is the name of the file). One
     # item of `items` for each; tables.rename_lines gives the statements that end this drift
     renames: tuple[catalog_tables.SystemNamed, ...] = ()
+    # the migrations that are set aside in this database ([project] park_failed): reported, never drift
+    set_aside: tuple[set_aside.SetAside, ...] = ()
 
     @property
     def has_drift(self) -> bool:
@@ -1206,9 +1208,11 @@ def drift(
     read and not compared. A managed view that has an index now has the item `has_index` (cls
     managed): ALTER VIEW would drop the index, and the runner refuses to send it. Modules are
     compared here; table-class objects by table_hooks.table_drift, and without table_hooks not at
-    all. An item holds a key, a property name and hashes, never text (A25). The bundle is not
-    read: nothing of a module drift comes from the files. `renames` names each recorded
-    constraint that has a name of the engine now (A35).
+    all. An item holds a key, a property name and hashes, never text (A25). Nothing of a module
+    drift comes from the files of the bundle. `renames` names each recorded constraint that has a
+    name of the engine now (A35). With [project] park_failed = true the result also lists the
+    parked migrations that the chain of the bundle does not withdraw (reported, never drift);
+    without it no batch more is sent.
 
     Raises ToolError REFUSED: ENV_NOT_CONFIGURED, TARGET_NOT_CONFIGURED, the fence codes,
     FENCE_META_MISMATCH, STATE_MISSING and the other codes of read_state, NO_VIEW_DEFINITION.
@@ -1282,8 +1286,9 @@ def drift(
         for key, differences in differing.items()
         for rename in catalog_tables.name_drift_renames(key, [d.property for d in differences])
     ]
+    aside = set_aside.in_force(set_aside.read(session, config, recorded), recorded.steps, bundle.files)
     return DriftResult(
-        tuple(sorted(items, key=lambda item: (item.object_key, item.property))), tuple(renames)
+        tuple(sorted(items, key=lambda item: (item.object_key, item.property))), tuple(renames), aside
     )
 
 

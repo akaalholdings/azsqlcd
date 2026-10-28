@@ -2180,16 +2180,11 @@ def unpark(
     def prepare(session: Session, recorded: State) -> Callable[[int], list[str]]:
         if not config.project.park_failed:
             raise _not_applicable("[project] park_failed of azsqlcd.toml is not true: no migration is parked")
-        parked = set_aside.parked(state.read_failed_runs(session), recorded.steps).active
-        sums = bundle.files.get(chain.SUM_PATH)
-        withdrawn = sums is not None and any(
-            entry.file == migration and entry.withdrawn
-            for entry in chain.parse_sum(sums.decode("utf-8")).entries
-        )
-        applied = any(step.migration_id == migration and step.status == "ok" for step in recorded.steps)
-        if migration not in parked or withdrawn or applied:
+        aside = set_aside.parked(state.read_failed_runs(session), recorded.steps)
+        parked = [item.file for item in set_aside.in_force(aside, recorded.steps, bundle.files)]
+        if migration not in parked:
             raise _not_applicable(
-                f"{migration} is not parked in this database. Parked: {', '.join(sorted(parked)) or 'none'}",
+                f"{migration} is not parked in this database. Parked: {', '.join(parked) or 'none'}",
                 migration=migration,
             )
         return lambda _: []

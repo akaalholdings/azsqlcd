@@ -894,6 +894,9 @@ def _cmd_drift(call: _Call) -> None:
         ]
         header = ("Table", "Constraint", "Name to give", "Name in the database", "Statement that renames it")
         call.summary.append(_table(header, rows))
+    for item in found.set_aside:  # reported, never drift
+        call.say(item.note)
+        call.summary.append(f"- {_md(item.note)}\n")
     if found.has_drift:
         reported = (onboard.UNMANAGED, onboard.UNSCOPED)  # reported, never drift
         drifted = sorted({item.object_key for item in found.items if item.cls not in reported})
