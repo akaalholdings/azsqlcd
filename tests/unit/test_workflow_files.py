@@ -1522,6 +1522,17 @@ def test_runbook_has_a_row_for_every_reason_code_under_the_exit_code_that_the_to
     assert not missing, f"docs/runbook.md has no row for (exit, reason code): {missing}"
 
 
+def test_runbook_gen_refused_row_names_every_refusal_of_gen():
+    # The operator reads the code of a gen refusal and looks it up in the GEN_REFUSED row.
+    # RENAME_INVALID is a reason code of its own, with its own row.
+    from azsqlcd.diff import REFUSALS
+
+    runbook = (REPO / "docs" / "runbook.md").read_text(encoding="utf-8")
+    row = next(line for line in runbook.splitlines() if line.startswith("| `GEN_REFUSED` |"))
+    missing = sorted(code for code in REFUSALS if code != "RENAME_INVALID" and f"`{code}`" not in row)
+    assert not missing, f"the GEN_REFUSED row of docs/runbook.md does not name: {missing}"
+
+
 def test_runbook_rows_of_part_1_reason_codes_sit_under_their_exit_code():
     documented = reason_codes_in_runbook()
     part_1 = {
