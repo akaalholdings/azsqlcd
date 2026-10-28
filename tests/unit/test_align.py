@@ -449,3 +449,32 @@ def test_align_writes_no_statement_for_the_objects_of_a_held_product_that_the_da
     script = (out / "onboarding" / "test" / "align.sql").read_text()
     assert "[Balance]" not in script and "[vw_Balance]" not in script
     assert script == "-- nothing to align\n"
+
+
+# ------------------------------------------------------------------ align and [env.<name>] not_managed
+def test_align_does_not_read_or_write_the_objects_that_the_environment_does_not_manage(project):
+    """test does not manage sales.Customer: the tool must not touch it there, so align.sql has no
+    statement for it and align.md does not list it. dev manages it and gets the statement."""
+    release_1(project)
+    toml = (project.repo / "azsqlcd.toml").read_text() + ENV_TEST.replace(
+        "gated = true\n", 'gated = true\nnot_managed = ["sales.Customer"]\n'
+    )
+    project.write("azsqlcd.toml", toml)
+    project.write_objects(BALANCE)
+    project.write(*BALANCE_VIEW)
+    db = project.database()
+    wide = dataclasses.replace(CUSTOMER, columns=(*CUSTOMER.columns, Column("Legacy", TypeRef("int"), True)))
+    db.model = Model([SALES, wide, ORDER])
+    db.out_of_band(FUNCTION[1], VIEW[1], PROCEDURE[1])
+
+    _, dev_script, _ = align(project, db)
+    assert "ALTER TABLE [sales].[Customer] DROP COLUMN [Legacy];" in dev_script
+
+    out = project.out("align")
+    where = ["--env", "test", "--target", "sales-test", "--out", str(out)]
+    done = project.tool("align", "--root", str(project.repo), *where, db=db)
+    assert done.code == 0, done.err
+    script = (out / "onboarding" / "test" / "align.sql").read_text()
+    report = (out / "onboarding" / "test" / "align.md").read_text()
+    assert "[Customer]" not in script and "[sales].[Customer]" not in report
+    assert script == "-- nothing to align\n"

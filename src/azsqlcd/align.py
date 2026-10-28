@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 
 from azsqlcd import catalog, catalog_tables, diff, emit, gen, modules, names, onboard, plan, replay, tables
 from azsqlcd.catalog_tables import SystemNamed
-from azsqlcd.config import Config, in_scope
+from azsqlcd.config import Config, for_env, in_scope
 from azsqlcd.model import (
     ABSENT_IN_OTHER,
     ABSENT_IN_SELF,
@@ -349,6 +349,7 @@ def align(
     Raises ToolError REFUSED before any batch: OUT_OF_SCOPE (as export --schema), MODEL_INVALID,
     MODULE_INVALID; ORD004 (a module cycle) from the deploy order.
     """
+    config = for_env(config, env)  # [env.<name>] not_managed: outside the scope, never read or written
     scope = onboard.export_scope(config, schema)
     in_files = plan.module_files(files)
     table_model = config.project.table_model
