@@ -253,6 +253,7 @@ class _Sent:
     dropped: list[str] = field(default_factory=list)
     unbound: set[str] = field(default_factory=set)
     unscoped: list[str] = field(default_factory=list)  # keys whose rows are marked: they left [scope]
+    skipped: dict[str, str | None] = field(default_factory=dict)  # migration id -> sha256: not managed here
     steps: list[str] = field(default_factory=list)
     # touched table key -> its columns before the batches; only for a plan with a dependant that
     # the engine cannot verify (_columns_before)
@@ -1011,6 +1012,8 @@ def _send_steps(run: _Run, unit: Unit, sent: _Sent) -> None:
             _refresh(run, step)
         elif step.kind == "unscope":  # a state write in this transaction; no statement on the object
             sent.unscoped.append(_have(step.object_key))
+        elif step.kind == "not_managed":  # a state write in this transaction; nothing is sent
+            sent.skipped[_have(step.migration)] = step.sha256
         else:
             raise RuntimeError(f"step {step.id} has the kind {step.kind!r}, which the runner does not know")
         _guard(run)
@@ -1289,7 +1292,7 @@ def _finish(
     """Design (e) 8 d to f after the batches: dependants, read-back, object rows, step rows, guard."""
     run_id = run.id
     run.step = "dependants"
-    if any(step.kind != "unscope" for step in unit.steps):
+    if any(step.kind not in ("unscope", "not_managed") for step in unit.steps):
         _sweep_dependants(run, sent)
     captures: Captures = {}
     readback = next((step for step in unit.steps if step.kind == "readback"), None)
@@ -1310,6 +1313,23 @@ def _finish(
             if nontx
             else state.insert_step(
                 run_id=run_id, kind="migration", status="ok", migration_id=migration, file_sha256=sha256
+            )
+        )
+    # set_aside.skipped reads these rows: the migration is never applied here (not_managed.py). A
+    # nontx step that resolve --mark-not-applied left has the row already: it gets the note
+    steps = {step.migration_id for step in recorded.steps}
+    for migration, sha256 in sent.skipped.items():
+        note = set_aside.skip_note(run.job.env)
+        writes.append(
+            state.set_step_status(migration, "not_applied", run_id=run_id, note=note)
+            if migration in steps
+            else state.insert_step(
+                run_id=run_id,
+                kind="migration",
+                status="not_applied",
+                migration_id=migration,
+                file_sha256=sha256,
+                note=note,
             )
         )
     if sent.modules or sent.dropped:

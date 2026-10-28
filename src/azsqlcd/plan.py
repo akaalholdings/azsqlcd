@@ -25,7 +25,19 @@ from itertools import batched
 from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
 from urllib.parse import quote
 
-from azsqlcd import catalog, catalog_tables, chain, lex, modules, names, products, release, set_aside, state
+from azsqlcd import (
+    catalog,
+    catalog_tables,
+    chain,
+    lex,
+    modules,
+    names,
+    not_managed,
+    products,
+    release,
+    set_aside,
+    state,
+)
 from azsqlcd.catalog import Difference, FenceFacts
 from azsqlcd.chain import Chain, ChainEntry, Migration
 from azsqlcd.config import Config, Scope, in_scope, resolve_target
@@ -62,8 +74,9 @@ class Step:
     """One action of a unit of work, in the order the runner takes it."""
 
     id: str  # unique in its unit; the runner reports a failure by this id
-    kind: str  # batch | unbind | deploy_module | drop_module | refresh | readback | unscope
-    migration: str | None = None  # batch, and an unbind or deploy_module that a directive asks for
+    kind: str  # batch | unbind | deploy_module | drop_module | refresh | readback | unscope | not_managed
+    # batch, not_managed, and an unbind or deploy_module that a directive asks for
+    migration: str | None = None
     batch: int | None = None  # number of the batch in the migration file, from 1
     batch_kind: str | None = None  # batch: model | data | raw
     line: int | None = None  # line in the migration file: first line of the batch, or the directive
@@ -1556,6 +1569,46 @@ def _with_urls(units: Sequence[Unit], repo_url: str, commit: str) -> tuple[Unit,
     return tuple(Unit(unit.kind, tuple(link(step) for step in unit.steps)) for unit in units)
 
 
+def _managed_files(bundle: Bundle, scope: Scope | None) -> Bundle:
+    """The release without the module files that [env.<name>] not_managed takes out of the scope:
+    such a module is not sent. With no not_managed: the release itself."""
+    if scope is None or not scope.not_managed:
+        return bundle
+    outside = {module.path for key, module in module_files(bundle.files).items() if not in_scope(scope, key)}
+    return replace(bundle, files={path: data for path, data in bundle.files.items() if path not in outside})
+
+
+def _not_managed_skips(
+    bundle: Bundle, recorded: State, aside: Aside, scope: Scope | None
+) -> tuple[dict[str, tuple[ChainEntry, set_aside.SetAside]], list[str]]:
+    """([env.<name>] not_managed) (the pending migrations that this plan skips and records,
+    {migration id: (chain entry, why)}; every pending migration skipped here, new or recorded).
+    A pending migration is one that pending_work takes: in the chain, not withdrawn, not applied
+    and not replaced by one that is. With no not_managed: nothing, and the chain is not read."""
+    if scope is None or not scope.not_managed or chain.SUM_PATH not in bundle.files:
+        return {}, []
+    ch = chain.parse_sum(_utf8(bundle.files, chain.SUM_PATH, "CHAIN_INVALID"))
+    ok = {step.migration_id for step in recorded.steps if step.migration_id and step.status == "ok"}
+    by_file = {entry.file: entry for entry in ch.entries}
+
+    def satisfied(entry: ChainEntry) -> bool:
+        while entry.file not in ok:
+            if entry.replaces is None:
+                return False
+            entry = by_file[entry.replaces]
+        return True
+
+    pending = [entry for entry in chain.effective_order(ch) if not entry.withdrawn and not satisfied(entry)]
+    candidates = [
+        (entry, _read_migration(bundle.files, entry)) for entry in pending if entry.file not in aside.active
+    ]
+    found = not_managed.skips(candidates, scope)
+    skips = {file: (by_file[file], item) for file, item in found.items()}
+    recorded_skips = {file for file, item in aside.active.items() if item.reason == set_aside.NOT_MANAGED}
+    skipped = [entry.file for entry in pending if entry.file in found or entry.file in recorded_skips]
+    return skips, skipped
+
+
 def compute_plan(
     bundle: Bundle,
     config: Config,
@@ -1617,10 +1670,15 @@ def compute_plan(
         ]
 
     aside = set_aside.read(session, config, recorded)
+    skips, skipped = _not_managed_skips(bundle, recorded, aside, scope)
+    if skips:
+        aside = Aside({**aside.active, **{file: item for file, (_, item) in skips.items()}}, aside.released)
     hold = products.hold(config, env, bundle.files) if config.products else None
     held_here = aside.active or (hold is not None and hold.held_migrations)
     model = table_hooks.model if table_hooks is not None and held_here else None
-    work = pending_work(bundle, recorded, config.project.module_chunk, aside, model, hold)
+    work = pending_work(
+        _managed_files(bundle, scope), recorded, config.project.module_chunk, aside, model, hold
+    )
     manifest = bundle.manifest
     recorded_sha = recorded.recorded_git_sha
     repo = repo_url.rstrip("/") if repo_url else None
@@ -1732,10 +1790,12 @@ def compute_plan(
             # migration creates is created (Work.set_aside)
             unrecorded = [key for key in unrecorded if hold.holds(key) is None]
         if unrecorded:  # Part 2 (c) 8
-            # under [scope] the object enters the scope: the baseline of its schema records it
+            # under [scope] the object enters the scope: the baseline of its schema records it. So
+            # does an object whose row the deploy marked when it left: [env.<name>] not_managed went
+            dropped = {fold(key) for key, row in recorded.objects.items() if row.status == "dropped"}
             run = (
                 f"run {_baseline_schemas(_schemas_of(unrecorded))}"
-                if scope is not None
+                if scope is not None or all(fold(key) in dropped for key in unrecorded)
                 else "run azsqlcd baseline"
             )
             raise refused(
@@ -1866,16 +1926,28 @@ def compute_plan(
         refresh = [] if units[0].kind == "nontx" else table_hooks.refresh_set(session, work)
         units = (_with_table_steps(units[0], refresh, table_keys),)
 
-    if leaving:
+    if leaving or skips:
         # a unit of its own, after the others: state writes only, no statement on an object
-        units = (
-            *units,
-            Unit("tx", tuple(Step(id=f"unscope:{key}", kind="unscope", object_key=key) for key in leaving)),
-        )
+        records = [Step(id=f"unscope:{key}", kind="unscope", object_key=key) for key in leaving]
+        records += [
+            Step(id=f"not_managed:{file}", kind="not_managed", migration=file, sha256=entry.sha256)
+            for file, (entry, _) in skips.items()
+        ]
+        units = (*units, Unit("tx", tuple(records)))
+    if leaving:
+        left = "[scope]" if scope is None or not scope.not_managed else f"[scope] or [env.{env}] not_managed"
         notes.append(
-            f"{len(leaving)} managed object(s) left [scope] (first: {leaving[0]}): the deploy marks their "
+            f"{len(leaving)} managed object(s) left {left} (first: {leaving[0]}): the deploy marks their "
             "rows as no longer managed (status dropped). Nothing is sent to them and nothing is dropped; "
             "an object that comes back is compared again by azsqlcd baseline --schema"
+        )
+    if scope is not None and scope.not_managed:
+        count = sum(
+            found.kind is not None and scope.not_managed_of(found.schema, found.name) is not None
+            for found in user_objects
+        )
+        notes.append(
+            f"not managed in {env}: {count} object(s); skipped migrations: {', '.join(skipped) or 'none'}"
         )
     unmanaged_kinds = names.MODULE_KINDS + (() if table_hooks is None else ("TABLE", "SEQUENCE", "SYNONYM"))
     # The history table of a system-versioned table is a row of sys.objects that the engine owns:

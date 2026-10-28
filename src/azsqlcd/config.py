@@ -19,7 +19,7 @@ import functools
 import re
 import tomllib
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from azsqlcd import names
@@ -109,6 +109,10 @@ class Scope:
     schemas: tuple[str, ...]
     exclude: tuple[str, ...] = ()
     exclude_objects: tuple[str, ...] = ()
+    # [env.<name>] not_managed of the environment of the command (for_env): patterns as
+    # exclude_objects, for that environment only. env names it in the reason.
+    not_managed: tuple[str, ...] = ()
+    env: str | None = None
 
     @property
     def every_schema(self) -> bool:
@@ -125,12 +129,20 @@ class Scope:
         return self.every_schema or fold(schema) in {fold(name) for name in (*self.schemas, *self.exclude)}
 
     def pattern_of(self, schema: str, name: str) -> str | None:
-        """The first pattern of exclude_objects that 'schema.name' matches; None when none does."""
-        return next((p for p in self.exclude_objects if _matches(p, schema, name)), None)
+        """The first pattern of exclude_objects, then of not_managed, that 'schema.name' matches;
+        None when none does. A pattern is split at its first dot, and each part matches its own
+        name."""
+        return next(
+            (p for p in (*self.exclude_objects, *self.not_managed) if _matches(p, schema, name)), None
+        )
+
+    def not_managed_of(self, schema: str, name: str) -> str | None:
+        """The first pattern of not_managed that 'schema.name' matches; None when none does."""
+        return next((p for p in self.not_managed if _matches(p, schema, name)), None)
 
     def only(self, schema: str) -> Scope:
         """This scope cut to one schema: the read of `export --schema` and `baseline --schema`."""
-        return Scope((schema,), (), self.exclude_objects)
+        return Scope((schema,), (), self.exclude_objects, self.not_managed, self.env)
 
 
 @dataclass(frozen=True)
@@ -163,6 +175,8 @@ def out_of_scope(scope: Scope | None, key: str) -> str | None:
     if not scope.has_schema(owner):
         return f"the schema {names.quote(owner)} is not in [scope] schemas"
     pattern = None if schema is None else scope.pattern_of(schema, name)
+    if pattern is not None and pattern not in scope.exclude_objects:
+        return f"it matches '{pattern}' of [env.{scope.env}] not_managed"
     if pattern is not None:
         return f"it matches '{pattern}' of [scope] exclude_objects"
     return None
@@ -210,6 +224,8 @@ class Environment:
     # asks the managed identity of the runner for the token. For the workflows only: a command on a
     # workstation signs in as the variable AZSQLCD_AUTH says.
     auth: str = AUTH_OIDC
+    # patterns schema.name of objects that this environment does not manage (for_env)
+    not_managed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -334,7 +350,7 @@ def _environment(
         "job_timeout_minutes",
         "targets",
     )
-    table = _table(raw, path, required, ("gated", "auth"))
+    table = _table(raw, path, required, ("gated", "auth", "not_managed"))
     for key in ("plan_identity", "deploy_identity"):
         if _str(table, key, path) not in identities:
             raise _fail(f"{path}.{key}", "names an identity that is not in [identities]")
@@ -378,6 +394,7 @@ def _environment(
         gated=_bool(table, "gated", path) if "gated" in table else name in _GATED_BY_DEFAULT,
         targets=tuple(targets),
         auth=auth,
+        not_managed=_patterns(table, "not_managed", path),
     )
 
 
@@ -443,6 +460,9 @@ def load_config(text: str) -> Config:
             raise _fail(f"unmanaged.objects[{i}]", "is listed more than once")
     ack = _table(doc.get("ack", {}), "ack", (), ("unmanaged_dependants",))
     scope = _scope(doc["scope"]) if "scope" in doc else None
+    for name, environment in env.items():
+        if scope is not None:
+            _check_pattern_schemas(scope, environment.not_managed, f"env.{name}.not_managed")
     return Config(
         project=project,
         identities=identities,
@@ -478,6 +498,9 @@ def _scope(raw: object) -> Scope:
     if not lists["schemas"]:
         raise _fail("scope.schemas", f'must name at least one schema, or be ["{EVERY_SCHEMA}"]')
     for key, values in lists.items():
+        if key == "exclude_objects":
+            _check_patterns(values, "scope.exclude_objects")
+            continue
         seen: set[str] = set()
         for i, value in enumerate(values):
             path = f"scope.{key}[{i}]"
@@ -500,6 +523,39 @@ def _scope(raw: object) -> Scope:
     for i, value in enumerate(found.exclude_objects):
         _check_pattern_schema(value, f"scope.exclude_objects[{i}]", found)
     return found
+
+
+def _check_patterns(values: tuple[str, ...], path: str) -> None:
+    """The patterns schema.name of [env.<name>] not_managed: checked as those of [scope] exclude_objects."""
+    seen: set[str] = set()
+    for i, value in enumerate(values):
+        here = f"{path}[{i}]"
+        _check_pattern(value, here, "a whole schema that is not managed goes in scope.exclude")
+        if fold(value) in seen:
+            raise _fail(here, "is listed more than once")
+        seen.add(fold(value))
+
+
+def _check_pattern_schemas(scope: Scope, values: tuple[str, ...], path: str) -> None:
+    for i, value in enumerate(values):
+        _check_pattern_schema(value, f"{path}[{i}]", scope)
+
+
+def _patterns(table: dict[str, Any], key: str, path: str) -> tuple[str, ...]:
+    values = _strings(table, key, path)
+    _check_patterns(values, f"{path}.{key}")
+    return values
+
+
+def for_env(config: Config, env: str) -> Config:
+    """The config as the commands of one environment see it: [env.<env>] not_managed joins the
+    patterns of [scope], so its objects are outside the scope there. With no not_managed, the
+    config itself: every function behaves as without the key. Without [scope], every schema."""
+    environment = config.env.get(env)
+    if environment is None or not environment.not_managed:
+        return config
+    base = config.scope or Scope((EVERY_SCHEMA,))
+    return replace(config, scope=replace(base, not_managed=environment.not_managed, env=env))
 
 
 def _check_pattern(value: str, path: str, whole_schema: str) -> None:

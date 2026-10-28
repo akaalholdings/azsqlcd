@@ -2633,3 +2633,171 @@ def test_verify_warns_when_a_new_hold_holds_a_merged_migration_that_mixes_the_pr
     pipe.push("balance stays in dev")
     _, verify = pipe.checks()
     assert verify.code == 0 and "MIXED_HOLD_MERGED" not in verify.out, verify.out
+
+
+# ------------------------------------------------------------------ [env.<name>] not_managed
+LEGACY_SCHEMA = Schema("legacy")
+OLD = Table(
+    "legacy",
+    "Old",
+    (Column("OldId", INT, False), Column("Name", TypeRef("nvarchar", length=100), True)),
+    (PrimaryKey("PK_Old", True, (KeyColumn("OldId"),)),),
+)
+OLD_NOTE = with_columns(OLD, NOTE)
+OLD_VIEW = (
+    "schema/views/legacy.vw_Old.sql",
+    "CREATE OR ALTER VIEW [legacy].[vw_Old] AS\nSELECT [OldId] FROM [legacy].[Old];\n",
+)
+OLD_VIEW_NAME = (OLD_VIEW[0], OLD_VIEW[1].replace("[OldId] FROM", "[OldId], [Name] FROM"))
+
+
+def not_managed_in(pipe: Pipeline, push: bool = True, **patterns: str) -> None:
+    """azsqlcd.toml with not_managed = <value> in [env.<env>] for each env; none: without the key.
+    push: commit it to main; else it is a file of the next pull request."""
+    text = toml()
+    for env, value in patterns.items():
+        text = text.replace(f"[env.{env}]\n", f"[env.{env}]\nnot_managed = {value}\n")
+    if text != pipe.read("azsqlcd.toml"):
+        pipe.write("azsqlcd.toml", text)
+        if push:
+            pipe.push("objects that an environment does not manage")
+
+
+def legacy_release(pipe: Pipeline, view: bool = False) -> tuple[Built, Built]:
+    """release_1, then a release with the schema legacy and its table (and its view)."""
+    first = release_1(pipe)
+    pipe.write_objects(LEGACY_SCHEMA, OLD)
+    if view:
+        pipe.write(*OLD_VIEW)
+    return first, pipe.release("the legacy schema", "create_legacy")
+
+
+def old_and_order(pipe: Pipeline) -> tuple[Built, str, str]:
+    """One pull request with two migrations: a note of legacy.Old, then a note of sales.Order."""
+    pipe.write_objects(OLD_NOTE)
+    old = pipe.gen("old_note").name
+    pipe.write_objects(ORDER_NOTE)
+    order = pipe.gen("order_note").name
+    return pipe.merge("a note of old and of an order", pipe.repo / "migrations" / order), old, order
+
+
+def test_a_migration_of_objects_that_test_does_not_manage_is_skipped_there_for_good(
+    pipe, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)  # baseline writes onboarding/<env>/ under the working directory
+    first, legacy_built = legacy_release(pipe)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    dev, test = pipe.dbs["dev"], pipe.dbs["test"]
+    not_managed_in(pipe, test='["legacy.*"]')
+    r1, old, order = old_and_order(pipe)
+    assert pipe.promote(r1, "dev").code == 0 and dev.model == r1.model
+
+    # test applies the sales migration and skips the legacy one: nothing is sent to legacy.Old
+    planned, notes = plan_notes(pipe, r1, "test")
+    assert planned.code == 0, planned.err
+    summary = f"not managed in test: 1 object(s); skipped migrations: {old}"
+    assert summary in notes and f"note: {summary}" in planned.out
+    sent = len(test.ddl)
+    done = pipe.promote(r1, "test")
+    assert done.code == 0, done.err
+    assert (dict(migrations(test))[old], dict(migrations(test))[order]) == ("not_applied", "ok")
+    assert test.ddl[sent:] and not any("[legacy]" in batch for batch in test.ddl[sent:])
+    skip = next(step for step in test.rows("step") if step["migration_id"] == old)
+    assert (skip["kind"], skip["note"]) == ("migration", "not_managed in test")
+    assert ("TABLE:[legacy].[Old]", "dropped") in rows(test, "TABLE")
+    assert test.model["TABLE:[legacy].[Old]"] == OLD and test.model["TABLE:[sales].[Order]"] == ORDER_NOTE
+
+    # drift in test is clean although legacy.Old differs from its file, also after a change by hand
+    test.out_of_band("ALTER TABLE [legacy].[Old] ADD [Extra] int NULL;")
+    clean = pipe.drift(r1, "test")
+    assert clean.code == 0 and "legacy" not in clean.out.lower(), clean.out
+
+    # the pattern goes: legacy.Old comes back and must be baselined again; the skip stays for good
+    not_managed_in(pipe, push=False)
+    r2 = pipe.merge("test manages the legacy schema again")
+    assert pipe.promote(r2, "dev").code == 0
+    back = pipe.promote(r2, "test")
+    assert (back.code, back.reason) == (22, "BASELINE_REQUIRED")
+    assert "azsqlcd baseline --schema legacy" in back.err and "TABLE:[legacy].[Old]" in back.err
+    test.out_of_band(
+        "ALTER TABLE [legacy].[Old] DROP COLUMN [Extra];",
+        "ALTER TABLE [legacy].[Old] ADD [Note] nvarchar(200) NULL;",
+    )
+    where = (*r2.where("test"), "--confirm-database", "sales", "--schema", "legacy")
+    assert pipe.tool("baseline", *where, db=test, out=pipe.out("report")).code == 0
+    sent = len(test.ddl)
+    done = pipe.promote(r2, "test")
+    assert done.code == 0, done.err
+    assert test.ddl[sent:] == [] and dict(migrations(test))[old] == "not_applied"
+    assert f"not_managed: {old} (skipped by run {skip['run_id']})" in done.report["warnings"]
+    assert test.model == r2.model and pipe.drift(r2, "test").code == 0
+
+
+def test_a_migration_that_touches_both_sides_is_refused_in_test_and_runs_in_dev(pipe):
+    first, legacy_built = legacy_release(pipe, view=True)
+    everywhere(pipe, first, legacy_built, envs=("dev", "test"))
+    dev, test = pipe.dbs["dev"], pipe.dbs["test"]
+    not_managed_in(pipe, test='["legacy.*"]')
+
+    # a module of legacy is not sent in test
+    pipe.write(*OLD_VIEW_NAME)
+    r1 = pipe.release("the name in the old view")
+    assert pipe.promote(r1, "dev").code == 0
+    assert texts(dev)["VIEW:[legacy].[vw_Old]"] == stored_text(OLD_VIEW_NAME[1])
+    sent = len(test.ddl)
+    done = pipe.promote(r1, "test")
+    assert done.code == 0, done.err
+    assert test.ddl[sent:] == [] and texts(test)["VIEW:[legacy].[vw_Old]"] == stored_text(OLD_VIEW[1])
+
+    # one migration that touches legacy.Old and sales.Order: refused in test, applied in dev
+    pipe.write_objects(OLD_NOTE, ORDER_NOTE)
+    r2 = pipe.release("a note of old and of an order", "old_and_order")
+    assert pipe.promote(r2, "dev").code == 0 and dev.model == r2.model
+    before = frozen(test)
+    mixed = pipe.promote(r2, "test")
+    assert (mixed.code, mixed.reason) == (22, "MIXED_NOT_MANAGED")
+    assert r2.file in mixed.err and "[legacy].[old]" in mixed.err and "[sales].[order]" in mixed.err
+    assert frozen(test) == before
+
+
+@pytest.mark.parametrize("patterns", [{}, {"dev": '["legacy.*"]'}])
+def test_without_not_managed_in_test_the_plan_and_the_state_writes_are_those_of_the_code_without_it(
+    pipe, monkeypatch, patterns
+):
+    """Strict default: the same story in test with the not_managed code paths cut out gives the same
+    batches, plan.json files, reports and state rows; also when another environment uses the key."""
+    first, legacy_built = legacy_release(pipe, view=True)
+    not_managed_in(pipe, **patterns)
+    r1, _, _ = old_and_order(pipe)
+
+    def story() -> tuple:
+        everywhere(pipe, first, legacy_built, envs=("test",))
+        test = pipe.dbs["test"]
+        planned, file = pipe.plan(r1, "test")
+        done = pipe.deploy(r1, "test", file)
+        drift = pipe.drift(r1, "test")
+        report = {key: value for key, value in done.report.items() if not key.endswith("_utc")}
+        return (
+            test.batches,
+            file.read_text(),
+            planned.out,
+            report,
+            drift.out,
+            test.rows("run"),
+            test.rows("step"),
+            test.rows("object"),
+        )
+
+    with_feature = story()
+
+    def cut(*args, **kwargs):
+        raise AssertionError("a not_managed code path ran without not_managed in the environment")
+
+    from azsqlcd import not_managed, plan, set_aside
+
+    monkeypatch.setattr(not_managed, "skips", cut)
+    monkeypatch.setattr(plan, "_managed_files", lambda bundle, scope: bundle)
+    monkeypatch.setattr(set_aside, "skipped", lambda steps: {})
+    monkeypatch.setattr(cli, "for_env", lambda config, env: config)
+    without = story()
+    assert with_feature == without

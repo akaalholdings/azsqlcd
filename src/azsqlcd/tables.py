@@ -518,7 +518,15 @@ class Hooks:
                         created.add(fold(_table_key(op.old[0], op.new_name)))
                     case _:
                         pass
-        return [key for key in self.model if fold(key) not in managed and fold(key) not in created]
+        # [env.<name>] not_managed: the model of the release holds files of objects outside the scope
+        outside = self._scope is not None and bool(self._scope.not_managed)
+        return [
+            key
+            for key in self.model
+            if fold(key) not in managed
+            and fold(key) not in created
+            and not (outside and not in_scope(self._scope, key))
+        ]
 
     # -------------------------------------------------------------- drift
     def _named_later(self, recorded: State) -> set[tuple[str, str]] | None:

@@ -55,7 +55,7 @@ from azsqlcd import (
     tables,
     trace,
 )
-from azsqlcd.config import ENVIRONMENTS, Config, load_config, resolve_target, targets_matrix
+from azsqlcd.config import ENVIRONMENTS, Config, for_env, load_config, resolve_target, targets_matrix
 from azsqlcd.errors import Exit, ToolError, refused, retry_safe, unknown
 from azsqlcd.session import (
     AUTH_SQL,
@@ -286,9 +286,10 @@ def _root_config(root: str) -> Config:
 
 
 def _release(call: _Call) -> tuple[release.Bundle, Config]:
-    """The release that --bundle and --digest name, checked, and its azsqlcd.toml."""
+    """The release that --bundle and --digest name, checked, and its azsqlcd.toml as the
+    environment of --env sees it ([env.<name>] not_managed, config.for_env)."""
     bundle = release.read_bundle(call.args.bundle, call.args.digest)
-    return bundle, _config_of(bundle.files, "the release")
+    return bundle, for_env(_config_of(bundle.files, "the release"), call.args.env)
 
 
 def _hooks(bundle: release.Bundle, config: Config) -> tables.Hooks | None:

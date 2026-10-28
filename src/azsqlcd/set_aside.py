@@ -5,16 +5,24 @@ and is no pending migration for the catch-up rule (A7). The releases after it de
 chain order, when what they run is independent of it (check()). Opt-in: with no reason switched
 on in azsqlcd.toml, read() reads nothing and returns NOTHING, and the planner is as before.
 
-One reason is built: `parked`. With [project] park_failed = true, a migration whose batch failed
-in a deploy of the environment is parked there until it is applied, withdrawn, or unparked
-(`azsqlcd resolve --unpark <file>`). The facts are the rows that exist; no column or status was
-added. A park is a deploy run row with the status failed or unknown, a failed_step that is a batch
-of the migration (`<file>#<n>`), and a note (the reason code of its end) in PARK_REASON_CODES. An
+Three reasons are built: `parked`, `held` and `not_managed`. With [project] park_failed = true, a migration
+whose batch failed in a deploy of the environment is parked there until it is applied, withdrawn, or
+unparked (`azsqlcd resolve --unpark <file>`). The facts are the rows that exist; no column or status
+was added. A park is a deploy run row with the status failed or unknown, a failed_step that is a
+batch of the migration (`<file>#<n>`), and a note (the reason code of its end) in PARK_REASON_CODES. An
 unpark is a later resolve step with the note unpark_note(file), as clear-run is (A5).
+
+held: [products.<name>] promote_to (products.py). The hold needs the environment and the files
+of the release, so plan.pending_work merges it (products.Hold.merge), not read().
+
+not_managed: [env.<name>] not_managed of azsqlcd.toml (not_managed.py). A pending migration that
+touches only objects that the environment does not manage is skipped there for good: a migration
+step with the status not_applied and the note skip_note(env). It is never applied there, also after
+the pattern went. Its objects are outside the scope there, so check() does not hold others to it.
 
 A later reason plugs in at three places: a name in REASONS, its way out in WAY_OUT, and its
 entries in read(). The rest (the plan notes, the catch-up past set-aside migrations, the
-independence check) is the same for every reason.
+independence check) is the same for every reason but not_managed, which check() skips.
 """
 
 from __future__ import annotations
@@ -34,13 +42,16 @@ from azsqlcd.state import FailedRun, State, StepRow
 
 PARKED = "parked"
 HELD = "held"  # products.py: a product whose promote_to comes before the environment
-REASONS = (PARKED, HELD)
+# [env.<name>] not_managed (not_managed.py): skipped for good in the environment
+NOT_MANAGED = "not_managed"
+REASONS = (PARKED, HELD, NOT_MANAGED)
 # what an operator does so that the migration runs, or never runs, here
 WAY_OUT = {
     PARKED: "end the park with azsqlcd resolve --unpark {file}, so that it runs first, or withdraw and "
     "replace it",
     HELD: "raise or remove promote_to of the product of {file} in azsqlcd.toml by pull request, so that it "
     "runs here first",
+    NOT_MANAGED: "withdraw and replace {file}: a migration skipped as not managed never runs here",
 }
 # the ends of a deploy that say the engine refused the batch itself. A lost session, a lock timeout
 # or a deadlock says nothing about the batch, and the batch is tried again
@@ -111,11 +122,31 @@ def parked(failed_runs: Sequence[FailedRun], steps: Sequence[StepRow]) -> Aside:
     return Aside(active, frozenset(released))
 
 
+def skip_note(env: str) -> str:
+    """The note of the step that records a migration skipped as not managed: a migration step with
+    the status not_applied. resolve --mark-not-applied writes another note, on a nontx step."""
+    return f"{NOT_MANAGED} in {env}"
+
+
+def skipped(steps: Sequence[StepRow]) -> dict[str, SetAside]:
+    """The migrations skipped for good as not managed: from the step rows, also after the pattern
+    went from azsqlcd.toml. Pure: the steps are read by read_state already."""
+    return {
+        step.migration_id: SetAside(step.migration_id, NOT_MANAGED, f"skipped by run {step.run_id}")
+        for step in steps
+        if step.migration_id is not None
+        and step.status == "not_applied"
+        and (step.note or "").startswith(skip_note(""))
+    }
+
+
 def read(session: Session, config: Config, recorded: State) -> Aside:
     """The set-aside facts of the database of the session. No batch is sent when no reason is on."""
+    skips = skipped(recorded.steps)
     if not config.project.park_failed:
-        return NOTHING
-    return parked(state.read_failed_runs(session), recorded.steps)
+        return Aside(skips) if skips else NOTHING
+    found = parked(state.read_failed_runs(session), recorded.steps)
+    return Aside({**found.active, **skips}, found.released) if skips else found
 
 
 def in_force(aside: Aside, steps: Sequence[StepRow], files: Mapping[str, bytes]) -> tuple[SetAside, ...]:
@@ -223,6 +254,10 @@ def check(
     feet = {migration.file: footprint(migration, model) for migration in pending}
     notes: dict[str, None] = {}
     for item, migration in aside:
+        if item.reason == NOT_MANAGED:
+            # its objects are outside the scope here, as an object of another schema is: a release
+            # that comes back to them is compared by baseline --schema first
+            continue
         mine = footprint(migration, model)
         for other in pending:
             theirs = feet[other.file]

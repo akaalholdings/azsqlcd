@@ -296,9 +296,10 @@ and `tables.py` are not in the map of "Build contracts".
 | `state.py` | setup script; reads and write statements of schema `azsqlcd` | config, errors, names, session, sqlerrors |
 | `catalog.py` | read-only catalog queries for modules: fence facts, captures, dependants, approver facts; `schema_condition`, `list_schemas` | config, errors, names, session, sqlerrors, state |
 | `catalog_tables.py` | read-only catalog queries for table-class objects: model, captures, engine-named constraints | catalog, config, errors, lex, model, names, session, state |
-| `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, release, session, set_aside, sqlerrors, state |
+| `plan.py` | bundle x recorded state x catalog to plan and `plan_sha256`; fence; syntax check | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), chain, config, errors, lex, model, modules, names, not_managed, products, release, session, set_aside, sqlerrors, state |
 | `set_aside.py` | set-aside migrations: the facts of a park, the independence check (A40) | chain, config, diff, errors, model, modules, names, parse, session, state |
 | `products.py` | products of `azsqlcd.toml`: membership, holds of an environment, plan notes, CODEOWNERS lines, the pull-request rules of holds (A42, A43) | chain, config, errors, modules, names, set_aside, state |
+| `not_managed.py` | `[env.<name>] not_managed`: which pending migrations an environment skips, `MIXED_NOT_MANAGED` (A39) | chain, config, errors, names, set_aside |
 | `runner.py` | lock, unit of work, guards, reconcile, `deploy`, the frame of a state-only run, the resolve actions | catalog, chain, config, errors, lex, model, modules, names, plan, release, session, set_aside, sqlerrors, state |
 | `tables.py` | the table model against a database: hooks for plan and runner, table export, baseline compare | catalog, catalog_tables, chain, config, diff, emit, errors, lex, model, names, parse, plan, release, session, state; runner for type checking only |
 | `onboard.py` | export, baseline, drift, drift export | catalog, catalog_tables (the history tables, and the renames of a name drift, A35), config, errors, lint, model (`fold`), modules, names, plan, release, runner, session, set_aside, state, tables |
@@ -985,6 +986,35 @@ stay in dev, never promoted, without a pull request that stays open. `docs/setup
   `MIXED_HOLD_MERGED` (warning), a merged migration that the changed `[products]` would hold as a
   whole. (d) `config.PROMOTION_ORDER` (dev to prod): `promote_to` is one of these, and nothing is
   held in `disposable`. (e) `azsqlcd products --codeowners` writes a space of a path as `\ `.
+
+### Objects that one environment does not manage (2026-10-28)
+
+Owner problem: the databases of some environments are not at the level of the files for some
+objects, so those objects cannot be managed there yet. `docs/setup.md`, section 7, "Objects that
+one environment does not manage", is the procedure.
+
+- A39. `[env.<name>] not_managed`: patterns `schema.name` with the syntax and checks of `[scope]
+  exclude_objects` (`config._check_patterns`). `config.for_env(config, env)` (applied by
+  `cli._release` for plan, deploy, drift, baseline and resolve) joins them to the scope as
+  `Scope.not_managed`; without [scope] the scope is every schema. In that environment the objects
+  are outside the scope: not read, compared, baselined, listed or sent (`plan._managed_files`
+  takes their module files out of the release for `pending_work`; `tables.Hooks.unrecorded_objects`
+  skips their model keys). A managed row of such an object is marked `dropped` (the `unscope` step).
+- Migrations (module `not_managed.py`): a pending migration that touches only such objects
+  (`set_aside.footprint`) is set aside with the reason `not_managed` for good. The plan gets a step
+  of the kind `not_managed` in the unit of state writes; the runner records a migration step with
+  the status `not_applied` and the note `not_managed in <env>` (`set_aside.skip_note`), and
+  `set_aside.skipped` reads it back from the steps, also after the pattern went. A migration that
+  touches managed objects too: 22 `MIXED_NOT_MANAGED`. `set_aside.check` does not hold other
+  migrations or modules to a `not_managed` one: its objects are outside the scope.
+- A pattern that went: the objects come back as in [scope]; the table `BASELINE_REQUIRED` names
+  `azsqlcd baseline --schema` also without [scope] when each unrecorded object has a `dropped`
+  row. The skipped migration never runs.
+- Plan note `not managed in <env>: <count> object(s); skipped migrations: ...` (outside
+  `plan_sha256`). Without the key in the environment, `for_env` returns the config itself and the
+  plan, the batches and the state writes are those of before.
+- New reason code `MIXED_NOT_MANAGED` (22). New plan finding `not_managed`. Proven against fakes
+  only.
 
 ---
 
