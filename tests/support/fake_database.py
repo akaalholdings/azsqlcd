@@ -954,11 +954,15 @@ class FakeDatabase:
             return []
         missing, gone = self.problems(module)
         if gone:
-            raise _engine(
+            error = _engine(
                 f'The dependencies reported for entity "{module.schema}.{module.name}" might not include '
                 "references to all columns. This is either because the entity references an object that "
                 "does not exist or because of an error in one or more statements in the entity."
             )
+            # the engine keeps the open transaction after this error, also with XACT_ABORT ON
+            # (live spike E2, catalog.broken_references)
+            error.keeps_transaction = True  # type: ignore[attr-defined]
+            raise error
         existing = self.objects()
         rows: Rows = []
         for name in module.references:
@@ -968,6 +972,15 @@ class FakeDatabase:
             code = found[2] if found else None
             rows.append((schema, entity, None, None if name in missing else 1, 0, 1, 0, code))
         return rows
+
+    def _q_table_columns(self, toks: list[Tok]) -> Rows:
+        """catalog.table_columns: (asked key, column name) of each table that exists, from the model."""
+        found: Rows = []
+        for key, name in self._requested(toks):
+            table = self.table(name)
+            if table is not None:
+                found += [(key, column.name) for column in table.columns]
+        return found
 
     def _q_table_facts(self, toks: list[Tok]) -> Rows:
         return [(key, 0, 0) for key, name in self._requested(toks) if self.table(name) is not None]
@@ -1199,8 +1212,8 @@ class FakeDbSession:
                 answer = self._run(batch)
             if rule is not None and rule.kills:
                 self._die()
-        except SqlError:
-            keep = rule is not None and rule.keeps_transaction
+        except SqlError as error:
+            keep = (rule is not None and rule.keeps_transaction) or getattr(error, "keeps_transaction", False)
             if not self.closed and self.trancount and self.options["XACT_ABORT"] and not keep:
                 self._rollback()
             raise

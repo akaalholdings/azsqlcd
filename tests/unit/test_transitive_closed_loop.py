@@ -5,13 +5,16 @@ module that the release changes, are refreshed in dependency order and checked a
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
 from azsqlcd import names
+from azsqlcd.model import Column, TypeRef
 from unit.test_closed_loop import (
     FUNCTION,
+    ORDER,
     ORDER_NO_REFERENCE,
     ORDER_WIDE,
     PROCEDURE,
@@ -270,3 +273,32 @@ def test_a_plan_reads_each_dependant_once_and_the_closure_once_for_each_set_of_r
     assert all(plan.out.count(f"dependant to check: {key} ") == 1 for key in checked)
     assert len(reads) == len(checked)
     assert sum("azsqlcd:dependant_chain" in batch for batch in batches) == 2  # two levels, one closure
+
+
+def test_a_pre_broken_view_on_a_view_does_not_undo_the_change_of_the_table_under_it(project):
+    """An upgrade from 0.2.0: a database where 0.2.0 left vw_OpenRefs broken (it still selects
+    [Reference] of vw_OpenOrders, which lost it; A37). A release that alters the table under both
+    reads the findings of the broken view before the change (error 2020). The engine keeps the unit
+    of work after that error (live spike E2, catalog.broken_references): the ALTER stays, only
+    vw_OpenOrders is refreshed, and the broken view is left as it is."""
+    first, db = with_open_refs(project)
+    project.write(*VIEW_NO_REFERENCE)
+    project.write(OPEN_REFS[0], OPEN_REFS[1].replace("[Reference]", "[OrderId]"))
+    second = project.release("the view loses the reference")
+    assert project.deploy(second, db).code == 0
+    key = ("sales", "vw_openrefs")
+    db.modules[key] = dataclasses.replace(  # the text that 0.2.0 deployed: a column that is gone
+        db.modules[key], references={("sales", "vw_openorders"): frozenset({"reference"})}
+    )
+    priority = Column("Priority", TypeRef("tinyint"), True)
+    project.write_objects(dataclasses.replace(ORDER, columns=(*ORDER.columns, priority)))
+    third = project.release("a priority of an order", "order_priority")
+    sent = len(db.ddl)
+
+    done = project.deploy(third, db)
+
+    assert done.code == 0, done.err
+    alter, *refreshed = db.ddl[sent:]
+    assert alter.endswith("\nALTER TABLE [sales].[Order] ADD [Priority] tinyint NULL;")
+    assert refreshed == [REFRESH_OPEN]  # the broken view is not refreshed
+    assert db.model[TABLE] == third.model[TABLE]
