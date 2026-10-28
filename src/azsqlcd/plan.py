@@ -1728,11 +1728,9 @@ def compute_plan(
     else:
         unrecorded = table_hooks.unrecorded_objects(work, recorded)
         if hold is not None:
-            # an object of a held product is not expected here: its migrations are held, and a
-            # held migration creates what it creates when it runs
-            held_work = replace(work, pending=(*work.pending, *hold.held_migrations.values()))
-            created_later = set(unrecorded) - set(table_hooks.unrecorded_objects(held_work, recorded))
-            unrecorded = [key for key in unrecorded if key not in created_later and hold.holds(key) is None]
+            # an object of a held product is not expected here: its migrations are held. What a held
+            # migration creates is created (Work.set_aside)
+            unrecorded = [key for key in unrecorded if hold.holds(key) is None]
         if unrecorded:  # Part 2 (c) 8
             # under [scope] the object enters the scope: the baseline of its schema records it
             run = (

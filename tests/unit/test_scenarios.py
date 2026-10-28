@@ -2342,6 +2342,33 @@ def test_a_product_held_after_dev_reaches_sandbox_when_a_later_release_raises_it
     assert pipe.drift(r3, "sandbox").code == 0
 
 
+BAL = Schema("bal")
+BAL_BALANCE = Table(
+    "bal",
+    "Balance",
+    (Column("BalanceId", INT, False),),
+    (PrimaryKey("PK_bal_Balance", True, (KeyColumn("BalanceId"),)),),
+)
+
+
+def test_a_held_migration_that_creates_the_schema_of_its_product_does_not_ask_for_a_baseline(pipe):
+    """The schema is no object of the product, and the held migration creates it: Work.set_aside."""
+    first = release_1(pipe)
+    everywhere(pipe, first, envs=("dev", "sandbox"))
+    sandbox = pipe.dbs["sandbox"]
+    pipe.write(
+        "azsqlcd.toml",
+        toml() + '\n[products.bal]\nobjects = ["bal.*"]\nowners = ["@bal-owner"]\npromote_to = "dev"\n',
+    )
+    pipe.write_objects(BAL, BAL_BALANCE)
+    r1 = pipe.release("the schema bal and its table", "bal")
+    assert pipe.promote(r1, "dev").code == 0
+    done = pipe.promote(r1, "sandbox")
+    assert done.code == 0, done.err
+    assert r1.file not in dict(migrations(sandbox)) and "SCHEMA:[bal]" not in sandbox.model
+    assert f'held: {r1.file} (product bal, promote_to = "dev")' in done.report["warnings"]
+
+
 def test_a_migration_that_mixes_a_held_product_and_shared_objects_fails_verify_and_gen(pipe):
     release_1(pipe)
     pipe.write_objects(BALANCE, ORDER_NOTE)
