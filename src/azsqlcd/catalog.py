@@ -26,6 +26,7 @@ from azsqlcd.state import SCHEMA, capture_sha256, literal, rows
 
 APPLOCK_RESOURCE = "azsqlcd:deploy"  # the session applock of deploy; plan only tests it (A4)
 KEY_CHUNK = 500  # keys in one batch; more keys are read in several batches
+DEPENDANT_DEPTH = 32  # levels of modules on modules that dependant_closure reads (A35)
 # broken_references: the engine could not bind the module. The read of
 # sys.dm_sql_referenced_entities raises 2020 alone (a procedure names a table that does not exist),
 # or 207 (a column is gone) or 208 (an object is gone) before it; the driver returns only the first
@@ -489,6 +490,17 @@ class Dependant:
     key: str
     kind: str  # VIEW | PROCEDURE | FUNCTION | TRIGGER
     schema_bound: bool
+    # A35: the keys from the object that the module was found through to the root, nearest first.
+    # Empty for a module that references a root directly
+    via: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Closure:
+    """Result of dependant_closure."""
+
+    dependants: tuple[Dependant, ...]  # a module after every found module that it references
+    capped: bool  # DEPENDANT_DEPTH was reached: modules further away were not read
 
 
 def dependants_of(session: Session, table_keys: Collection[str]) -> list[Dependant]:
@@ -510,6 +522,111 @@ def dependants_of(session: Session, table_keys: Collection[str]) -> list[Dependa
             key = names.object_key(kind, schema, name)
             found[key] = Dependant(key, kind, flag(schema_bound))
     return [found[key] for key in sorted(found)]
+
+
+def _fold(key: str) -> str:
+    return key.casefold()
+
+
+def _referencing(session: Session, keys: Collection[str]) -> list[tuple[Dependant, str]]:
+    """(module, the key of the asked object that it references) for each reference, in row order."""
+    asked: dict[tuple[str, str], str] = {}
+    for key in keys:
+        _, schema, name = names.parse_object_key(key)
+        asked[(schema or "").casefold(), name.casefold()] = key
+    found: list[tuple[Dependant, str]] = []
+    for chunk in _chunks(keys):
+        batch = (
+            "/* azsqlcd:dependant_chain */ SELECT DISTINCT s.[name], o.[name], RTRIM(o.[type]), "
+            "m.[is_schema_bound], rs.[name], ro.[name] FROM sys.sql_expression_dependencies AS d "
+            "JOIN sys.objects AS o ON o.[object_id] = d.[referencing_id] "
+            "JOIN sys.schemas AS s ON s.[schema_id] = o.[schema_id] "
+            "JOIN sys.sql_modules AS m ON m.[object_id] = o.[object_id] "
+            "JOIN sys.objects AS ro ON ro.[object_id] = d.[referenced_id] "
+            "JOIN sys.schemas AS rs ON rs.[schema_id] = ro.[schema_id] "
+            "WHERE d.[referenced_class] = 1 "
+            f"AND d.[referenced_id] IN ({', '.join(object_id_sql(key) for key in chunk)}) "
+            f"AND o.[type] IN ({type_list(*names.MODULE_KINDS)});"
+        )
+        for schema, name, type_code, schema_bound, used_schema, used_name in sorted(
+            rows(session, batch), key=lambda row: tuple(str(value) for value in row)
+        ):
+            used = asked.get((str(used_schema).casefold(), str(used_name).casefold()))
+            if used is None:
+                continue
+            kind = MODULE_TYPES[str(type_code).strip()]
+            found.append((Dependant(names.object_key(kind, schema, name), kind, flag(schema_bound)), used))
+    return found
+
+
+def dependant_closure(
+    session: Session, table_keys: Collection[str], modules: Collection[str] = ()
+) -> Closure:
+    """A35: the modules that reference one of the tables, or one of the modules, at any depth.
+
+    The first level is dependants_of(table_keys), the query of before. Each later level asks
+    sys.sql_expression_dependencies once (one batch for each KEY_CHUNK keys) for the modules that
+    reference what the level before found. A module is read once, so a cycle ends. The search
+    stops at DEPENDANT_DEPTH levels (Closure.capped). The order is the order of refresh: a module
+    after each found module that it references, else by key; in a cycle the first by key goes
+    first. A module that references a table directly has no path; the root of a longer path is
+    read once more only when there is more than one table.
+    """
+    found: dict[str, Dependant] = {}  # folded key -> module
+    parent: dict[str, str] = {}  # folded key -> the key of the object it was found through
+    uses: dict[str, set[str]] = {}  # folded key -> folded keys of the objects it references
+    for dependant in dependants_of(session, table_keys) if table_keys else []:
+        found[_fold(dependant.key)] = dependant
+    asked = {_fold(key) for key in table_keys}
+    frontier = sorted({*(d.key for d in found.values()), *modules}, key=_fold)
+    depth, capped = 1, False
+    while frontier:
+        if depth >= DEPENDANT_DEPTH:
+            capped = True
+            break
+        asked |= {_fold(key) for key in frontier}
+        new: dict[str, str] = {}
+        for dependant, used in _referencing(session, frontier):
+            key = _fold(dependant.key)
+            if key == _fold(used):
+                continue  # a procedure that calls itself
+            uses.setdefault(key, set()).add(_fold(used))
+            if key not in found:
+                found[key], parent[key] = dependant, used
+            if key not in asked:
+                new[key] = found[key].key
+        frontier = sorted(new.values(), key=_fold)
+        depth += 1
+    roots = {_fold(key): key for key in table_keys}
+    direct = [key for key in found if key not in parent]
+    if len(roots) > 1 and len(found) > len(direct):
+        root_of = {_fold(d.key): used for d, used in _referencing(session, list(roots.values()))}
+    else:
+        root_of = {key: next(iter(roots.values())) for key in direct} if roots else {}
+
+    def path(key: str) -> tuple[str, ...]:
+        steps: list[str] = []
+        while key in parent and len(steps) <= DEPENDANT_DEPTH:
+            steps.append(parent[key])
+            key = _fold(parent[key])
+        if key in root_of and _fold(root_of[key]) not in {_fold(step) for step in steps}:
+            steps.append(root_of[key])
+        return tuple(steps)
+
+    with_paths = {
+        key: Dependant(d.key, d.kind, d.schema_bound, path(key)) if key in parent else d
+        for key, d in found.items()
+    }
+    ordered: list[Dependant] = []
+    left = sorted(with_paths.values(), key=lambda d: d.key)
+    while left:
+        waiting = {_fold(d.key) for d in left}
+        ready = [d for d in left if not (uses.get(_fold(d.key), set()) - {_fold(d.key)}) & waiting]
+        ready = ready or left[:1]
+        ordered += ready
+        done = {_fold(d.key) for d in ready}
+        left = [d for d in left if _fold(d.key) not in done]
+    return Closure(tuple(ordered), capped)
 
 
 def table_columns(session: Session, table_keys: Collection[str]) -> dict[str, frozenset[str]]:

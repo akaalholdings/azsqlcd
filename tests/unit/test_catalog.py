@@ -644,6 +644,7 @@ def every_query(key_schema: str, key_name: str) -> list[str]:
     catalog.list_user_objects(db)
     catalog.object_exists(db, module)
     catalog.dependants_of(db, [table])
+    catalog.dependant_closure(db, [], modules=[module])  # one batch: the level after the modules
     catalog.broken_references(db, module)
     catalog.table_facts(db, [table])
     catalog.export_facts(db)
@@ -661,6 +662,7 @@ FUNCTIONS = (
     "list_user_objects",
     "object_exists",
     "dependants_of",
+    "dependant_chain",
     "broken_references",
     "table_facts",
     "export_facts",
@@ -681,7 +683,7 @@ def test_every_type_code_that_a_batch_returns_is_trimmed_in_the_batch():
             trimmed, compared = found.group(1), found.group(2)
             assert trimmed or compared, batch
             returned += bool(trimmed)
-    assert returned == 10  # every select list that holds a type code, counted so that none is missed
+    assert returned == 11  # every select list that holds a type code, counted so that none is missed
 
 
 @pytest.mark.parametrize(("padded", "code"), [("U ", "U"), ("V ", "V"), ("P ", "P"), ("TR", "TR")])
@@ -725,7 +727,7 @@ def test_a_quote_or_bracket_in_a_name_cannot_break_out_of_the_batch_text():
         assert shape(hostile_batch) == shape(plain_batch), function  # the name moved no token
         assert "DROP" not in words(hostile_batch), function
     with_names = [batch for batch in hostile if "OBJECT_ID(" in batch or "referenced_entities(" in batch]
-    assert len(with_names) == 6
+    assert len(with_names) == 7
     for batch in with_names:
         assert asked in strings(batch)  # the engine reads the whole name back from the literal
 
